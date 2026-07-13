@@ -13,6 +13,7 @@ import logging
 import os
 import re
 import subprocess
+import sys
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
@@ -28,6 +29,15 @@ ToolError = ToolErrorBase
 MAX_TOOL_OUTPUT = 30_000
 MAX_READ_LINES = 2000
 MAX_LINE_LEN = 500
+
+# On Windows the desktop app runs under pythonw (no console of its own), so
+# every console child process (PowerShell, git, setx) would otherwise flash
+# its own black window on screen. CREATE_NO_WINDOW tells Windows not to make
+# one. Empty on other platforms, and the flag is only referenced on Windows.
+NO_WINDOW_KWARGS = (
+    {"creationflags": subprocess.CREATE_NO_WINDOW}
+    if sys.platform == "win32" else {}
+)
 
 DEFAULT_IGNORES = {
     ".git", "node_modules", "__pycache__", ".venv", "venv", ".env",
@@ -289,7 +299,7 @@ def run_powershell(command: str, timeout_seconds: int = 120) -> str:
             ["powershell", "-NoProfile", "-NonInteractive",
              "-ExecutionPolicy", "Bypass", "-Command", wrapped],
             capture_output=True, timeout=timeout_seconds,
-            cwd=str(Path.cwd()),
+            cwd=str(Path.cwd()), **NO_WINDOW_KWARGS,
         )
     except subprocess.TimeoutExpired:
         raise ToolErrorBase(f"Command timed out after {timeout_seconds}s: {command[:200]}", ErrorSeverity.ERROR)

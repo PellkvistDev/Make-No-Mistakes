@@ -70,10 +70,12 @@ AGENT_MD_NAMES = ("GLM.md", "AGENTS.md", "CLAUDE.md")
 
 
 def _git_info(cwd: Path) -> str:
+    from .tools import NO_WINDOW_KWARGS
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True, text=True, timeout=5, cwd=str(cwd),
+            **NO_WINDOW_KWARGS,
         )
         if r.returncode != 0:
             return "Is a git repository: no"
@@ -81,6 +83,7 @@ def _git_info(cwd: Path) -> str:
         s = subprocess.run(
             ["git", "status", "--porcelain"],
             capture_output=True, text=True, timeout=5, cwd=str(cwd),
+            **NO_WINDOW_KWARGS,
         )
         dirty = len([ln for ln in s.stdout.splitlines() if ln.strip()])
         return f"Is a git repository: yes (branch: {branch}, {dirty} modified/untracked files)"

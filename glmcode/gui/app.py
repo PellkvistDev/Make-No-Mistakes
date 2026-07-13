@@ -149,9 +149,11 @@ def _thumb_uri(path: Path, size: int = 360) -> str:
 
 
 def persist_env_var(name: str, value: str) -> bool:
+    from ..tools import NO_WINDOW_KWARGS
     os.environ[name] = value
     try:
-        r = subprocess.run(["setx", name, value], capture_output=True, timeout=15)
+        r = subprocess.run(["setx", name, value], capture_output=True, timeout=15,
+                           **NO_WINDOW_KWARGS)
         return r.returncode == 0
     except OSError:
         return False

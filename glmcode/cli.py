@@ -90,8 +90,10 @@ def persist_env_var(name: str, value: str) -> bool:
     os.environ[name] = value
     if os.name != "nt":
         return False
+    from .tools import NO_WINDOW_KWARGS
     try:
-        r = subprocess.run(["setx", name, value], capture_output=True, timeout=15)
+        r = subprocess.run(["setx", name, value], capture_output=True, timeout=15,
+                           **NO_WINDOW_KWARGS)
         return r.returncode == 0
     except OSError:
         return False
