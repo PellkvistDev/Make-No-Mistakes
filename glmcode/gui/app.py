@@ -581,6 +581,20 @@ def main():
         pass
     _startup_log(f"main() start  platform={sys.platform}  python={sys.version.split()[0]}")
 
+    # Give the process its own taskbar identity. Without an explicit
+    # AppUserModelID, Windows groups the window under pythonw.exe and can't
+    # attach our window icon to the taskbar button (it shows a blank/generic
+    # icon). Setting this makes the window's own icon appear on the taskbar.
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "MakeNoMistakes.DesktopApp"
+            )
+            _startup_log("set AppUserModelID")
+        except Exception as e:
+            _startup_log(f"AppUserModelID failed: {e}")
+
     # Verify the web assets exist (common issue if files are missing)
     index = WEB_DIR / "index.html"
     if not index.is_file():
