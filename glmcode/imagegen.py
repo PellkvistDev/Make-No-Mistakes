@@ -68,6 +68,21 @@ def _install_packages(status: StatusFn = None) -> None:
             "Installing local image-generation dependencies (first time only, "
             "~1-2GB download; this can take several minutes)..."
         )
+    # If an incompatible transformers is already installed somewhere on
+    # sys.path (e.g. in the interpreter's own site-packages), installing the
+    # pinned version with --user can land in a *different* site-packages
+    # directory that doesn't take precedence -- the broken copy keeps
+    # shadowing the fix and the same import error comes back. Uninstall it
+    # first so there is only ever one copy, wherever pip puts the new one.
+    try:
+        import importlib.util
+        if importlib.util.find_spec("transformers") is not None and not _transformers_version_ok():
+            subprocess.run(
+                [sys.executable, "-m", "pip", "uninstall", "-y", "transformers"],
+                capture_output=True, text=True, timeout=120, **NO_WINDOW_KWARGS,
+            )
+    except Exception:
+        pass
     # --upgrade matters here, not just for freshness: it's what actually
     # corrects an already-installed-but-incompatible transformers (see
     # REQUIRED_PACKAGES) -- without it, pip could see transformers is
