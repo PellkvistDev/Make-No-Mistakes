@@ -4,6 +4,7 @@ and token usage in ~/.glmcode/sessions/<id>.json, like Claude Code / Codex."""
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from datetime import datetime, timezone
@@ -11,6 +12,19 @@ from pathlib import Path
 
 from .config import CONFIG_DIR
 from .prompts import CONTINUE_NUDGE
+
+_IMAGE_MARKER_RE = re.compile(r"^\[image: (.*?)\](?:\s*\[caption: (.*?)\])?\s*")
+
+
+def _extract_image_marker(text: str) -> tuple[str, str, str]:
+    """Pull the path/caption out of a generate_image/show_image tool result
+    (see agent.Agent._image_marker) so history replay can rebuild the inline
+    image card instead of showing the raw marker as tool-result text."""
+    m = _IMAGE_MARKER_RE.match(text or "")
+    if not m:
+        return "", "", text or ""
+    path, caption = m.group(1), m.group(2) or ""
+    return path, caption, text[m.end():].strip()
 
 SESSIONS_DIR = CONFIG_DIR / "sessions"
 
@@ -169,11 +183,18 @@ def to_display(messages: list) -> list[dict]:
                 except json.JSONDecodeError:
                     args = {}
                 res = results.get(tc.get("id"), "")
+                name = fn.get("name", "?")
+                is_error = res.startswith("ERROR") or res.startswith("User denied")
+                if name in ("generate_image", "show_image") and not is_error:
+                    path, caption, clean = _extract_image_marker(res)
+                    items.append({"kind": "tool_image", "name": name, "path": path,
+                                 "caption": caption, "result": clean})
+                    continue
                 items.append({
                     "kind": "tool",
-                    "name": fn.get("name", "?"),
+                    "name": name,
                     "args": args,
                     "result": res[:12000],
-                    "error": res.startswith("ERROR") or res.startswith("User denied"),
+                    "error": is_error,
                 })
     return items

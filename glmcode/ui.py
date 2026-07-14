@@ -277,3 +277,6 @@ class ConsoleEvents(AgentEvents):
 
     def ask_permission(self, title: str, preview: str, always_label: str | None = None):
         return ask_permission(title, preview, always_label)
+
+    def show_image(self, path: str, caption: str = "") -> None:
+        info(f"[image] {path}" + (f" — {caption}" if caption else ""))

@@ -1068,11 +1068,47 @@ TOOL_SCHEMAS = [
         },
         ["path"],
     ),
+    _schema(
+        "generate_image",
+        "Generate an image locally from a text prompt using a small, fast Stable "
+        "Diffusion model (stabilityai/sd-turbo) that runs on this machine -- no API key "
+        "or per-image cost. Good for icons, illustrations, placeholder art, banners, and "
+        "mockup imagery. The FIRST call installs some Python packages and downloads the "
+        "model (a few GB total, one-time, needs network access); every call after that "
+        "runs fully offline and is fast. The result is saved as a PNG and automatically "
+        "shown to the user in the chat -- you do not need to also call show_image for it.",
+        {
+            "prompt": {"type": "string",
+                      "description": "What to generate, described precisely"},
+            "path": {"type": "string",
+                    "description": "Where to save the PNG (optional; auto-named under "
+                                   "'generated/' in the project folder if omitted)"},
+            "steps": {"type": "integer",
+                     "description": "Inference steps, 1-4 (default 1, the fastest; "
+                                    "2-4 can look slightly better but is slower)"},
+        },
+        ["prompt"],
+    ),
+    _schema(
+        "show_image",
+        "Display an existing local image file inline in the chat for the user to see. "
+        "This does NOT analyze the image (use view_image for that) -- it is purely a "
+        "visual side channel for the human. Use it to show the user a screenshot, "
+        "diagram, or other image file found in the project.",
+        {
+            "path": {"type": "string", "description": "Path to the image file"},
+            "caption": {"type": "string",
+                       "description": "Optional short caption to show with the image"},
+        },
+        ["path"],
+    ),
 ]
 
 # Handled specially by the agent (needs the client/events), not via TOOL_FUNCTIONS.
 SUBAGENT_TOOL = "spawn_agents"
 VIEW_IMAGE_TOOL = "view_image"
+GENERATE_IMAGE_TOOL = "generate_image"
+SHOW_IMAGE_TOOL = "show_image"
 
 
 TOOL_FUNCTIONS = {
@@ -1102,7 +1138,9 @@ TOOL_FUNCTIONS = {
 }
 
 # Tools that never modify anything and run without permission prompts.
-READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "todo_write"}
+# show_image is a pure local UI side-channel (no filesystem writes, nothing
+# sent to any third party), so it's as safe as read_file.
+READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "todo_write", "show_image"}
 # Tools that modify files (auto-approved in autoedit mode).
 FILE_WRITE_TOOLS = {"write_file", "edit_file", "git_commit"}
 # Network read tools (prompt in ask mode, auto-approved in autoedit/yolo).
@@ -1111,6 +1149,10 @@ FILE_WRITE_TOOLS = {"write_file", "edit_file", "git_commit"}
 NETWORK_TOOLS = {"fetch_url", "web_search", "view_image"}
 # Git tools (prompt in ask mode, auto-approved in autoedit/yolo).
 GIT_TOOLS = {"git_push", "git_pull", "git_branch_list"}
+# Local image generation: creates a new file, and the first call installs
+# packages + downloads model weights. Gated like a file-write, but with its
+# own preview since the output is binary (can't diff it like write_file).
+IMAGE_GEN_TOOLS = {"generate_image"}
 
 
 def execute_tool(name: str, args: dict) -> str:

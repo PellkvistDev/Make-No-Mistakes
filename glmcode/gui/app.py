@@ -109,6 +109,14 @@ class WebEvents(AgentEvents):
         self.emit("subagent", id=id, name=name, status=status,
                   mission=mission, summary=summary)
 
+    # images ----------------------------------------------------------------
+    def show_image(self, path, caption=""):
+        try:
+            src = _data_uri(Path(path))
+        except Exception:
+            src = ""
+        self.emit("show_image", path=str(path), caption=caption or "", src=src)
+
     # permissions ------------------------------------------------------------
     def ask_permission(self, title, preview, always_label=None):
         rid = uuid.uuid4().hex
@@ -365,9 +373,18 @@ class Api:
         restore_todos(todos)
         self.cfg.last_session_id = sid
         save_config(self.cfg)
+        # cwd is already switched above, so relative image paths saved by
+        # generate_image/show_image resolve correctly here.
+        items = to_display(messages)
+        for it in items:
+            if it.get("kind") == "tool_image" and it.get("path"):
+                try:
+                    it["src"] = _data_uri(Path(it["path"]))
+                except OSError:
+                    it["src"] = ""  # file moved/deleted since it was shown
         return {
             "ok": True, "id": sid, "cwd": str(Path.cwd()), "cwd_missing": not cwd_ok,
-            "items": to_display(messages), "todos": get_todos(),
+            "items": items, "todos": get_todos(),
             "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
             "context": agent.context_estimate(),
         }

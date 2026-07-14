@@ -15,7 +15,8 @@ import difflib
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .tools import READONLY_TOOLS, FILE_WRITE_TOOLS, NETWORK_TOOLS, GIT_TOOLS, TOOL_FUNCTIONS
+from .tools import (READONLY_TOOLS, FILE_WRITE_TOOLS, NETWORK_TOOLS, GIT_TOOLS,
+                    IMAGE_GEN_TOOLS, TOOL_FUNCTIONS)
 
 # Module-level command alias registry
 _COMMAND_ALIASES: dict = {}
@@ -76,6 +77,18 @@ class PermissionEngine:
             if self.mode == "autoedit":
                 return Decision(True)
             return self._ask_generic(name, str(args)[:500], asker)
+
+        if name in IMAGE_GEN_TOOLS:
+            if self.mode == "autoedit":
+                return Decision(True)
+            from .imagegen import packages_installed
+            preview = (f"Prompt: {args.get('prompt', '?')}\n"
+                      f"Save to: {args.get('path') or '(auto-named under generated/)'}")
+            if not packages_installed():
+                preview += ("\n\n(First use: installs ~1-2GB of local ML packages and "
+                           "downloads the sd-turbo model (~1.7GB), one-time. Runs fully "
+                           "offline after that.)")
+            return self._ask_generic(name, preview, asker)
 
         return self._ask_generic(name, str(args)[:500], asker)
 

@@ -115,6 +115,27 @@ layout, colors) which is handed to the stronger coding model (`/vision
 describe`). Use `/vision direct` to run image turns entirely on the vision
 model instead.
 
+The agent can also look at images on its own mid-task with `view_image` (e.g.
+a screenshot it found in the repo), without you attaching anything.
+
+### Local image generation
+
+The agent can generate images itself — icons, placeholder art, banners, mockup
+imagery — using [stabilityai/sd-turbo](https://huggingface.co/stabilityai/sd-turbo),
+a small, fast Stable Diffusion model that runs **on your machine**, so there's
+no API key or per-image cost.
+
+The **first** time it's used, it installs some Python packages (`torch`,
+`diffusers`, `transformers`, `accelerate`) and downloads the model weights —
+a few GB total, one-time, needs network access. Every call after that runs
+fully offline. In `ask` mode you'll get a permission prompt before this
+happens, which tells you about the first-run download; it also runs faster
+with an NVIDIA GPU, but works on CPU too (just slower).
+
+Generated images are saved as PNGs (default: `generated/` in the project
+folder) and shown inline in the chat automatically. The agent can also show
+you any existing image file with `show_image`, without analyzing it.
+
 ### Permission modes
 
 | Mode | File edits | Shell commands |

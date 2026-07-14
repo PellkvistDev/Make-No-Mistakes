@@ -46,3 +46,7 @@ class AgentEvents:
     def subagent(self, id: str, name: str, status: str,
                  mission: str = "", summary: str = "") -> None:
         """Progress for a parallel sub-agent. status: 'running' | 'done' | 'error'."""
+
+    # -- images ------------------------------------------------------------ #
+    def show_image(self, path: str, caption: str = "") -> None:
+        """Display an image inline for the user. No-op unless a UI is attached."""

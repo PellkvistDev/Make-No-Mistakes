@@ -7,7 +7,9 @@ AgentEvents sink (terminal: ui.ConsoleEvents, desktop app: gui.WebEvents).
 from __future__ import annotations
 
 import json
+import re
 import threading
+import uuid
 from pathlib import Path
 
 from .api import ApiError, Cancelled, Usage, ZaiClient, estimate_tokens
@@ -16,8 +18,8 @@ from .events import AgentEvents
 from .permissions import PermissionEngine
 from .prompts import (COMPACT_PROMPT, CONTINUE_NUDGE, SUBAGENT_PREAMBLE,
                       VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT, build_system_prompt)
-from .tools import (SUBAGENT_TOOL, TOOL_SCHEMAS, VIEW_IMAGE_TOOL, ToolError,
-                    execute_tool, get_todos)
+from .tools import (GENERATE_IMAGE_TOOL, SHOW_IMAGE_TOOL, SUBAGENT_TOOL,
+                    TOOL_SCHEMAS, VIEW_IMAGE_TOOL, ToolError, execute_tool, get_todos)
 
 MAX_SUBAGENTS = 6
 # Safety cap on auto-continue-on-truncation rounds (see _call_model_until_done).
@@ -161,13 +163,14 @@ class Agent:
                 return True
         return False
 
-    def _view_image(self, path: str, question: str = "") -> str:
-        """The agent's own tool for looking at an image file (as opposed to
-        attach_images, which handles an image the user attached)."""
+    @staticmethod
+    def _resolve_existing_image(path: str, tool_name: str) -> Path:
+        """Resolve+validate a path argument that must point at an existing,
+        supported image file. Shared by view_image and show_image."""
         from .api import IMAGE_EXTENSIONS
         raw = str(path or "").strip()
         if not raw:
-            raise ToolError("view_image needs a 'path'")
+            raise ToolError(f"{tool_name} needs a 'path'")
         p = Path(raw).expanduser()
         if not p.is_absolute():
             p = Path.cwd() / p
@@ -178,6 +181,20 @@ class Agent:
                 f"Not a supported image type ({p.suffix or '(none)'}): {p}. "
                 f"Supported: {', '.join(sorted(IMAGE_EXTENSIONS))}"
             )
+        return p
+
+    @staticmethod
+    def _display_path(p: Path) -> str:
+        """cwd-relative path for a nicer/portable tool-result marker, when possible."""
+        try:
+            return str(p.relative_to(Path.cwd()))
+        except ValueError:
+            return str(p)
+
+    def _view_image(self, path: str, question: str = "") -> str:
+        """The agent's own tool for looking at an image file (as opposed to
+        attach_images, which handles an image the user attached)."""
+        p = self._resolve_existing_image(path, "view_image")
         focus = (f"What the agent needs to know: {question.strip()}" if question and question.strip()
                  else "No specific focus was given; describe the image exhaustively.")
         prompt = VIEW_IMAGE_PROMPT.format(focus=focus)
@@ -187,6 +204,48 @@ class Agent:
             except ValueError as e:  # e.g. encode_image_data_uri's size-limit check
                 raise ToolError(str(e))
         return result.strip() or "(vision model returned no description)"
+
+    @staticmethod
+    def _image_marker(p: Path, caption: str, note: str) -> str:
+        """Tool-result text carrying a machine-parseable marker so sessions.py
+        can reconstruct an inline image card when a session is reopened later
+        (see sessions.to_display / _extract_image_marker)."""
+        marker = f"[image: {Agent._display_path(p)}]"
+        if caption:
+            marker += f" [caption: {caption}]"
+        return f"{marker} {note}"
+
+    def _show_image_tool(self, path: str, caption: str = "") -> str:
+        """Show an existing image file to the user inline in the chat. Purely
+        a UI side-channel -- unlike view_image, nothing is sent to the vision
+        model or added to the text model's context."""
+        p = self._resolve_existing_image(path, "show_image")
+        self.events.show_image(str(p), caption=caption or "")
+        return self._image_marker(p, caption, "Displayed to the user.")
+
+    def _generate_image(self, prompt: str, path: str = "", steps: int = 1) -> str:
+        """Generate an image locally with sd-turbo and show it to the user."""
+        from .imagegen import generate_image
+        prompt = (prompt or "").strip()
+        if not prompt:
+            raise ToolError("generate_image needs a 'prompt'")
+
+        if path and path.strip():
+            out_path = Path(path.strip()).expanduser()
+            if not out_path.is_absolute():
+                out_path = Path.cwd() / out_path
+        else:
+            slug = re.sub(r"[^a-z0-9]+", "-", prompt.lower()).strip("-")[:40].strip("-") or "image"
+            out_path = Path.cwd() / "generated" / f"{slug}-{uuid.uuid4().hex[:6]}.png"
+
+        with self.events.status(f"generating image: {prompt[:60]}..."):
+            try:
+                saved = generate_image(prompt, out_path, steps=steps, status=self.events.info)
+            except Exception as e:
+                raise ToolError(f"image generation failed: {e}")
+
+        self.events.show_image(str(saved), caption=prompt)
+        return self._image_marker(saved, prompt, "Generated and shown to the user.")
 
     # ------------------------------------------------------------------ #
     # Main loop
@@ -324,6 +383,11 @@ class Agent:
                     output = self._run_subagents(args.get("agents", []))
                 elif name == VIEW_IMAGE_TOOL:
                     output = self._view_image(args.get("path", ""), args.get("question", ""))
+                elif name == GENERATE_IMAGE_TOOL:
+                    output = self._generate_image(args.get("prompt", ""), args.get("path", ""),
+                                                  args.get("steps", 1))
+                elif name == SHOW_IMAGE_TOOL:
+                    output = self._show_image_tool(args.get("path", ""), args.get("caption", ""))
                 else:
                     output = execute_tool(name, args)
                 self._tool_reply(tc, output, name=name, args=args)
