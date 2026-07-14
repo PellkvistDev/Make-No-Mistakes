@@ -14,9 +14,10 @@ from .api import ApiError, Cancelled, Usage, ZaiClient, estimate_tokens
 from .config import Config
 from .events import AgentEvents
 from .permissions import PermissionEngine
-from .prompts import (COMPACT_PROMPT, SUBAGENT_PREAMBLE, VISION_ANALYSIS_PROMPT,
-                      build_system_prompt)
-from .tools import SUBAGENT_TOOL, TOOL_SCHEMAS, ToolError, execute_tool, get_todos
+from .prompts import (COMPACT_PROMPT, SUBAGENT_PREAMBLE, VIEW_IMAGE_PROMPT,
+                      VISION_ANALYSIS_PROMPT, build_system_prompt)
+from .tools import (SUBAGENT_TOOL, TOOL_SCHEMAS, VIEW_IMAGE_TOOL, ToolError,
+                    execute_tool, get_todos)
 
 MAX_SUBAGENTS = 6
 
@@ -137,6 +138,33 @@ class Agent:
                 return True
         return False
 
+    def _view_image(self, path: str, question: str = "") -> str:
+        """The agent's own tool for looking at an image file (as opposed to
+        attach_images, which handles an image the user attached)."""
+        from .api import IMAGE_EXTENSIONS
+        raw = str(path or "").strip()
+        if not raw:
+            raise ToolError("view_image needs a 'path'")
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+        if not p.is_file():
+            raise ToolError(f"Image not found: {p}")
+        if p.suffix.lower() not in IMAGE_EXTENSIONS:
+            raise ToolError(
+                f"Not a supported image type ({p.suffix or '(none)'}): {p}. "
+                f"Supported: {', '.join(sorted(IMAGE_EXTENSIONS))}"
+            )
+        focus = (f"What the agent needs to know: {question.strip()}" if question and question.strip()
+                 else "No specific focus was given; describe the image exhaustively.")
+        prompt = VIEW_IMAGE_PROMPT.format(focus=focus)
+        with self.events.status(f"looking at {p.name} with {self.cfg.vision_model}..."):
+            try:
+                result = self.client.analyze_images(self.cfg.vision_model, prompt, [p])
+            except ValueError as e:  # e.g. encode_image_data_uri's size-limit check
+                raise ToolError(str(e))
+        return result.strip() or "(vision model returned no description)"
+
     # ------------------------------------------------------------------ #
     # Main loop
 
@@ -244,6 +272,8 @@ class Agent:
                     if not self.allow_subagents:
                         raise ToolError("sub-agents cannot spawn further sub-agents")
                     output = self._run_subagents(args.get("agents", []))
+                elif name == VIEW_IMAGE_TOOL:
+                    output = self._view_image(args.get("path", ""), args.get("question", ""))
                 else:
                     output = execute_tool(name, args)
                 self._tool_reply(tc, output, name=name, args=args)

@@ -1050,10 +1050,29 @@ TOOL_SCHEMAS = [
         },
         ["agents"],
     ),
+    _schema(
+        "view_image",
+        "Look at a local image file (screenshot, diagram, mockup, chart, generated asset, "
+        "etc.) yourself and get back a detailed text description from a vision model. Use "
+        "this whenever an image file's actual visual content matters to the task and you "
+        "were not given a text description of it already -- e.g. a screenshot referenced by "
+        "path, a design mockup found in the repo, a diagram, or an image you just generated "
+        "or edited. This sends the image to the vision model over the network.",
+        {
+            "path": {"type": "string",
+                     "description": "Path to the image file (absolute or relative to cwd)"},
+            "question": {"type": "string",
+                        "description": "What to look for or focus on (optional; default "
+                                       "is a general, exhaustive description of everything "
+                                       "visible)"},
+        },
+        ["path"],
+    ),
 ]
 
 # Handled specially by the agent (needs the client/events), not via TOOL_FUNCTIONS.
 SUBAGENT_TOOL = "spawn_agents"
+VIEW_IMAGE_TOOL = "view_image"
 
 
 TOOL_FUNCTIONS = {
@@ -1087,7 +1106,9 @@ READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "todo_write"}
 # Tools that modify files (auto-approved in autoedit mode).
 FILE_WRITE_TOOLS = {"write_file", "edit_file", "git_commit"}
 # Network read tools (prompt in ask mode, auto-approved in autoedit/yolo).
-NETWORK_TOOLS = {"fetch_url", "web_search"}
+# view_image sends the image's bytes to the vision model, so it's gated the
+# same way even though it "just reads" a local file.
+NETWORK_TOOLS = {"fetch_url", "web_search", "view_image"}
 # Git tools (prompt in ask mode, auto-approved in autoedit/yolo).
 GIT_TOOLS = {"git_push", "git_pull", "git_branch_list"}
 

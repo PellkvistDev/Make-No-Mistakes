@@ -60,8 +60,16 @@ class PermissionEngine:
         if name in NETWORK_TOOLS:
             if self.mode == "autoedit":
                 return Decision(True)
-            detail = (f"Fetch URL: {args.get('url', '?')}" if name == "fetch_url"
-                      else f"Search the web for: {args.get('query', '?')}")
+            if name == "fetch_url":
+                detail = f"Fetch URL: {args.get('url', '?')}"
+            elif name == "web_search":
+                detail = f"Search the web for: {args.get('query', '?')}"
+            elif name == "view_image":
+                detail = f"Send image to the vision model: {args.get('path', '?')}"
+                if args.get("question"):
+                    detail += f"\nFocus: {args['question']}"
+            else:
+                detail = str(args)[:500]
             return self._ask_generic(name, detail, asker)
 
         if name in GIT_TOOLS:
