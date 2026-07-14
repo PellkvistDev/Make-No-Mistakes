@@ -103,12 +103,33 @@ def _install_packages(status: StatusFn = None) -> None:
         raise RuntimeError(f"Failed to install image-generation dependencies:\n{tail}")
 
 
+def _purge_stale_modules() -> None:
+    """Reinstalling transformers/diffusers on disk does nothing for a copy
+    already imported into this same long-running process -- Python's import
+    system returns the cached sys.modules entry instead of re-reading the
+    fresh files, so a fixed install can still look broken until the app is
+    restarted. Drop any cached copies so the next import actually reads
+    what's on disk now."""
+    for name in list(sys.modules):
+        if name == "transformers" or name.startswith("transformers.") \
+                or name == "diffusers" or name.startswith("diffusers."):
+            del sys.modules[name]
+
+
 def _load_pipeline(status: StatusFn = None):
     global _pipe
     if _pipe is not None:
         return _pipe
     if not packages_installed():
         _install_packages(status)
+    # Unconditional, not just after a fresh install: if an earlier attempt
+    # in this same process already got as far as `import transformers`
+    # succeeding (it's diffusers' *deeper* submodule import that actually
+    # fails), that now-stale copy is sitting in sys.modules regardless of
+    # what packages_installed() reports this time -- a retry within the
+    # same session would otherwise keep hitting the cached bad copy even
+    # though the files on disk are already fixed.
+    _purge_stale_modules()
 
     import torch
     from diffusers import AutoPipelineForText2Image
