@@ -645,37 +645,42 @@ class Api:
         except Exception:
             return ""
 
-    # -- images ---------------------------------------------------------- #
+    # -- attachments ------------------------------------------------------ #
 
-    def pick_images(self):
+    def pick_files(self):
+        """Pick any file(s) to attach -- not just images. Copied into the
+        project's uploads/ folder on send (see Agent.attach_files); only
+        image files get a real thumbnail here, others show a generic icon."""
         picked = self._window.create_file_dialog(
             webview.OPEN_DIALOG, allow_multiple=True,
-            file_types=("Images (*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif)",),
+            file_types=("All files (*.*)",),
         )
         if not picked:
             return []
         out = []
         for p in picked:
             path = Path(p)
-            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
-                out.append({"path": str(path), "name": path.name,
-                            "thumb": _thumb_uri(path)})
+            if not path.is_file():
+                continue
+            is_image = path.suffix.lower() in IMAGE_EXTENSIONS
+            out.append({"path": str(path), "name": path.name,
+                        "thumb": _thumb_uri(path) if is_image else ""})
         return out
 
     # -- chat ---------------------------------------------------------- #
 
-    def send(self, text: str, image_paths: list | None = None):
+    def send(self, text: str, file_paths: list | None = None):
         if not self._agent or not self.session_id:
             return {"error": "no active chat — start a New Chat first"}
         if not self._turn_lock.acquire(blocking=False):
             return {"error": "busy"}
         try:
             text = (text or "").strip()
-            paths = [Path(p) for p in (image_paths or []) if Path(p).is_file()]
+            paths = [Path(p) for p in (file_paths or []) if Path(p).is_file()]
             if not text and not paths:
                 return {"error": "empty"}
             if paths:
-                msg = self._agent.attach_images(text, paths)
+                msg = self._agent.attach_files(text, paths)
             else:
                 msg = {"role": "user", "content": text}
             # Snapshot the read-aloud toggle for this turn only: if it's off

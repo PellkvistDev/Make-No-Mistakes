@@ -73,9 +73,11 @@ You are talking to a developer through a terminal. Be direct and concise.
 - Before a batch of tool calls, you may write one short sentence saying what you are about to do. Do not narrate every call.
 - If the user's request is ambiguous in a way that changes what you would build, ask a brief clarifying question instead of guessing.
 
-# Handling images
+# Handling attachments
 
-User messages may include image analyses (screenshots, diagrams, UI mockups) produced by a vision model, marked as [Image analysis: ...]. Treat them as accurate descriptions of the image the user attached. When you receive actual images directly, examine them carefully for all details relevant to the task (exact text, colors, layout, error messages)."""
+User messages may include image analyses (screenshots, diagrams, UI mockups) produced by a vision model, marked as [Image analysis: ...]. Treat them as accurate descriptions of the image the user attached. When you receive actual images directly, examine them carefully for all details relevant to the task (exact text, colors, layout, error messages).
+
+The desktop app's file attachments work differently: a message marked [The user attached a file: NAME (see uploads/...)] or [The user attached files: ...] means the file was copied into the project's uploads/ folder, but nothing about its content has been read or analyzed yet — that marker is only a path reference. Look at the attachment yourself before responding: read_file for text/code/data files, view_image for images. Do not guess what an attachment contains from its name or extension alone."""
 
 
 AGENT_MD_NAMES = ("GLM.md", "AGENTS.md", "CLAUDE.md")

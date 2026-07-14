@@ -88,8 +88,11 @@ break until you regenerate them) — or if `requirements.txt` changed.
 - **Permission sheets** — file edits show a color-coded diff before you Allow /
   Always allow / Deny (optionally telling the model why). The mode pill in the
   titlebar cycles ask → auto-edit → full auto.
-- **Images** — attach screenshots/mockups with the paperclip; thumbnails show in
-  your message and the free vision model analyzes them for the coding model.
+- **Attachments** — attach any file with the paperclip (not just images).
+  Nothing is read or sent anywhere automatically: the file is copied into an
+  `uploads/` folder in the project (like `generated/` for the agent's own
+  output) and the model gets a path reference, then decides for itself
+  whether to `read_file` or `view_image` it.
 - **Everything else** — live "thinking" stream (collapsible), expandable tool
   cards, task checklist, token counter (always $0.00), compact from Settings.
   First launch asks for your free z.ai key and stores it as the `ZAI_API_KEY`
@@ -105,9 +108,11 @@ Just talk to it:
 > refactor utils.py: split the date helpers into dates.py
 ```
 
-### Images (multimodal)
+### Images (multimodal, terminal)
 
-Attach any image by mentioning its path, or with `/image`:
+This section is about the terminal (`glm`). The desktop app's paperclip
+button works differently (see Attachments above) — this is for mentioning an
+image inline or with `/image`:
 
 ```
 > here's the bug: C:\Users\me\Desktop\error.png what's wrong?

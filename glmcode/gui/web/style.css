@@ -321,6 +321,7 @@ body.sidebar-open #chat { left: var(--sidebar-w); }
   max-width: 150px; max-height: 110px; border-radius: 9px;
   border: 1px solid rgba(255, 255, 255, 0.3);
 }
+.bubble-user .img-strip .file-chip { height: 40px; max-width: 170px; }
 .user-note {
   margin-top: 7px; font-size: 11px; font-style: italic;
   color: rgba(255, 255, 255, 0.7);
@@ -492,6 +493,15 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
   box-shadow: 0 4px 16px rgba(0,0,0,0.35);
 }
 .att img { display: block; width: 72px; height: 54px; object-fit: cover; }
+.file-chip {
+  display: flex; align-items: center; gap: 6px;
+  padding: 0 10px; background: rgba(255, 255, 255, 0.06);
+  font-size: 11px; color: rgba(255, 255, 255, 0.85);
+  white-space: nowrap; overflow: hidden;
+}
+.file-chip svg { width: 15px; height: 15px; flex: none; opacity: 0.75; }
+.file-chip span { overflow: hidden; text-overflow: ellipsis; }
+.att .file-chip { width: 100px; height: 54px; }
 .att button {
   position: absolute; top: 3px; right: 3px;
   width: 17px; height: 17px; border-radius: 50%;

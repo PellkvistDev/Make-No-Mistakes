@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import threading
 import uuid
 from pathlib import Path
@@ -173,6 +174,28 @@ class Agent:
     def _encode(p: Path) -> str:
         from .api import encode_image_data_uri
         return encode_image_data_uri(p)
+
+    def attach_files(self, text: str, paths: list[Path]) -> dict:
+        """Build the user message for a turn with attached files (any type,
+        not just images). Unlike attach_images, nothing is read, encoded, or
+        sent to any model here -- each file is copied into an uploads/
+        folder in the project and the model gets a path reference, the same
+        way it would find any other file already in the project. It decides
+        for itself whether to read_file/view_image the attachment."""
+        refs = []
+        for p in paths:
+            dest = Path.cwd() / "uploads" / f"{p.stem}-{uuid.uuid4().hex[:6]}{p.suffix}"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(p, dest)
+                refs.append(f"{p.name} (see {self._display_path(dest)})")
+            except OSError as e:
+                refs.append(f"{p.name} (FAILED to attach: {e})")
+
+        note = ("The user attached a file: " if len(refs) == 1 else
+                "The user attached files: ") + ", ".join(refs)
+        combined = f"{text}\n\n[{note}]" if text else f"[{note}]"
+        return {"role": "user", "content": combined}
 
     def _payload_has_images(self) -> bool:
         for m in self.messages:
