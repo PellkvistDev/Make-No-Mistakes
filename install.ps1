@@ -45,6 +45,24 @@ if ($pythonw) {
     }
     $lnk.Save()
     Write-Host "Created desktop shortcut: Make No Mistakes" -ForegroundColor Green
+
+    # Windows caches shortcut icons per file path. When the .ico's contents
+    # change (e.g. a rebrand) but the shortcut's path doesn't, Explorer keeps
+    # showing the old icon until told otherwise. SHChangeNotify is the
+    # official shell API for "icon associations changed, refresh now" -- it
+    # runs automatically here so every user (fresh install or upgrade) gets
+    # the current icon without manually clearing the icon cache.
+    try {
+        Add-Type -Namespace Win32 -Name Shell -MemberDefinition @"
+[DllImport("shell32.dll")]
+public static extern void SHChangeNotify(int wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
+"@ -ErrorAction Stop
+        $SHCNE_ASSOCCHANGED = 0x08000000
+        $SHCNF_IDLIST = 0x0000
+        [Win32.Shell]::SHChangeNotify($SHCNE_ASSOCCHANGED, $SHCNF_IDLIST, [IntPtr]::Zero, [IntPtr]::Zero)
+    } catch {
+        Write-Host "Could not refresh the shell icon cache automatically. If the shortcut icon looks stale, log off and back on." -ForegroundColor Yellow
+    }
 }
 
 Write-Host ""
