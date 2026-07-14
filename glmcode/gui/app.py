@@ -816,9 +816,23 @@ def main():
         # stalls (older GPUs, VMs, remote desktop, flaky drivers). Use ONLY
         # --disable-gpu: it falls back to software rendering. Do NOT also pass
         # --disable-software-rasterizer, which removes that fallback and can
-        # leave the window blank. setdefault() lets a user override the flags.
+        # leave the window blank.
+        # --disable-renderer-accessibility works around a real pywebview/
+        # pythonnet bug (r0x0r/pywebview#1815): when something walks the
+        # WinForms host window's UI Automation tree — which WebView2's own
+        # accessibility bridge can trigger on its own, no screen reader
+        # needed — pythonnet's proxy for System.Drawing.Rectangle.Empty on
+        # Form.AccessibilityObject.Bounds recurses infinitely. The Python
+        # exception gets caught and logged ("Error while processing
+        # events...maximum recursion depth exceeded"), but it happens on the
+        # UI thread mid-message-pump and the window never responds again
+        # afterward. This flag stops WebView2's content from registering
+        # that accessibility bridge in the first place, at the cost of
+        # screen readers not being able to read the page content.
+        # setdefault() lets a user override the flags.
         os.environ.setdefault(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-gpu",
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--disable-gpu --disable-renderer-accessibility",
         )
     # Set icon via start() (pywebview 5.x/6.x — icon is NOT a create_window param)
     if ICO_PATH.is_file():
