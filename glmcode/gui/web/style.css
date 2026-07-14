@@ -298,6 +298,13 @@ body.sidebar-open #chat { left: var(--sidebar-w); }
   background: var(--glass-hi); border: 1px solid var(--stroke);
   border-radius: var(--r-sm); padding: 7px 10px; cursor: pointer;
 }
+/* The dropdown's own popup list is rendered natively by the OS/WebView2,
+   not by this app's translucent glass chrome -- it can't composite over
+   the blurred backdrop, so --glass-hi (8% white on transparent) renders as
+   plain white with no dark backdrop behind it. <option> background/color
+   ARE respected for the native popup even though other properties aren't,
+   so give it an explicit solid dark color instead of the glass variables. */
+.voice-select option { background-color: #141a2c; color: var(--text); }
 #voice-preview-btn.loading svg { animation: voice-pulse 0.9s ease-in-out infinite; }
 @keyframes voice-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 .speed-slider { width: 140px; accent-color: var(--accent); }
