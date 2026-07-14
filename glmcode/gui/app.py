@@ -39,7 +39,15 @@ class WebEvents(AgentEvents):
     """Pushes agent events into the webview as JSON; blocks on permissions."""
 
     def __init__(self):
-        self.window: webview.Window | None = None
+        # Underscore-prefixed: pywebview's inject_pywebview() recursively
+        # introspects every non-underscore attribute of the js_api object to
+        # build the exposed JS surface. A public `window` attribute gets
+        # walked into window.native (the WinForms Form), whose
+        # AccessibilityObject.Bounds.Empty chain recurses infinitely in
+        # pythonnet (Rectangle.Empty returns another Rectangle exposing its
+        # own .Empty). That blows the window's UI thread and freezes the
+        # app permanently. Leading underscore makes pywebview skip it.
+        self._window: webview.Window | None = None
         self._pending: dict[str, dict] = {}
         self.cfg = None  # set by Api.__init__ to the shared Config instance
 
@@ -57,13 +65,13 @@ class WebEvents(AgentEvents):
         self._tts_seq = 0
 
     def emit(self, type_: str, **data) -> None:
-        if not self.window:
+        if not self._window:
             return
         payload = json.dumps({"type": type_, **data})
         try:
             # Hand the event to the page's sink. The payload is already
             # JSON-encoded, so it drops straight into the JS call.
-            self.window.evaluate_js(
+            self._window.evaluate_js(
                 f"window.GLM && window.GLM.emit({payload});"
             )
         except Exception:
@@ -285,7 +293,11 @@ class Api:
         self.events = WebEvents()
         self.events.cfg = self.cfg  # shared reference: live settings changes apply immediately
         self.agent: Agent | None = None
-        self.window: webview.Window | None = None
+        # Underscore-prefixed: see the comment on WebEvents._window above —
+        # this class is the js_api object pywebview recursively introspects,
+        # so a public `window` attribute here triggers the same infinite
+        # AccessibilityObject.Bounds.Empty recursion and freezes the app.
+        self._window: webview.Window | None = None
         self.store = SessionStore()
         self.session_id: str | None = None
         self.session_title: str = ""   # AI-chosen chat name; "" until first turn
@@ -372,7 +384,7 @@ class Api:
                 "sessions": self.list_sessions()}
 
     def win(self, action: str):
-        w = self.window
+        w = self._window
         if not w:
             return
         if action == "close":
@@ -476,7 +488,7 @@ class Api:
         return _data_uri(DEFAULT_BG)
 
     def pick_background(self):
-        picked = self.window.create_file_dialog(
+        picked = self._window.create_file_dialog(
             webview.OPEN_DIALOG, allow_multiple=False,
             file_types=("Images (*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif)",
                         "All files (*.*)"),
@@ -541,7 +553,7 @@ class Api:
         nothing is auto-created or defaulted."""
         if self.agent and self.agent.busy:
             return {"error": "busy"}
-        picked = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+        picked = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         if not picked:
             return {"cancelled": True}
         path = Path(picked[0] if isinstance(picked, (list, tuple)) else picked)
@@ -604,7 +616,7 @@ class Api:
     # -- images ---------------------------------------------------------- #
 
     def pick_images(self):
-        picked = self.window.create_file_dialog(
+        picked = self._window.create_file_dialog(
             webview.OPEN_DIALOG, allow_multiple=True,
             file_types=("Images (*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.gif)",),
         )
@@ -788,8 +800,8 @@ def main():
         easy_drag=False,
         background_color="#0a0d16",
     )
-    api.window = window
-    api.events.window = window
+    api._window = window
+    api.events._window = window
 
     # Build webview.start() kwargs
     start_kwargs = dict(debug="--debug" in sys.argv)
@@ -816,23 +828,9 @@ def main():
         # stalls (older GPUs, VMs, remote desktop, flaky drivers). Use ONLY
         # --disable-gpu: it falls back to software rendering. Do NOT also pass
         # --disable-software-rasterizer, which removes that fallback and can
-        # leave the window blank.
-        # --disable-renderer-accessibility works around a real pywebview/
-        # pythonnet bug (r0x0r/pywebview#1815): when something walks the
-        # WinForms host window's UI Automation tree — which WebView2's own
-        # accessibility bridge can trigger on its own, no screen reader
-        # needed — pythonnet's proxy for System.Drawing.Rectangle.Empty on
-        # Form.AccessibilityObject.Bounds recurses infinitely. The Python
-        # exception gets caught and logged ("Error while processing
-        # events...maximum recursion depth exceeded"), but it happens on the
-        # UI thread mid-message-pump and the window never responds again
-        # afterward. This flag stops WebView2's content from registering
-        # that accessibility bridge in the first place, at the cost of
-        # screen readers not being able to read the page content.
-        # setdefault() lets a user override the flags.
+        # leave the window blank. setdefault() lets a user override the flags.
         os.environ.setdefault(
-            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-            "--disable-gpu --disable-renderer-accessibility",
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--disable-gpu",
         )
     # Set icon via start() (pywebview 5.x/6.x — icon is NOT a create_window param)
     if ICO_PATH.is_file():
