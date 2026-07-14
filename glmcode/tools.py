@@ -7,13 +7,17 @@ into error results so the model can react.
 
 from __future__ import annotations
 
+import atexit
 import fnmatch
+import itertools
 import json
 import logging
 import os
 import re
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
@@ -422,6 +426,158 @@ def run_powershell(command: str, timeout_seconds: int = 120) -> str:
         parts.append(f"[stderr]\n{err}")
     parts.append(f"[exit code: {proc.returncode}]")
     return _truncate("\n".join(parts))
+
+
+# --------------------------------------------------------------------- #
+# run_background / read_output / stop_process / list_processes
+#
+# run_powershell blocks until the command exits, so it can't be used for
+# anything long-lived (dev servers, watch mode, tunnels). These four tools
+# manage detached PowerShell processes instead: a background reader thread
+# per process continuously drains its (merged stdout+stderr) pipe into a
+# capped rolling buffer, so read_output never has to block waiting for more
+# output and a chatty server can't grow the buffer unbounded.
+
+MAX_BG_OUTPUT = 50_000  # rolling tail kept per process
+
+_bg_lock = threading.Lock()
+_bg_processes: dict[str, "_BackgroundProcess"] = {}
+_bg_counter = itertools.count(1)
+
+
+class _BackgroundProcess:
+    def __init__(self, id_: str, command: str, cwd: str, proc: subprocess.Popen):
+        self.id = id_
+        self.command = command
+        self.cwd = cwd
+        self.proc = proc
+        self.started_at = time.time()
+        self.output = ""
+        self.read_pos = 0
+        self.lock = threading.Lock()
+        self.reader = threading.Thread(target=self._read_loop, daemon=True)
+        self.reader.start()
+
+    def _read_loop(self) -> None:
+        try:
+            for line in self.proc.stdout:
+                with self.lock:
+                    self.output += line
+                    overflow = len(self.output) - MAX_BG_OUTPUT
+                    if overflow > 0:
+                        self.output = self.output[overflow:]
+                        self.read_pos = max(0, self.read_pos - overflow)
+        except (ValueError, OSError):
+            pass  # pipe closed under us -- process is exiting
+
+    def status(self) -> str:
+        code = self.proc.poll()
+        return "running" if code is None else f"exited (code {code})"
+
+    def read_new_output(self) -> str:
+        with self.lock:
+            new = self.output[self.read_pos:]
+            self.read_pos = len(self.output)
+            return new
+
+
+def _terminate_process_tree(proc: subprocess.Popen) -> None:
+    # proc.terminate() only signals the PowerShell process itself, not
+    # whatever it launched (node, python, etc.) -- taskkill /T walks the
+    # whole tree so the actual server process doesn't linger.
+    if sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True, timeout=10, **NO_WINDOW_KWARGS,
+            )
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    try:
+        proc.terminate()
+    except OSError:
+        pass
+
+
+@atexit.register
+def _cleanup_background_processes() -> None:
+    """Best-effort: don't leave dev servers running invisibly after the app closes."""
+    for record in list(_bg_processes.values()):
+        if record.status() == "running":
+            _terminate_process_tree(record.proc)
+
+
+def run_background(command: str, cwd: str = "") -> str:
+    work_dir = _resolve(cwd) if cwd else Path.cwd()
+    if not work_dir.is_dir():
+        raise ToolErrorBase(f"Directory not found: {work_dir}", ErrorSeverity.ERROR)
+    wrapped = (
+        "$ErrorActionPreference='Continue'; "
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+        "$OutputEncoding=[System.Text.Encoding]::UTF8; "
+        + command
+    )
+    try:
+        proc = subprocess.Popen(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-ExecutionPolicy", "Bypass", "-Command", wrapped],
+            cwd=str(work_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+            **NO_WINDOW_KWARGS,
+        )
+    except OSError as e:
+        raise ToolErrorBase(f"Failed to start PowerShell: {e}", ErrorSeverity.ERROR)
+
+    with _bg_lock:
+        bg_id = f"bg-{next(_bg_counter)}"
+        record = _BackgroundProcess(bg_id, command, str(work_dir), proc)
+        _bg_processes[bg_id] = record
+
+    # Brief grace period: an immediate failure (bad command, port already in
+    # use) shows up here instead of costing an extra read_output round trip.
+    time.sleep(1.0)
+    early_output = record.read_new_output().strip()
+    parts = [f"Started as '{bg_id}' (pid {proc.pid}), status: {record.status()}."]
+    if early_output:
+        parts.append(early_output)
+    parts.append(f"Use read_output(process_id='{bg_id}') for more output, or "
+                 f"stop_process(process_id='{bg_id}') to stop it.")
+    return _truncate("\n".join(parts))
+
+
+def read_output(process_id: str) -> str:
+    record = _bg_processes.get(process_id)
+    if record is None:
+        raise ToolErrorBase(
+            f"No background process with id '{process_id}'. Use list_processes "
+            f"to see active ones.", ErrorSeverity.ERROR)
+    new_output = record.read_new_output().strip()
+    return _truncate(
+        f"[{process_id}] status: {record.status()}\n{new_output or '(no new output)'}"
+    )
+
+
+def stop_process(process_id: str) -> str:
+    record = _bg_processes.get(process_id)
+    if record is None:
+        raise ToolErrorBase(
+            f"No background process with id '{process_id}'. Use list_processes "
+            f"to see active ones.", ErrorSeverity.ERROR)
+    if record.status() != "running":
+        return f"[{process_id}] already {record.status()}."
+    _terminate_process_tree(record.proc)
+    return f"[{process_id}] stopped."
+
+
+def list_processes() -> str:
+    if not _bg_processes:
+        return "No background processes."
+    lines = []
+    for pid, record in _bg_processes.items():
+        age = int(time.time() - record.started_at)
+        lines.append(f"{pid}: {record.command!r} (started {age}s ago, {record.status()})")
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------- #
@@ -993,12 +1149,55 @@ TOOL_SCHEMAS = [
         "run_powershell",
         "Run a Windows PowerShell command and return stdout/stderr/exit code. Use for running "
         "programs, tests, git, package managers. NOT for reading/searching files (use the file "
-        "tools). Avoid interactive commands. Working directory is the project cwd.",
+        "tools), and NOT for anything that keeps running (dev servers, watch mode, tunnels) -- "
+        "it blocks until the command exits, so it will just time out. Use run_background for "
+        "those instead. Avoid interactive commands. Working directory is the project cwd.",
         {
             "command": {"type": "string", "description": "PowerShell command to run"},
             "timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default 120, max 600)"},
         },
         ["command"],
+    ),
+    _schema(
+        "run_background",
+        "Start a long-lived PowerShell command (dev server, build watcher, tunnel, etc.) "
+        "WITHOUT blocking -- it keeps running after this call returns. Returns a process id "
+        "plus whatever output arrived in the first second (so immediate failures like a bad "
+        "command or a port already in use show up right away). Use read_output to check on "
+        "it later and stop_process when you're done with it. For anything that finishes on "
+        "its own (tests, builds, git, one-shot scripts), use run_powershell instead.",
+        {
+            "command": {"type": "string", "description": "PowerShell command to run in the background"},
+            "cwd": {"type": "string", "description": "Working directory (default: project cwd)"},
+        },
+        ["command"],
+    ),
+    _schema(
+        "read_output",
+        "Read the output a run_background process has produced since the last read_output "
+        "call for it, plus whether it's still running (or its exit code if it stopped). "
+        "Never blocks -- returns immediately, even if there's nothing new yet.",
+        {
+            "process_id": {"type": "string", "description": "The id returned by run_background"},
+        },
+        ["process_id"],
+    ),
+    _schema(
+        "stop_process",
+        "Stop a background process started with run_background (and everything it spawned, "
+        "e.g. a dev server launched via a wrapper script). No-op if it already exited.",
+        {
+            "process_id": {"type": "string", "description": "The id returned by run_background"},
+        },
+        ["process_id"],
+    ),
+    _schema(
+        "list_processes",
+        "List all background processes started with run_background in this session, with "
+        "their command, age, and status (running / exited). Use this if you've lost track "
+        "of a process id.",
+        {},
+        [],
     ),
     _schema(
         "todo_write",
@@ -1283,6 +1482,10 @@ TOOL_FUNCTIONS = {
     "grep": grep,
     "find_references": find_references,
     "run_powershell": run_powershell,
+    "run_background": run_background,
+    "read_output": read_output,
+    "stop_process": stop_process,
+    "list_processes": list_processes,
     "todo_write": todo_write,
     "fetch_url": fetch_url,
     "web_search": web_search,
@@ -1303,9 +1506,13 @@ TOOL_FUNCTIONS = {
 
 # Tools that never modify anything and run without permission prompts.
 # show_image is a pure local UI side-channel (no filesystem writes, nothing
-# sent to any third party), so it's as safe as read_file.
+# sent to any third party), so it's as safe as read_file. read_output/
+# list_processes only observe processes already approved via run_background;
+# stop_process can only affect a process this agent itself started (bounded
+# blast radius, same as the agent choosing to Ctrl+C its own dev server).
 READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "find_references",
-                 "todo_write", "show_image", "compact_context"}
+                 "todo_write", "show_image", "compact_context",
+                 "read_output", "stop_process", "list_processes"}
 # Tools that modify files (auto-approved in autoedit mode).
 FILE_WRITE_TOOLS = {"write_file", "edit_file", "git_commit"}
 # Network read tools (prompt in ask mode, auto-approved in autoedit/yolo).

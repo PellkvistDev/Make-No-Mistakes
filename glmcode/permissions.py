@@ -49,14 +49,14 @@ class PermissionEngine:
                 return Decision(True)
             return self._ask_file(name, args, asker)
 
-        if name == "run_powershell":
+        if name in ("run_powershell", "run_background"):
             command = str(args.get("command", ""))
             prefix = command_prefix(command)
             # Resolve aliases (e.g., "npm run dev" -> "npm")
             resolved_prefix = self.command_aliases.get(prefix, prefix)
             if resolved_prefix and resolved_prefix in self.allowed_prefixes:
                 return Decision(True)
-            return self._ask_command(command, prefix, asker)
+            return self._ask_command(command, prefix, asker, background=(name == "run_background"))
 
         if name in NETWORK_TOOLS:
             if self.mode == "autoedit":
@@ -113,9 +113,10 @@ class PermissionEngine:
         answer = asker(title, preview, always_label=f"always allow {name} this session")
         return self._to_decision(answer, name=name)
 
-    def _ask_command(self, command: str, prefix: str, asker) -> Decision:
+    def _ask_command(self, command: str, prefix: str, asker, background: bool = False) -> Decision:
         always = f"always allow `{prefix} ...` this session" if prefix else None
-        answer = asker("Run PowerShell command:", command, always_label=always)
+        title = "Run in background:" if background else "Run PowerShell command:"
+        answer = asker(title, command, always_label=always)
         if _ans(answer) == "a" and prefix:
             self.allowed_prefixes.add(prefix)
             return Decision(True)
