@@ -13,12 +13,13 @@ import threading
 import uuid
 from pathlib import Path
 
-from .api import ApiError, Cancelled, Usage, ZaiClient, estimate_tokens
+from .api import ApiError, Cancelled, RateLimiter, Usage, ZaiClient, estimate_tokens
 from .config import Config
 from .events import AgentEvents
 from .permissions import PermissionEngine
-from .prompts import (COMPACT_PROMPT, CONTINUE_NUDGE, SUBAGENT_PREAMBLE,
-                      VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT, build_system_prompt)
+from .prompts import (COMPACT_PROMPT, CONTINUE_NUDGE, STEP_LIMIT_NUDGE,
+                      SUBAGENT_PREAMBLE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
+                      build_system_prompt)
 from .tools import (COMPACT_CONTEXT_TOOL, GENERATE_IMAGE_TOOL, PREVIEW_PAGE_TOOL,
                     SHOW_HTTP_CAT_TOOL, SHOW_IMAGE_TOOL, SPEAK_TOOL, SUBAGENT_TOOL,
                     TOOL_SCHEMAS, VIEW_IMAGE_TOOL, ToolError, execute_tool, get_todos)
@@ -407,6 +408,30 @@ class Agent:
                 self.events.warn("interrupted during tool execution")
                 return
 
+        # The loop ran out of steps without the model ever giving a plain-
+        # text answer -- its last action was a tool call, so self.messages
+        # currently ends on an assistant turn with no reportable content.
+        # For the main agent that's recoverable (the user can just say
+        # "continue"), but a sub-agent gets exactly one turn and its ENTIRE
+        # value is this final report (see _run_single_subagent) -- silently
+        # stopping here is why sub-agents were so often coming back with
+        # "(sub-agent produced no final report)". Force one last call with
+        # tools withheld so it can't just make another one instead of
+        # answering.
+        self.messages.append({"role": "user", "content": STEP_LIMIT_NUDGE})
+        try:
+            result = self.client.chat(
+                model=model, messages=self.messages, tools=None,
+                temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens,
+                thinking=False, on_content=self.events.content_delta,
+                on_reasoning=self.events.reasoning_delta, on_status=self.events.info,
+                cancel=self.cancel,
+            )
+            self.session_usage.add(result.usage)
+            self.messages.append(result.to_message())
+        except (ApiError, Cancelled, KeyboardInterrupt):
+            pass  # best-effort wrap-up -- fall through to the warning either way
+
         self.events.warn(f"stopped after {self.cfg.max_turns_per_request} agentic "
                          "steps; say 'continue' to let it keep going")
 
@@ -550,6 +575,12 @@ class Agent:
             raise ToolError("spawn_agents needs a non-empty 'agents' list")
         specs = specs[:MAX_SUBAGENTS]
         results: list = [None] * len(specs)
+        # One shared limiter for every sub-agent spawned by this call -- the
+        # free tier is rate-limited to ~1 req/s, and up to MAX_SUBAGENTS
+        # threads each making their own uncoordinated requests otherwise
+        # collide, burning retries/step-budget on 429 backoff instead of
+        # actual task progress.
+        limiter = RateLimiter()
 
         def worker(i: int, spec: dict) -> None:
             name = str(spec.get("name") or f"agent-{i + 1}").strip()[:60] or f"agent-{i + 1}"
@@ -561,7 +592,7 @@ class Agent:
                 self._emit_subagent(aid, name, "error", summary="no task given")
                 return
             try:
-                report = self._run_single_subagent(name, task)
+                report = self._run_single_subagent(name, task, limiter)
                 results[i] = (name, report, None)
                 self._emit_subagent(aid, name, "done", summary=_first_line(report))
             except Exception as e:  # keep one failure from sinking the rest
@@ -588,12 +619,13 @@ class Agent:
                 out.append(f"### {name}\n{report or '(no output)'}\n")
         return "\n".join(out)
 
-    def _run_single_subagent(self, name: str, task: str) -> str:
+    def _run_single_subagent(self, name: str, task: str, limiter: RateLimiter) -> str:
         """One sub-agent: a fresh Agent (own client + non-interactive sink) that
         runs its mission to completion and returns its final report text."""
         # A separate client per thread avoids sharing one requests.Session
-        # across concurrent requests.
-        client = ZaiClient(self.client.api_key, self.client.base_url)
+        # across concurrent requests; the rate limiter IS shared (see
+        # _run_subagents) so all sub-agents' requests stay spaced out.
+        client = ZaiClient(self.client.api_key, self.client.base_url, rate_limiter=limiter)
         sink = _CaptureEvents()
         sub = Agent(self.cfg, client, events=sink, allow_subagents=False)
         sub.run_turn({"role": "user",

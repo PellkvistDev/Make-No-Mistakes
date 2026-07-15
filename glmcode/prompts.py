@@ -189,6 +189,13 @@ CONTINUE_NUDGE = (
 )
 
 
+STEP_LIMIT_NUDGE = (
+    "You've used all the tool-calling steps available for this turn. Stop calling "
+    "tools now and reply with a plain-text summary: what you did, what you found, "
+    "and what (if anything) remains unfinished."
+)
+
+
 COMPACT_PROMPT = """Summarize this coding session conversation for continuation in a fresh context. Preserve, in this order:
 1. The user's overall goal and any explicit constraints or preferences they stated.
 2. Current state: what has been done so far, which files were created/modified (with paths) and how.

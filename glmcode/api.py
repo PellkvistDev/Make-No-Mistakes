@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -63,10 +64,34 @@ RETRYABLE = {429, 500, 502, 503, 504}
 MAX_RETRIES = 6
 
 
+class RateLimiter:
+    """Spaces out calls across threads so parallel sub-agents don't all hit
+    the free tier's ~1 req/s limit at the same moment -- which just burns
+    their own retry budget and tool-calling step budget on 429 backoff
+    instead of real task progress. Share one instance across every
+    ZaiClient spawned for a single spawn_agents call; unused (no-op) for
+    the single-threaded main agent, which never contends with itself."""
+
+    def __init__(self, min_interval: float = 1.05):
+        self.min_interval = min_interval
+        self._lock = threading.Lock()
+        self._next_at = 0.0
+
+    def wait(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            start = max(now, self._next_at)
+            self._next_at = start + self.min_interval
+        delay = start - now
+        if delay > 0:
+            time.sleep(delay)
+
+
 class ZaiClient:
-    def __init__(self, api_key: str, base_url: str):
+    def __init__(self, api_key: str, base_url: str, rate_limiter: Optional[RateLimiter] = None):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
+        self.rate_limiter = rate_limiter
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {api_key}",
@@ -112,6 +137,8 @@ class ZaiClient:
                 if on_status:
                     on_status(f"retrying in {wait}s ({last_err})")
                 time.sleep(wait)
+            if self.rate_limiter:
+                self.rate_limiter.wait()
             try:
                 return self._stream_once(payload, on_content, on_reasoning, cancel)
             except ApiError as e:
