@@ -228,7 +228,11 @@ or `n` (deny, optionally telling the model why).
 
 - `/init` explores your project and writes a `GLM.md` memory file that is
   auto-loaded into the system prompt in future sessions (it also honors an
-  existing `AGENTS.md` or `CLAUDE.md`).
+  existing `AGENTS.md` or `CLAUDE.md`). That's per-project; for things about
+  **you** that should apply everywhere, just tell it to remember them ("remember
+  that I prefer 2-space indentation") — it's saved to `~/.glmcode/memory.md`
+  and loaded into every chat, in every project, from then on. Say "forget
+  that" / correct it and it'll edit the file directly.
 - `/compact` summarizes long conversations. The agent sees a live "context
   usage" figure every turn and can proactively compact itself at a natural
   stopping point; there's also a hard automatic fallback if context grows

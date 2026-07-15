@@ -14,6 +14,10 @@ from pathlib import Path
 CONFIG_DIR = Path.home() / ".glmcode"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 HISTORY_FILE = CONFIG_DIR / "history"
+# User-level memory: durable facts/preferences the agent has been asked to
+# remember, loaded into the system prompt for every chat in every project
+# (unlike GLM.md, which is per-project).
+MEMORY_FILE = CONFIG_DIR / "memory.md"
 
 DEFAULT_BASE_URL = "https://api.z.ai/api/paas/v4"
 DEFAULT_MODEL = "glm-4.7-flash"        # free coding model

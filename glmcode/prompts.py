@@ -105,6 +105,23 @@ def _git_info(cwd: Path) -> str:
         return "Is a git repository: unknown"
 
 
+def _user_memory() -> str:
+    """User-level memory (~/.glmcode/memory.md), unlike _project_memory:
+    applies to every project, every chat -- durable facts/preferences the
+    agent has been asked to remember via the `remember` tool."""
+    from .config import MEMORY_FILE
+    from .tools import load_memory
+    text = load_memory()
+    if not text:
+        return ""
+    return (
+        f"\n\n# Things to remember about this user ({MEMORY_FILE})\n\n"
+        f"{text}\n\n"
+        "Use the `remember` tool to add to this when the user asks you to remember "
+        f"something, or edit/write {MEMORY_FILE} directly to correct or remove an entry."
+    )
+
+
 def _project_memory(cwd: Path) -> str:
     for name in AGENT_MD_NAMES:
         p = cwd / name
@@ -134,7 +151,7 @@ def build_system_prompt(cwd: Path | None = None, model: str = "") -> str:
         f"Model: {model}\n"
         f"{_git_info(cwd)}"
     )
-    return SYSTEM_PROMPT + env + _project_memory(cwd)
+    return SYSTEM_PROMPT + env + _user_memory() + _project_memory(cwd)
 
 
 VISION_ANALYSIS_PROMPT = """You are the vision module of a coding agent. The user attached the image(s) shown, in the context of this request to the coding agent:

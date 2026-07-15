@@ -21,8 +21,9 @@ from .prompts import (COMPACT_PROMPT, CONTINUE_NUDGE, STEP_LIMIT_NUDGE,
                       SUBAGENT_PREAMBLE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
                       build_system_prompt)
 from .tools import (COMPACT_CONTEXT_TOOL, GENERATE_IMAGE_TOOL, PREVIEW_PAGE_TOOL,
-                    SHOW_HTTP_CAT_TOOL, SHOW_IMAGE_TOOL, SPEAK_TOOL, SUBAGENT_TOOL,
-                    TOOL_SCHEMAS, VIEW_IMAGE_TOOL, ToolError, execute_tool, get_todos)
+                    REMEMBER_TOOL, SHOW_HTTP_CAT_TOOL, SHOW_IMAGE_TOOL, SPEAK_TOOL,
+                    SUBAGENT_TOOL, TOOL_SCHEMAS, VIEW_IMAGE_TOOL, ToolError,
+                    execute_tool, get_todos)
 
 MAX_SUBAGENTS = 6
 # Safety cap on auto-continue-on-truncation rounds (see _call_model_until_done).
@@ -656,6 +657,12 @@ class Agent:
                 elif name == SPEAK_TOOL:
                     output = self._speak_tool(args.get("text", ""), args.get("path", ""),
                                               args.get("voice", ""), args.get("speed"))
+                elif name == REMEMBER_TOOL:
+                    output = execute_tool(name, args)
+                    # Reflect the new memory in THIS conversation immediately,
+                    # not just in future sessions (which pick it up naturally
+                    # since it's read from disk on every fresh Agent init).
+                    self.rebuild_system_prompt()
                 else:
                     output = execute_tool(name, args)
                 self._tool_reply(tc, output, name=name, args=args)

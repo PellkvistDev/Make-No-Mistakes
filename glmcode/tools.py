@@ -25,6 +25,7 @@ from pathlib import Path
 
 import requests
 
+from .config import MEMORY_FILE
 from .errors import ToolError as ToolErrorBase, ErrorSeverity
 from .logger import logger
 from .tts import FALLBACK_VOICES as _TTS_VOICES
@@ -168,6 +169,43 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     p.write_text(new_text, encoding="utf-8", newline="\n")
     n = count if replace_all else 1
     return f"Edited {p} ({n} replacement{'s' if n != 1 else ''})."
+
+
+# --------------------------------------------------------------------- #
+# remember -- user-level memory, persists across every chat/project (unlike
+# GLM.md, which is per-project). Loaded into the system prompt by
+# prompts.build_system_prompt via load_memory() below; edited/removed with
+# the regular read_file/edit_file/write_file tools once the model knows its
+# path (mentioned in the system prompt alongside the current contents).
+
+MEMORY_HEADER = "# Things to remember about this user\n\n"
+MAX_MEMORY_CHARS = 8000  # keep it terse -- this gets embedded in every system prompt
+
+
+def remember(text: str) -> str:
+    text = (text or "").strip()
+    if not text:
+        raise ToolErrorBase("Nothing to remember -- text was empty.", ErrorSeverity.ERROR)
+    MEMORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    if not MEMORY_FILE.exists():
+        MEMORY_FILE.write_text(MEMORY_HEADER, encoding="utf-8")
+    with MEMORY_FILE.open("a", encoding="utf-8") as f:
+        f.write(f"- {text}\n")
+    return f"Remembered: {text}"
+
+
+def load_memory() -> str:
+    """Current memory file contents, for embedding in the system prompt.
+    Empty string if nothing's been remembered yet."""
+    if not MEMORY_FILE.exists():
+        return ""
+    try:
+        text = MEMORY_FILE.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    if len(text) > MAX_MEMORY_CHARS:
+        text = text[:MAX_MEMORY_CHARS] + "\n... [truncated -- trim this file, it's gotten long]"
+    return text
 
 
 # --------------------------------------------------------------------- #
@@ -1627,6 +1665,26 @@ TOOL_SCHEMAS = [
         },
         ["text"],
     ),
+    _schema(
+        "remember",
+        "Save a short, durable fact or instruction about the USER that should apply to "
+        "EVERY future chat, in every project -- not just this one. Use it when the user "
+        "explicitly says to remember something, or clearly states a standing preference "
+        "for how you should behave going forward (e.g. their name, a coding style "
+        "preference, 'always write tests before saying you're done', 'never use tabs'). "
+        "Appends to a persistent memory file whose current contents are already shown to "
+        "you in the system prompt. Don't use this for one-off, task-specific details that "
+        "belong in this conversation only. To edit or remove something already "
+        "remembered, use read_file/edit_file/write_file directly on that file (its path "
+        "is given alongside its contents in your system prompt).",
+        {
+            "text": {"type": "string",
+                     "description": "The fact/instruction to remember, written plainly, e.g. "
+                                    "'Prefers 2-space indentation' or 'Always run tests before "
+                                    "saying a task is done'."},
+        },
+        ["text"],
+    ),
 ]
 
 # Handled specially by the agent (needs the client/events), not via TOOL_FUNCTIONS.
@@ -1636,6 +1694,7 @@ GENERATE_IMAGE_TOOL = "generate_image"
 SHOW_IMAGE_TOOL = "show_image"
 COMPACT_CONTEXT_TOOL = "compact_context"
 SPEAK_TOOL = "speak"
+REMEMBER_TOOL = "remember"
 SHOW_HTTP_CAT_TOOL = "show_http_cat"
 PREVIEW_PAGE_TOOL = "preview_page"
 
@@ -1654,6 +1713,7 @@ TOOL_FUNCTIONS = {
     "stop_process": stop_process,
     "list_processes": list_processes,
     "todo_write": todo_write,
+    "remember": remember,
     "fetch_url": fetch_url,
     "web_search": web_search,
     "package_info": package_info,
@@ -1678,8 +1738,12 @@ TOOL_FUNCTIONS = {
 # list_processes only observe processes already approved via run_background;
 # stop_process can only affect a process this agent itself started (bounded
 # blast radius, same as the agent choosing to Ctrl+C its own dev server).
+# remember, like todo_write, does write state -- but it's explicitly
+# requested by the user in the conversation and scoped to appending one line
+# to a single small file outside any project, so a diff-preview permission
+# prompt would just be friction, not a meaningful safety check.
 READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "find_references",
-                 "todo_write", "show_image", "compact_context",
+                 "todo_write", "remember", "show_image", "compact_context",
                  "read_output", "stop_process", "list_processes"}
 # Tools that modify files (auto-approved in autoedit mode).
 FILE_WRITE_TOOLS = {"write_file", "edit_file", "git_commit"}
