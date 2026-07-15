@@ -43,6 +43,12 @@ class AgentEvents:
         """A steering message the user sent mid-turn was just injected into
         the conversation. No-op unless a UI is attached."""
 
+    def steer_returned(self, text: str) -> None:
+        """A queued steering message never got delivered before the turn
+        ended (final answer / cancel / error, with no further tool result to
+        attach it to). The frontend should put it back wherever the user can
+        resend it, rather than let it silently carry over."""
+
     # -- context compaction ----------------------------------------------- #
     def compacted(self, summary: str) -> None:
         """The conversation was summarized; `summary` is the retained context."""

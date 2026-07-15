@@ -293,6 +293,9 @@ class WebEvents(AgentEvents):
     def steered(self, text):
         self.emit("steered", text=text)
 
+    def steer_returned(self, text):
+        self.emit("steer_returned", text=text)
+
     # sub-agents ----------------------------------------------------------
     def subagent(self, id, name, status, mission="", summary=""):
         self.emit("subagent", id=id, name=name, status=status,
@@ -798,7 +801,13 @@ class Api:
             return {"error": "empty"}
         if not self._agent or not self._agent.busy:
             return {"error": "nothing running to steer"}
-        self._agent.steer(text)
+        if not self._agent.steer(text):
+            return {"error": "a steering message is already queued"}
+        return {"ok": True}
+
+    def steer_clear(self):
+        if self._agent:
+            self._agent.clear_steer()
         return {"ok": True}
 
     def steer_subagent(self, aid: str, text: str):
@@ -808,7 +817,12 @@ class Api:
         if not self._agent:
             return {"error": "no active chat"}
         if not self._agent.steer_subagent(aid, text):
-            return {"error": "that sub-agent is no longer running"}
+            return {"error": "that sub-agent is no longer running, or already has a queued message"}
+        return {"ok": True}
+
+    def steer_subagent_clear(self, aid: str):
+        if self._agent:
+            self._agent.clear_steer_subagent(aid)
         return {"ok": True}
 
     def permission_response(self, rid: str, answer: str, feedback: str = ""):

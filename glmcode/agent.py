@@ -91,6 +91,9 @@ class _CaptureEvents(AgentEvents):
     def steered(self, text: str) -> None:
         self._forward(self._aid, "steered", text=text)
 
+    def steer_returned(self, text: str) -> None:
+        self._forward(self._aid, "steer_returned", text=text)
+
 
 class Agent:
     def __init__(self, cfg: Config, client: ZaiClient, events: AgentEvents | None = None,
@@ -112,11 +115,14 @@ class Agent:
             s for s in TOOL_SCHEMAS if s["function"]["name"] != SUBAGENT_TOOL
         ]
         self._emit_lock = threading.Lock()  # serialize sub-agent progress emits
-        # Steering: messages the user sends while this agent is mid-turn.
-        # They don't interrupt the current model call -- they're queued and
-        # injected as a plain user message the next time a tool result comes
-        # back, right before the model is called again.
-        self._steer_queue: list[str] = []
+        # Steering: a message the user sends while this agent is mid-turn.
+        # It doesn't interrupt the current model call -- it's queued (one at
+        # a time) and injected as a plain user message the next time a tool
+        # result comes back, right before the model is called again. If the
+        # turn ends first (final answer / cancel / error) with nothing left
+        # to attach it to, run_turn() hands it back via steer_returned()
+        # instead of letting it leak into some future, unrelated turn.
+        self._steer_pending: str | None = None
         self._steer_lock = threading.Lock()
         # Only meaningful on the coordinator instance (sub-agents don't spawn
         # their own), but harmless to keep everywhere: lets the GUI reach a
@@ -416,39 +422,68 @@ class Agent:
             self._run_turn(user_message)
         finally:
             self.busy = False
+            # If a steering message was queued but the turn ended (final
+            # answer, cancel, or error) before it ever got a chance to be
+            # injected -- there was no further tool result to attach it to --
+            # it must NOT sit around and get silently glued onto some later,
+            # unrelated turn. Hand it back so the frontend can put it back
+            # wherever the user typed it.
+            leftover = self._take_pending_steer()
+            if leftover:
+                self.events.steer_returned(leftover)
             self.events.turn_done(self.session_usage, self.context_estimate())
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str) -> bool:
         """Queue a message from the user while this agent is mid-turn. It
         doesn't interrupt whatever's in flight -- it's picked up and injected
-        as a plain user message the next time a tool result comes back."""
+        as a plain user message the next time a tool result comes back. Only
+        one message may be queued at a time; returns False if one already is
+        (the caller should edit/clear it first)."""
         text = (text or "").strip()
         if not text:
-            return
+            return False
         with self._steer_lock:
-            self._steer_queue.append(text)
+            if self._steer_pending is not None:
+                return False
+            self._steer_pending = text
+        return True
+
+    def clear_steer(self) -> None:
+        """Drop the queued steering message, if any, without delivering it."""
+        with self._steer_lock:
+            self._steer_pending = None
 
     def steer_subagent(self, aid: str, text: str) -> bool:
         """Forward a steering message to a specific running sub-agent by id.
-        Returns False if that sub-agent isn't currently running."""
+        Returns False if that sub-agent isn't currently running, or already
+        has a message queued."""
         with self._active_subagents_lock:
             sub = self._active_subagents.get(aid)
         if sub is None:
             return False
-        sub.steer(text)
+        return sub.steer(text)
+
+    def clear_steer_subagent(self, aid: str) -> bool:
+        with self._active_subagents_lock:
+            sub = self._active_subagents.get(aid)
+        if sub is None:
+            return False
+        sub.clear_steer()
         return True
 
-    def _inject_steer_messages(self) -> None:
-        """Drain any queued steering messages into the conversation as a
-        regular user turn, and let the event sink show they arrived."""
+    def _take_pending_steer(self) -> str | None:
         with self._steer_lock:
-            if not self._steer_queue:
-                return
-            texts = self._steer_queue
-            self._steer_queue = []
-        for text in texts:
-            self.messages.append({"role": "user", "content": text})
-            self.events.steered(text)
+            text, self._steer_pending = self._steer_pending, None
+        return text
+
+    def _inject_steer_messages(self) -> None:
+        """Drain the queued steering message, if any, into the conversation
+        as a regular user turn, and let the event sink show it arrived."""
+        text = self._take_pending_steer()
+        if not text:
+            return
+        self.messages.append({"role": "user", "content": text})
+        self.events.steered(text)
 
     def _run_turn(self, user_message: dict) -> None:
         self.maybe_autocompact()

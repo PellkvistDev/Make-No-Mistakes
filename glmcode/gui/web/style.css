@@ -338,6 +338,33 @@ body.subagent-open #subagent-panel { transform: translateX(0); }
   scroll-behavior: smooth; user-select: text;
 }
 
+/* queued-steering-message bubble: shown above whichever composer it belongs
+   to (main #composer-wrap or the sub-agent mini-composer) while a message
+   is waiting to be delivered. Same orange as steer-mode/the send button. */
+.steer-queued {
+  display: flex; align-items: center; gap: 8px;
+  margin: 0 0 8px; padding: 7px 8px 7px 12px; border-radius: 10px;
+  border: 1px solid rgba(255, 159, 10, 0.32); background: rgba(255, 159, 10, 0.1);
+  font-size: 12.5px;
+}
+.steer-queued-icon { color: #ff9f0a; flex: none; }
+.steer-queued-text {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; color: var(--text);
+}
+.steer-queued-actions { display: flex; gap: 2px; flex: none; }
+.icon-btn-mini {
+  width: 24px; height: 24px; border-radius: 6px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  border: none; background: transparent; color: var(--text-faint); cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.icon-btn-mini svg { width: 13px; height: 13px; }
+.icon-btn-mini:hover { background: rgba(255, 255, 255, 0.12); color: var(--text); }
+/* the sub-agent panel has no ambient padding of its own (unlike
+   #composer-wrap, which #steer-queued sits inside already-padded) */
+#subagent-steer-queued { margin: 8px 14px 0; }
+
 .subagent-composer {
   display: flex; align-items: center; gap: 8px; flex: none;
   padding: 10px 14px; border-top: 1px solid var(--stroke-soft);
