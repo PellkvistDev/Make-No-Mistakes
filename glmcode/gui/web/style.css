@@ -229,6 +229,16 @@ body.subagent-open #chat { right: 50%; padding-left: 24px; padding-right: 24px; 
   border-top: 1px solid rgba(10, 132, 255, 0.18);
 }
 
+/* inline marker: a steering message was just injected mid-turn */
+.steered-note {
+  margin: 6px 0 16px; padding: 8px 14px; border-radius: 10px;
+  border: 1px solid rgba(255, 159, 10, 0.3); background: rgba(255, 159, 10, 0.08);
+  font-size: 12.5px; color: var(--text-dim); display: flex; gap: 7px; align-items: baseline;
+}
+.steered-icon { color: #ff9f0a; font-size: 13px; }
+.steered-label { font-weight: 600; color: var(--text); }
+.steered-text { color: var(--text-dim); white-space: pre-wrap; word-break: break-word; }
+
 /* parallel sub-agents panel */
 .subagents {
   margin: 8px 0 16px; border: 1px solid var(--glass-hi, rgba(255,255,255,0.12));
@@ -311,6 +321,29 @@ body.subagent-open #subagent-panel { transform: translateX(0); }
   flex: 1; overflow-y: auto; padding: 18px 20px;
   scroll-behavior: smooth; user-select: text;
 }
+
+.subagent-composer {
+  display: flex; align-items: center; gap: 8px; flex: none;
+  padding: 10px 14px; border-top: 1px solid var(--stroke-soft);
+}
+#subagent-input {
+  flex: 1; border: none; outline: none; background: var(--glass-hi);
+  color: var(--text); font-family: var(--font); font-size: 13.5px;
+  padding: 9px 12px; border-radius: 10px; border: 1px solid var(--stroke-soft);
+}
+#subagent-input::placeholder { color: var(--text-faint); }
+#subagent-input:disabled { opacity: 0.45; cursor: default; }
+#subagent-send-btn {
+  width: 32px; height: 32px; border-radius: 50%; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  border: none; cursor: pointer; color: white;
+  background: linear-gradient(140deg, #ff9f0a, #ff6a00);
+  transition: transform 0.15s ease, filter 0.2s ease, opacity 0.2s ease;
+}
+#subagent-send-btn svg { width: 15px; height: 15px; }
+#subagent-send-btn:hover { filter: brightness(1.12); }
+#subagent-send-btn:active { transform: scale(0.93); }
+#subagent-send-btn:disabled { opacity: 0.35; cursor: default; filter: none; }
 
 /* generated / shown images */
 .image-card {
@@ -604,6 +637,9 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 .send-btn:focus-visible { outline: 2px solid white; outline-offset: 2px; }
 .send-btn:disabled { opacity: 0.35; cursor: default; filter: none; }
 .send-btn.stop { background: linear-gradient(140deg, #ff453a, #ff375f); box-shadow: 0 4px 16px rgba(255, 69, 58, 0.4); }
+/* while busy the send button becomes a "steer" button: still sends, but
+   doesn't interrupt the running turn -- distinct color says so at a glance */
+.send-btn.steer-mode { background: linear-gradient(140deg, #ff9f0a, #ff6a00); box-shadow: 0 4px 16px rgba(255, 159, 10, 0.4); }
 .composer-foot {
   display: flex; align-items: center; justify-content: center; gap: 12px;
   text-align: center; font-size: 10.5px; color: var(--text-faint); letter-spacing: 0.02em;

@@ -289,6 +289,10 @@ class WebEvents(AgentEvents):
     def compacted(self, summary):
         self.emit("compacted", summary=summary)
 
+    # steering --------------------------------------------------------------
+    def steered(self, text):
+        self.emit("steered", text=text)
+
     # sub-agents ----------------------------------------------------------
     def subagent(self, id, name, status, mission="", summary=""):
         self.emit("subagent", id=id, name=name, status=status,
@@ -786,6 +790,25 @@ class Api:
     def cancel(self):
         if self._agent:
             self._agent.request_cancel()
+        return {"ok": True}
+
+    def steer(self, text: str):
+        text = (text or "").strip()
+        if not text:
+            return {"error": "empty"}
+        if not self._agent or not self._agent.busy:
+            return {"error": "nothing running to steer"}
+        self._agent.steer(text)
+        return {"ok": True}
+
+    def steer_subagent(self, aid: str, text: str):
+        text = (text or "").strip()
+        if not text:
+            return {"error": "empty"}
+        if not self._agent:
+            return {"error": "no active chat"}
+        if not self._agent.steer_subagent(aid, text):
+            return {"error": "that sub-agent is no longer running"}
         return {"ok": True}
 
     def permission_response(self, rid: str, answer: str, feedback: str = ""):

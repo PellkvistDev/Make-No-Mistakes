@@ -88,6 +88,9 @@ class _CaptureEvents(AgentEvents):
     def tool_result(self, name: str, content: str, is_error: bool = False) -> None:
         self._forward(self._aid, "tool_result", name=name, content=content, is_error=is_error)
 
+    def steered(self, text: str) -> None:
+        self._forward(self._aid, "steered", text=text)
+
 
 class Agent:
     def __init__(self, cfg: Config, client: ZaiClient, events: AgentEvents | None = None,
@@ -109,6 +112,17 @@ class Agent:
             s for s in TOOL_SCHEMAS if s["function"]["name"] != SUBAGENT_TOOL
         ]
         self._emit_lock = threading.Lock()  # serialize sub-agent progress emits
+        # Steering: messages the user sends while this agent is mid-turn.
+        # They don't interrupt the current model call -- they're queued and
+        # injected as a plain user message the next time a tool result comes
+        # back, right before the model is called again.
+        self._steer_queue: list[str] = []
+        self._steer_lock = threading.Lock()
+        # Only meaningful on the coordinator instance (sub-agents don't spawn
+        # their own), but harmless to keep everywhere: lets the GUI reach a
+        # specific running sub-agent's Agent instance to steer it directly.
+        self._active_subagents: dict[str, "Agent"] = {}
+        self._active_subagents_lock = threading.Lock()
         self.rebuild_system_prompt()
 
     # ------------------------------------------------------------------ #
@@ -404,6 +418,38 @@ class Agent:
             self.busy = False
             self.events.turn_done(self.session_usage, self.context_estimate())
 
+    def steer(self, text: str) -> None:
+        """Queue a message from the user while this agent is mid-turn. It
+        doesn't interrupt whatever's in flight -- it's picked up and injected
+        as a plain user message the next time a tool result comes back."""
+        text = (text or "").strip()
+        if not text:
+            return
+        with self._steer_lock:
+            self._steer_queue.append(text)
+
+    def steer_subagent(self, aid: str, text: str) -> bool:
+        """Forward a steering message to a specific running sub-agent by id.
+        Returns False if that sub-agent isn't currently running."""
+        with self._active_subagents_lock:
+            sub = self._active_subagents.get(aid)
+        if sub is None:
+            return False
+        sub.steer(text)
+        return True
+
+    def _inject_steer_messages(self) -> None:
+        """Drain any queued steering messages into the conversation as a
+        regular user turn, and let the event sink show they arrived."""
+        with self._steer_lock:
+            if not self._steer_queue:
+                return
+            texts = self._steer_queue
+            self._steer_queue = []
+        for text in texts:
+            self.messages.append({"role": "user", "content": text})
+            self.events.steered(text)
+
     def _run_turn(self, user_message: dict) -> None:
         self.maybe_autocompact()
         self.messages.append(user_message)
@@ -442,6 +488,8 @@ class Agent:
             except (Cancelled, KeyboardInterrupt):
                 self.events.warn("interrupted during tool execution")
                 return
+
+            self._inject_steer_messages()
 
         # The loop ran out of steps without the model ever giving a plain-
         # text answer -- its last action was a tool call, so self.messages
@@ -667,8 +715,14 @@ class Agent:
         client = ZaiClient(self.client.api_key, self.client.base_url, rate_limiter=limiter)
         sink = _CaptureEvents(forward=self._emit_subagent_stream, aid=aid)
         sub = Agent(self.cfg, client, events=sink, allow_subagents=False)
-        sub.run_turn({"role": "user",
-                      "content": SUBAGENT_PREAMBLE.format(name=name, task=task)})
+        with self._active_subagents_lock:
+            self._active_subagents[aid] = sub
+        try:
+            sub.run_turn({"role": "user",
+                          "content": SUBAGENT_PREAMBLE.format(name=name, task=task)})
+        finally:
+            with self._active_subagents_lock:
+                self._active_subagents.pop(aid, None)
         report = _final_report_text(sub.messages)
         if report:
             return report

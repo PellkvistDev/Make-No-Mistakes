@@ -38,6 +38,11 @@ class AgentEvents:
     # -- turn lifecycle --------------------------------------------------- #
     def turn_done(self, usage, context: int = 0) -> None: ...
 
+    # -- steering ----------------------------------------------------------- #
+    def steered(self, text: str) -> None:
+        """A steering message the user sent mid-turn was just injected into
+        the conversation. No-op unless a UI is attached."""
+
     # -- context compaction ----------------------------------------------- #
     def compacted(self, summary: str) -> None:
         """The conversation was summarized; `summary` is the retained context."""

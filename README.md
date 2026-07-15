@@ -167,6 +167,13 @@ the main agent, so you can see exactly what a specific sub-agent is doing.
 Click another sub-agent's row (or its tab in the panel) to switch between
 them, or the **✕** to close the panel.
 
+**Steering** — while the main agent (or a sub-agent, from its own inspector
+panel) is mid-turn, you can still send a message: the composer's send button
+turns orange instead of disappearing. It doesn't interrupt whatever's running
+— your message is delivered the next time a tool call finishes, right before
+the model's next step, and a small note appears in the thread marking where
+it was injected.
+
 ### Voice
 
 Two independent features, both powered by [Kokoro](https://huggingface.co/hexgrad/Kokoro-82M)
