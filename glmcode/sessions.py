@@ -68,7 +68,8 @@ class SessionStore:
 
     def save(self, sid: str, cwd: str, messages: list,
              prompt_tokens: int, completion_tokens: int,
-             todos: list | None = None, title: str = "") -> None:
+             todos: list | None = None, title: str = "",
+             auto_backup: bool = True) -> None:
         body = [m for m in messages if m.get("role") != "system"]
         if not body:
             return  # never persist a session with no messages yet
@@ -89,6 +90,7 @@ class SessionStore:
             "completion_tokens": completion_tokens,
             "todos": todos or [],
             "messages": body,
+            "auto_backup": auto_backup,
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")

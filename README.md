@@ -193,6 +193,22 @@ speed). The **first** use of either feature installs a small package
 (`kokoro-onnx`) and downloads the Kokoro model (~300MB total, one-time,
 needs network access); everything after that runs fully offline.
 
+### Backups
+
+Optional, per-chat, on by default: before each message runs, your project's
+files are snapshotted to a hidden git repo (`~/.glmcode/backups/`) — separate
+from any git repo the project already has, so it never touches your real
+history, branches, or commits. Since it's just diffing the directory's
+current state, it works no matter *how* something changed — a bad edit, a
+destructive `run_powershell` command, whatever — as long as the change
+stayed inside the project folder (installs/effects outside it, or already-
+running processes, aren't something a file revert can undo).
+
+Toggle it when starting a new chat, or later in **Settings → Backups**,
+which also lists snapshots (by the message that triggered them) with a
+**Revert** button, plus a one-click **Revert last turn**. Reverting only
+changes files on disk — the chat conversation itself isn't affected.
+
 ### Permission modes
 
 | Mode | File edits | Shell commands |
@@ -257,6 +273,7 @@ glmcode/
   permissions.py  ask/autoedit/yolo modes, session allowlists, diff previews
   prompts.py      the system prompt, vision-analysis prompt, compaction prompt
   sessions.py     ~/.glmcode/sessions/*.json — chat history per project folder
+  backup.py       ~/.glmcode/backups/ — per-chat shadow git repo, snapshot + revert
   events.py       frontend-agnostic event sink the agent reports through
   ui.py           rich terminal UI (streaming markdown, diffs, todo panel)
   cli.py          REPL, slash commands, image detection, first-run setup

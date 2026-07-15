@@ -24,6 +24,8 @@ import webview
 from .. import __version__
 from ..agent import Agent
 from ..api import IMAGE_EXTENSIONS, ZaiClient
+from ..backup import BackupRepo
+from .. import backup as backup_module
 from ..config import CONFIG_DIR, PERMISSION_MODES, Config, load_config, save_config
 from ..events import AgentEvents
 from ..prompts import TITLE_PROMPT
@@ -390,6 +392,8 @@ class Api:
         self.session_title: str = ""   # AI-chosen chat name; "" until first turn
         self._client: ZaiClient | None = None
         self._turn_lock = threading.Lock()
+        self.auto_backup: bool = True
+        self._backup_repo: BackupRepo | None = None
 
         configure_search(self._cfg.search_provider, self._cfg.resolve_tavily_key())
         # Initialize command aliases for npm/yarn/pnpm/git
@@ -601,7 +605,7 @@ class Api:
 
     def _activate_session(self, sid: str, messages: list, cwd: str,
                           prompt_tokens: int, completion_tokens: int,
-                          todos: list, title: str = "") -> dict:
+                          todos: list, title: str = "", auto_backup: bool = True) -> dict:
         cwd_ok = True
         if cwd:
             try:
@@ -616,6 +620,8 @@ class Api:
         self._agent = agent
         self.session_id = sid
         self.session_title = title
+        self.auto_backup = auto_backup
+        self._backup_repo = BackupRepo(sid, Path.cwd()) if cwd_ok else None
         restore_todos(todos)
         self._cfg.last_session_id = sid
         save_config(self._cfg)
@@ -635,7 +641,7 @@ class Api:
             "context": agent.context_estimate(),
         }
 
-    def new_session(self):
+    def new_session(self, auto_backup: bool = True):
         """Start a brand-new chat. The user picks the project folder themselves —
         nothing is auto-created or defaulted."""
         if self._agent and self._agent.busy:
@@ -646,11 +652,11 @@ class Api:
         path = Path(picked[0] if isinstance(picked, (list, tuple)) else picked)
         if not path.is_dir():
             return {"error": "not a folder"}
-        res = self._activate_session(new_id(), [], str(path), 0, 0, [])
+        res = self._activate_session(new_id(), [], str(path), 0, 0, [], auto_backup=auto_backup)
         res["sessions"] = self.list_sessions()
         return res
 
-    def open_whiteboard(self):
+    def open_whiteboard(self, auto_backup: bool = True):
         """Start a brand-new chat in the always-available scratch folder,
         creating it next to this app's own install directory if this is the
         first time it's used. No folder picker -- unlike new_session, there's
@@ -658,7 +664,7 @@ class Api:
         if self._agent and self._agent.busy:
             return {"error": "busy"}
         WHITEBOARD_DIR.mkdir(parents=True, exist_ok=True)
-        res = self._activate_session(new_id(), [], str(WHITEBOARD_DIR), 0, 0, [])
+        res = self._activate_session(new_id(), [], str(WHITEBOARD_DIR), 0, 0, [], auto_backup=auto_backup)
         res["sessions"] = self.list_sessions()
         return res
 
@@ -687,6 +693,7 @@ class Api:
             sid, data.get("messages", []), data.get("cwd", ""),
             data.get("prompt_tokens", 0), data.get("completion_tokens", 0),
             data.get("todos", []), data.get("title", ""),
+            auto_backup=data.get("auto_backup", True),
         )
         res["sessions"] = self.list_sessions()
         return res
@@ -707,7 +714,35 @@ class Api:
             u = self._agent.session_usage
             self._store.save(self.session_id, str(Path.cwd()), self._agent.messages,
                             u.prompt_tokens, u.completion_tokens, todos=get_todos(),
-                            title=self.session_title)
+                            title=self.session_title, auto_backup=self.auto_backup)
+
+    # -- backups (per-chat shadow git repo) --------------------------------- #
+
+    def backup_status(self):
+        available = backup_module.available()
+        snapshots = []
+        if available and self._backup_repo:
+            snapshots = [
+                {"commit": s.commit, "message": s.message, "timestamp": s.timestamp}
+                for s in reversed(self._backup_repo.list_snapshots())
+            ]
+        return {"available": available, "enabled": self.auto_backup, "snapshots": snapshots}
+
+    def set_backup_enabled(self, enabled: bool):
+        self.auto_backup = bool(enabled)
+        self._save_current()
+        return {"ok": True}
+
+    def revert_backup(self, commit: str):
+        if not self._backup_repo:
+            return {"error": "no active chat"}
+        if self._agent and self._agent.busy:
+            return {"error": "can't revert while the agent is working"}
+        try:
+            self._backup_repo.revert_to(commit)
+        except Exception as e:
+            return {"error": str(e)}
+        return {"ok": True}
 
     def _generate_title(self, first_message: str) -> str:
         """Ask the model for a short chat name from the first user message.
@@ -765,6 +800,15 @@ class Api:
                 msg = self._agent.attach_files(text, paths)
             else:
                 msg = {"role": "user", "content": text}
+            # File backup: commit the project's current state (i.e. how it
+            # looked right before this message's own edits) so "revert to
+            # here" later can put it back. Best-effort -- a backup failure
+            # must never block sending a message.
+            if self.auto_backup and self._backup_repo:
+                try:
+                    self._backup_repo.snapshot(text or "(files attached)")
+                except Exception as e:
+                    self._events.warn(f"backup snapshot failed: {e}")
             # Snapshot the read-aloud toggle for this turn only: if it's off
             # right now, TTS is never touched below, even if the user flips
             # it mid-response; if it's on, it stays on for this whole turn

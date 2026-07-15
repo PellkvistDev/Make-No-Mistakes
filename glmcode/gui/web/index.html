@@ -170,6 +170,11 @@
       <h2 id="newchat-title">New chat</h2>
     </div>
     <p class="row-sub">Pick a project folder, or use the whiteboard for quick, throwaway work.</p>
+    <div class="row newchat-backup-row">
+      <div class="row-text"><label for="newchat-backup">Auto-backup this project</label>
+        <span class="row-sub">Snapshots your files before each message, so you can revert if something goes wrong</span></div>
+      <button id="newchat-backup" class="switch" role="switch" aria-checked="true"><span></span></button>
+    </div>
     <div class="sheet-actions">
       <button id="newchat-whiteboard" class="btn btn-ghost">Open whiteboard</button>
       <button id="newchat-folder" class="btn btn-primary">Open a folder…</button>
@@ -288,6 +293,29 @@
       </div>
       <p class="row-sub">"New chat here" starts fresh in the same project folder —
          your old conversation stays in the history sidebar.</p>
+    </section>
+
+    <section id="backups-section">
+      <h3>Backups</h3>
+      <div class="row">
+        <div class="row-text"><label for="backup-toggle">Auto-backup this project</label>
+          <span class="row-sub">Snapshots your files before each message</span></div>
+        <button id="backup-toggle" class="switch" role="switch" aria-checked="true"><span></span></button>
+      </div>
+      <p class="row-sub" id="backup-unavailable-note" hidden>Requires git to be installed and on your PATH.</p>
+      <div class="row">
+        <div class="row-text"><label>Revert files</label>
+          <span class="row-sub" id="backup-count-note">No snapshots yet</span></div>
+        <div class="row-actions">
+          <button id="backup-revert-last" class="btn btn-danger-ghost">Revert last turn</button>
+        </div>
+      </div>
+      <details id="backup-history">
+        <summary>Or revert to an earlier point…</summary>
+        <div id="backup-list" class="backup-list"></div>
+      </details>
+      <p class="row-sub">Reverts your project's files back to how they looked right before a
+         message ran. Chat history isn't affected — only files on disk.</p>
     </section>
 
     <section>
