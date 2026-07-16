@@ -1,0 +1,24 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # The test suite exercises the core only (agent loop, API retry,
+      # steering, sub-agents, backups, sessions, memory) -- it needs no GUI
+      # deps, no ML deps, and makes no network calls.
+      - run: pip install requests pytest
+      - run: python -m pytest tests/ -q

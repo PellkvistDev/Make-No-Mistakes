@@ -289,4 +289,9 @@ glmcode/
   cli.py          REPL, slash commands, image detection, first-run setup
   config.py       ~/.glmcode/config.json
   gui/            desktop app: pywebview shell (app.py) + HTML/CSS/JS (web/)
+tests/            pytest suite (no network, no GUI deps): agent loop, retry/
+                  backoff, steering, sub-agents, backups, sessions, memory
 ```
+
+Run the tests with `pip install pytest` then `python -m pytest tests/ -q` —
+they also run automatically on every push via GitHub Actions.
