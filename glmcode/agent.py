@@ -778,16 +778,16 @@ class Agent:
             aid = f"sa{call_id}-{i + 1}"
             self._emit_subagent(aid, name, "running", mission=task[:280])
             if not task:
-                results[i] = (name, "", "no task was given")
+                results[i] = (name, "", "no task was given", None)
                 self._emit_subagent(aid, name, "error", summary="no task given")
                 return
             try:
-                report = self._run_single_subagent(name, task, limiter, aid)
-                results[i] = (name, report, None)
+                report, usage = self._run_single_subagent(name, task, limiter, aid)
+                results[i] = (name, report, None, usage)
                 self._emit_subagent(aid, name, "done", summary=_first_line(report))
             except Exception as e:  # keep one failure from sinking the rest
                 err = f"{type(e).__name__}: {e}"
-                results[i] = (name, "", err)
+                results[i] = (name, "", err, None)
                 self._emit_subagent(aid, name, "error", summary=err[:280])
 
         threads = []
@@ -802,16 +802,23 @@ class Agent:
 
         out = [f"Ran {len(specs)} sub-agent(s) in parallel. Their reports:\n"]
         for entry in results:
-            name, report, err = entry
+            name, report, err, usage = entry
+            # Sub-agent token usage used to be dropped entirely (it lived on
+            # the discarded sub-Agent). Fold it in here, after join(), so the
+            # accumulation happens on one thread -- Usage.add isn't locked.
+            if usage is not None:
+                self.session_usage.add(usage)
             if err:
                 out.append(f"### {name} — FAILED\n{err}\n")
             else:
                 out.append(f"### {name}\n{report or '(no output)'}\n")
         return "\n".join(out)
 
-    def _run_single_subagent(self, name: str, task: str, limiter: RateLimiter, aid: str) -> str:
+    def _run_single_subagent(self, name: str, task: str, limiter: RateLimiter,
+                             aid: str) -> tuple[str, Usage]:
         """One sub-agent: a fresh Agent (own client + non-interactive sink) that
-        runs its mission to completion and returns its final report text."""
+        runs its mission to completion. Returns (final report text, its token
+        usage) -- the caller folds the usage into the coordinator's totals."""
         # A separate client per thread avoids sharing one requests.Session
         # across concurrent requests; the rate limiter IS shared (see
         # _run_subagents) so all sub-agents' requests stay spaced out.
@@ -828,13 +835,13 @@ class Agent:
                 self._active_subagents.pop(aid, None)
         report = _final_report_text(sub.messages)
         if report:
-            return report
+            return report, sub.session_usage
         for m in reversed(sub.messages):
             if m.get("role") == "assistant" and isinstance(m.get("content"), str) \
                     and m["content"].strip():
-                return m["content"].strip()
+                return m["content"].strip(), sub.session_usage
         if sink.text.strip():
-            return sink.text.strip()
+            return sink.text.strip(), sub.session_usage
         # No report by any path means the sub-agent's turn ended without ever
         # producing text -- almost always because it died early (an ApiError
         # like a rate-limit, which _run_turn catches and swallows without
