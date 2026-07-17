@@ -345,7 +345,14 @@ class WebEvents(AgentEvents):
                   context=context)
 
     # context compaction --------------------------------------------------
+    on_compacted = None  # set by Api._make_events to prune the snapshot map
+
     def compacted(self, summary):
+        if self.on_compacted:
+            try:
+                self.on_compacted()
+            except Exception:
+                pass
         self.emit("compacted", summary=summary)
 
     # steering --------------------------------------------------------------
@@ -470,6 +477,11 @@ class ChatState:
         self.model = ""
         self.auto_backup = True
         self.turn_lock = threading.Lock()  # one turn at a time PER CHAT
+        # One entry per send-turn, in order: {"commit": <hash or None>}. The
+        # list index IS the turn ordinal, so turn_snapshots[k] is the pre-turn
+        # file state of the k-th user turn -- what "edit & resend" reverts to.
+        # Cleared on compaction (older turns' messages no longer exist).
+        self.turn_snapshots: list[dict] = []
 
 
 class Api:
@@ -589,7 +601,16 @@ class Api:
         ev._cfg = self._cfg
         ev._window = self._window
         ev.notifier = lambda body, _sid=sid: self._os_attention(_sid, body)
+        # Compaction rewrites history (older turns' messages are replaced by a
+        # summary), so their pre-turn snapshot commits no longer line up with
+        # any turn -- drop them so "edit & resend" can't revert to a stale one.
+        ev.on_compacted = lambda _sid=sid: self._on_compacted(_sid)
         return ev
+
+    def _on_compacted(self, sid: str) -> None:
+        cs = self._chats.get(sid)
+        if cs:
+            cs.turn_snapshots = []
 
     def _os_attention(self, sid: str, body: str) -> None:
         """OS-level toast for 'this chat needs you': a blocking permission
@@ -979,7 +1000,8 @@ class Api:
     def _activate_session(self, sid: str, messages: list, cwd: str,
                           prompt_tokens: int, completion_tokens: int,
                           todos: list, title: str = "", auto_backup: bool = True,
-                          model_provider: str = "", model: str = "") -> dict:
+                          model_provider: str = "", model: str = "",
+                          turn_snapshots: list | None = None) -> dict:
         # A chat that's already open (possibly mid-turn in the background)
         # just becomes the active one -- its live agent, not a disk reload.
         if sid in self._chats:
@@ -1000,6 +1022,7 @@ class Api:
         agent.set_usage(prompt_tokens, completion_tokens)
         agent.todos = list(todos or [])
         self._chats[sid] = ChatState(sid, agent, events)
+        self._chats[sid].turn_snapshots = list(turn_snapshots or [])
         self.session_id = sid
         self.session_title = title
         self.auto_backup = auto_backup
@@ -1098,6 +1121,7 @@ class Api:
             auto_backup=data.get("auto_backup", True),
             model_provider=data.get("model_provider", ""),
             model=data.get("model", ""),
+            turn_snapshots=data.get("turn_snapshots", []),
         )
         res["sessions"] = self.list_sessions()
         return res
@@ -1125,7 +1149,8 @@ class Api:
                          u.prompt_tokens, u.completion_tokens,
                          todos=cs.agent.todos, title=cs.title,
                          auto_backup=cs.auto_backup,
-                         model_provider=cs.provider, model=cs.model)
+                         model_provider=cs.provider, model=cs.model,
+                         turn_snapshots=cs.turn_snapshots)
 
     def _save_current(self) -> None:
         if self._active:
@@ -1180,6 +1205,58 @@ class Api:
         except Exception as e:
             return {"error": str(e)}
         return {"ok": True}
+
+    def rewind_to(self, turn_ordinal):
+        """Edit & resend: rewind the active chat to just before one of your
+        past messages -- revert the project files to that turn's pre-turn
+        snapshot and truncate the conversation there -- so the JS can re-send
+        the edited text as a fresh turn. `turn_ordinal` is the message's
+        send-turn number (its position among your messages, counting from 0);
+        the absolute truncation point is resolved from it here, so the JS only
+        has to count user bubbles -- no per-bubble bookkeeping to drift."""
+        cs = self._active
+        if not cs:
+            return {"error": "no active chat"}
+        if cs.agent.busy:
+            return {"error": "can't edit a message while the agent is working"}
+        agent = cs.agent
+        try:
+            turn_ordinal = int(turn_ordinal)
+        except (TypeError, ValueError):
+            return {"error": "bad message reference"}
+        # Resolve the turn ordinal to an absolute message position via the same
+        # display mapping the JS sees, so the two can't disagree.
+        msg_index = next((it["msg_index"] for it in to_display(agent.messages)
+                          if it.get("kind") == "user"
+                          and it.get("turn_ordinal") == turn_ordinal), None)
+        if msg_index is None or not (0 <= msg_index < len(agent.messages)) \
+                or agent.messages[msg_index].get("role") != "user":
+            return {"error": "that message is no longer available"}
+
+        # Revert files to how they looked right before this turn ran, if we
+        # have that snapshot (backups may have been off for it, or it predates
+        # a compaction that cleared the map).
+        reverted = False
+        had_snapshot = 0 <= turn_ordinal < len(cs.turn_snapshots)
+        commit = cs.turn_snapshots[turn_ordinal]["commit"] if had_snapshot else None
+        if commit and cs.backup_repo:
+            try:
+                cs.backup_repo.revert_to(commit)
+                reverted = True
+            except Exception as e:
+                return {"error": f"couldn't revert the project files: {e}"}
+
+        # Rewind the conversation and the snapshot map to this point. The JS
+        # re-sends the edited text next, which appends a fresh turn (and a
+        # fresh snapshot) from here.
+        del agent.messages[msg_index:]
+        del cs.turn_snapshots[turn_ordinal:]
+        agent.todos = []  # any checklist from the undone turns is stale now
+        self._save_chat(cs)
+        payload = self._session_payload(cs)
+        payload["reverted"] = reverted
+        payload["had_snapshot"] = bool(commit)
+        return payload
 
     def _generate_title(self, first_message: str) -> str:
         """Ask the model for a short chat name from the first user message.
@@ -1261,16 +1338,20 @@ class Api:
             # File backup: commit the project's current state (i.e. how it
             # looked right before this message's own edits) so "revert to
             # here" later can put it back. Best-effort -- a backup failure
-            # must never block sending a message.
+            # must never block sending a message. One turn_snapshots entry is
+            # recorded PER turn regardless (commit None when backups are off),
+            # so its index stays the turn ordinal that "edit & resend" uses.
+            commit = None
             if cs.auto_backup and cs.backup_repo:
                 try:
                     # Visible in the status chip: on a big project the git
                     # snapshot can take a moment, and silent pre-turn latency
                     # reads as "the app is slow" rather than "it's working".
                     with events.status("backing up project files..."):
-                        cs.backup_repo.snapshot(text or "(files attached)")
+                        commit = cs.backup_repo.snapshot(text or "(files attached)")
                 except Exception as e:
                     events.warn(f"backup snapshot failed: {e}")
+            cs.turn_snapshots.append({"commit": commit})
             # Snapshot the read-aloud toggle for this turn only: if it's off
             # right now, TTS is never touched below, even if the user flips
             # it mid-response; if it's on, it stays on for this whole turn

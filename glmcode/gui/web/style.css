@@ -578,7 +578,28 @@ body.subagent-open #subagent-panel { transform: translateX(0); }
 .msg { margin-bottom: 16px; display: flex; flex-direction: column; animation: rise 0.28s ease; }
 @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
-.msg-user { align-items: flex-end; }
+.msg-user { flex-direction: row; align-items: center; justify-content: flex-end; gap: 6px; }
+/* hover-revealed edit & resend affordance, sits left of the bubble */
+.user-edit {
+  opacity: 0; flex: none;
+  width: 26px; height: 26px; border-radius: 7px;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--text-faint); background: transparent; border: none; cursor: pointer;
+  transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.user-edit svg { width: 14px; height: 14px; }
+.msg-user:hover .user-edit { opacity: 1; }
+.user-edit:hover { color: var(--text); background: var(--glass-hi); }
+.msg-user:has(.user-edit-box) .user-edit { display: none; }
+.user-edit-box { display: flex; flex-direction: column; gap: 8px; width: min(80%, 580px); }
+.user-edit-ta {
+  width: 100%; min-height: 72px; resize: vertical;
+  background: rgba(10, 14, 26, 0.72); color: var(--text);
+  border: 1px solid var(--accent); border-radius: var(--r-md);
+  padding: 10px 13px; font-family: var(--font); font-size: 14px; line-height: 1.5;
+}
+.user-edit-ta:focus { outline: none; box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.25); }
+.user-edit-actions { display: flex; justify-content: flex-end; gap: 8px; }
 .bubble-user {
   max-width: 78%;
   background: linear-gradient(140deg, rgba(10, 132, 255, 0.92), rgba(64, 93, 230, 0.92));

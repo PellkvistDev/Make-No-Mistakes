@@ -398,6 +398,16 @@ function addUserMessage(text, images, note, plan) {
   $("empty-hint").hidden = true;
   const wrap = document.createElement("div");
   wrap.className = "msg msg-user";
+  wrap.dataset.rawText = text;
+  // Edit & resend: rewinds the chat (and reverts project files) to just
+  // before this message, then resends the edited text. Hover-revealed.
+  const edit = document.createElement("button");
+  edit.className = "user-edit";
+  edit.title = "Edit & resend";
+  edit.setAttribute("aria-label", "Edit and resend this message");
+  edit.innerHTML = PENCIL_SVG;
+  edit.addEventListener("click", () => startEditUser(wrap));
+  wrap.appendChild(edit);
   const b = document.createElement("div");
   b.className = "bubble-user";
   b.textContent = text;
@@ -435,6 +445,63 @@ function addUserMessage(text, images, note, plan) {
   wrap.appendChild(b);
   chatEl.appendChild(wrap);
   scrollDown(true);
+}
+
+/* Edit & resend a past message: rewind the chat to just before it (the
+   backend reverts the project files to that turn's snapshot and truncates
+   the conversation), then resend the edited text as a fresh turn. */
+function startEditUser(wrap) {
+  if (busy) { toast("Can't edit a message while the agent is working.", "warn", 3500); return; }
+  if (wrap.querySelector(".user-edit-box")) return; // already editing this one
+  const bubble = wrap.querySelector(".bubble-user");
+  bubble.style.display = "none";
+  const box = document.createElement("div");
+  box.className = "user-edit-box";
+  const ta = document.createElement("textarea");
+  ta.className = "user-edit-ta";
+  ta.value = wrap.dataset.rawText || "";
+  const actions = document.createElement("div");
+  actions.className = "user-edit-actions";
+  const cancel = document.createElement("button");
+  cancel.className = "btn btn-ghost"; cancel.textContent = "Cancel";
+  const save = document.createElement("button");
+  save.className = "btn btn-primary"; save.textContent = "Save & resend";
+  actions.append(cancel, save);
+  box.append(ta, actions);
+  wrap.appendChild(box);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+
+  const close = () => { box.remove(); bubble.style.display = ""; };
+  cancel.addEventListener("click", close);
+  ta.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { e.preventDefault(); close(); }
+    else if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); doSave(); }
+  });
+  save.addEventListener("click", doSave);
+
+  async function doSave() {
+    const newText = ta.value.trim();
+    if (!newText) { toast("Message can't be empty.", "warn", 2500); return; }
+    // Turn ordinal = this bubble's position among all user bubbles, which is
+    // exactly the send-turn order the backend counts.
+    const ordinal = [...document.querySelectorAll(".msg-user")].indexOf(wrap);
+    save.disabled = cancel.disabled = true;
+    let res;
+    try { res = await api().rewind_to(ordinal); }
+    catch (e) { toast("Bridge error: " + e, "error", 6000); save.disabled = cancel.disabled = false; return; }
+    if (res && res.error) { toast(res.error, "error", 5000); save.disabled = cancel.disabled = false; return; }
+    // Re-render the truncated conversation, then resend the edited text (the
+    // normal send path adds the fresh bubble + drives streaming).
+    clearChatDom();
+    renderHistory(res.items, res.todos);
+    if (res.reverted) toast("Project files reverted to before that message.", "info", 3500);
+    else if (res.had_snapshot === false)
+      toast("Chat rewound. Files weren't reverted (no backup for that turn).", "info", 4500);
+    input.value = newText;
+    input.style.height = "auto";
+    sendMessage();
+  }
 }
 
 function handleBackgroundEvent(ev) {

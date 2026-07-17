@@ -81,7 +81,8 @@ class SessionStore:
              prompt_tokens: int, completion_tokens: int,
              todos: list | None = None, title: str = "",
              auto_backup: bool = True,
-             model_provider: str = "", model: str = "") -> None:
+             model_provider: str = "", model: str = "",
+             turn_snapshots: list | None = None) -> None:
         body = [m for m in messages if m.get("role") != "system"]
         if not body:
             return  # never persist a session with no messages yet
@@ -106,6 +107,9 @@ class SessionStore:
             # Per-chat model choice ("" = the built-in free default).
             "model_provider": model_provider,
             "model": model,
+            # One pre-turn shadow-git commit per send-turn, in order; powers
+            # "edit & resend" (revert files to that turn, then rewind).
+            "turn_snapshots": turn_snapshots or [],
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
@@ -159,12 +163,18 @@ def _compacted_summary(text: str) -> str:
 
 def to_display(messages: list) -> list[dict]:
     items: list[dict] = []
-    body = [m for m in messages if m.get("role") != "system"]
     results = {m.get("tool_call_id"): m.get("content", "")
-               for m in body if m.get("role") == "tool"}
+               for m in messages if m.get("role") == "tool"}
+    # Per real user turn, in order, so "edit & resend" can name which turn to
+    # rewind to (turn_ordinal) and where to truncate (msg_index, absolute in
+    # `messages`). Only genuine user turns count -- steering/nudge/compaction
+    # user-role messages don't (they `continue` before the user append).
+    turn_ordinal = 0
 
-    for m in body:
+    for abs_idx, m in enumerate(messages):
         role = m.get("role")
+        if role == "system":
+            continue
         if role == "user":
             c = m.get("content")
             images: list[str] = []
@@ -196,7 +206,9 @@ def to_display(messages: list) -> list[dict]:
                 text = text.split(marker, 1)[0]
                 described = True
             items.append({"kind": "user", "text": text.strip(),
-                         "images": images, "described": described, "plan": plan})
+                         "images": images, "described": described, "plan": plan,
+                         "msg_index": abs_idx, "turn_ordinal": turn_ordinal})
+            turn_ordinal += 1
         elif role == "assistant":
             content = m.get("content")
             if content and content != ("Understood — I have the session summary "
