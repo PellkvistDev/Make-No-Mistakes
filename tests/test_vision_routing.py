@@ -96,6 +96,31 @@ def test_upload_direct_mode_embeds_image(scripted_agent, tmp_path):
     assert any(p.get("type") == "text" and "what is this" in p["text"] for p in parts)
 
 
+def test_direct_mode_embeds_at_mentioned_image(scripted_agent, tmp_path):
+    """An @-mentioned image (not a composer upload) still gets embedded in
+    direct mode via embed_images, so the model sees it."""
+    agent = scripted_agent()
+    agent.workdir = tmp_path
+    agent.cfg.vision_route = "direct"
+    img = _tiny_png(tmp_path)
+    msg = agent.attach_uploads("what is generated/shot.png", [], embed_images=[img])
+    parts = msg["content"]
+    assert isinstance(parts, list)
+    assert any(p.get("type") == "image_url" for p in parts)
+
+
+def test_describe_mode_leaves_mentioned_image_as_path(scripted_agent, tmp_path):
+    """In describe mode an @-mentioned image is NOT embedded -- its clean path
+    stays in the text for the model to view_image (GLM vision)."""
+    agent = scripted_agent()
+    agent.workdir = tmp_path
+    agent.cfg.vision_route = "describe"
+    img = _tiny_png(tmp_path)
+    msg = agent.attach_uploads("what is shot.png", [], embed_images=[img])
+    assert isinstance(msg["content"], str)  # plain text, no embedded image
+    assert "shot.png" in msg["content"]
+
+
 def test_upload_direct_mode_mixes_image_and_other_file(scripted_agent, tmp_path):
     agent = scripted_agent()
     agent.workdir = tmp_path

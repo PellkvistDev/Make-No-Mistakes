@@ -322,37 +322,41 @@ class Agent:
         combined = f"{text}\n\n[{note}]" if text else f"[{note}]"
         return {"role": "user", "content": combined}
 
-    def attach_uploads(self, text: str, paths: list[Path]) -> dict:
+    def attach_uploads(self, text: str, paths: list[Path],
+                       embed_images: list[Path] | None = None) -> dict:
         """The desktop app's attachment handler, honoring vision_route:
 
-        - "describe" (default): every file -> uploads/ + a path reference (the
-          model reads/view_images them; images route through GLM vision). This
-          is the long-standing behavior.
-        - "direct": image files are embedded inline so a multimodal chat model
-          sees them itself; non-image files still go to uploads/ + a reference.
+        - "describe" (default): every uploaded file -> uploads/ + a path
+          reference (the model reads/view_images them; images route through GLM
+          vision). `embed_images` (from @-mentions) are left alone -- their
+          clean paths are already in `text` for the model to view_image.
+        - "direct": image files (uploaded AND @-mentioned) are embedded inline
+          so a multimodal chat model sees them itself; non-image uploads still
+          go to uploads/ + a reference.
         """
+        paths = paths or []
+        embed_images = embed_images or []
         if self.cfg.vision_route != "direct":
-            return self.attach_files(text, paths)
+            return (self.attach_files(text, paths) if paths
+                    else {"role": "user", "content": text})
         from .api import IMAGE_EXTENSIONS
-        images = [p for p in paths if p.suffix.lower() in IMAGE_EXTENSIONS]
+        up_images = [p for p in paths if p.suffix.lower() in IMAGE_EXTENSIONS]
         others = [p for p in paths if p.suffix.lower() not in IMAGE_EXTENSIONS]
         parts: list = []
-        embedded = []
-        for p in images:
+        for p in list(up_images) + list(embed_images):
             try:
                 parts.append({"type": "image_url", "image_url": {"url": self._encode(p)}})
-                embedded.append(p)
             except ValueError:
                 others.append(p)  # too big to embed -> fall back to a file ref
         if not parts:
-            return self.attach_files(text, paths)  # nothing embeddable
+            return (self.attach_files(text, paths) if paths
+                    else {"role": "user", "content": text})
         note = text or ""
         if others:
             refs = self._copy_to_uploads(others)
             note = (note + "\n\n" if note else "") + \
                 "[The user also attached: " + ", ".join(refs) + "]"
-        names = ", ".join(p.name for p in embedded)
-        parts.append({"type": "text", "text": note or f"(the user attached: {names})"})
+        parts.append({"type": "text", "text": note or "(images attached)"})
         return {"role": "user", "content": parts}
 
     def _payload_has_images(self) -> bool:

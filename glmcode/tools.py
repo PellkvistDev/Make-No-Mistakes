@@ -162,28 +162,41 @@ _LANG_BY_EXT = {"py": "python", "js": "javascript", "ts": "typescript",
                 "yml": "yaml", "yaml": "yaml"}
 
 
-def build_file_context(root: Path, text: str,
-                       per_file: int = 6000, total: int = 20000) -> str:
-    """For each @-mentioned path in `text` that resolves to a real file under
-    `root`, return a delimited block of its current contents to append to the
-    message (so the model has the exact code without a read_file round-trip).
-    Empty string if nothing valid is mentioned. Guards against false positives
-    (@decorator, @user) by requiring the path to actually exist."""
-    from .prompts import FILE_CONTEXT_MARKER
+def resolve_mentions(root: Path, text: str) -> list[dict]:
+    """Every @-mentioned path in `text` that resolves to a real file under
+    `root`, as [{token, rel, path, is_image}]. Guards against false positives
+    (@decorator, @user, an @email) by requiring the file to actually exist."""
+    from .api import IMAGE_EXTENSIONS
     root = Path(root)
-    seen: list[str] = []
+    out: list[dict] = []
+    seen: set[str] = set()
     for m in _MENTION_RE.finditer(text or ""):
-        rel = m.group(1).rstrip(".,;:)")
-        if rel not in seen:
-            seen.append(rel)
-    blocks, used = [], 0
-    for rel in seen:
-        p = (root / rel)
+        token = m.group(1)
+        rel = token.rstrip(".,;:)")
+        if rel in seen:
+            continue
+        p = root / rel
         try:
-            if not p.is_file() or p.resolve().relative_to(root.resolve()) is None:
+            if not p.is_file():
                 continue
+            p.resolve().relative_to(root.resolve())  # stay inside the project
         except (OSError, ValueError):
             continue
+        seen.add(rel)
+        out.append({"token": token, "rel": rel, "path": p,
+                    "is_image": p.suffix.lower() in IMAGE_EXTENSIONS})
+    return out
+
+
+def build_text_file_context(files: list, per_file: int = 6000,
+                            total: int = 20000) -> str:
+    """A delimited block of the current contents of the given text files, to
+    append to a message so the model has the exact code. `files` is a list of
+    (rel, Path). Empty string if none. Images are the caller's job (embed or
+    describe); this handles text only."""
+    from .prompts import FILE_CONTEXT_MARKER
+    blocks, used = [], 0
+    for rel, p in files:
         if _is_binary(p):
             continue
         try:
@@ -204,6 +217,14 @@ def build_file_context(root: Path, text: str,
     return (FILE_CONTEXT_MARKER +
             "\nThe user referenced these files with @. Their current contents:\n"
             + "".join(blocks) + "</referenced-files>")
+
+
+def build_file_context(root: Path, text: str,
+                       per_file: int = 6000, total: int = 20000) -> str:
+    """Back-compat wrapper: the text-file portion of the @-mention expansion."""
+    files = [(m["rel"], m["path"]) for m in resolve_mentions(root, text)
+             if not m["is_image"]]
+    return build_text_file_context(files, per_file, total)
 
 
 def _is_binary(path: Path) -> bool:

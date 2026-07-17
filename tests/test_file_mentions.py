@@ -65,3 +65,30 @@ def test_attached_context_is_hidden_from_display():
     user = [it for it in items if it["kind"] == "user"][0]
     assert user["text"] == "look at this"       # only the user's own words
     assert "code" not in user["text"]
+
+
+def test_resolve_mentions_flags_images_and_strips_at(project):
+    from glmcode.tools import resolve_mentions
+    img = project / "pic.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 40)  # minimal PNG-ish
+    text = "compare @src/main.py with @pic.png"
+    ms = resolve_mentions(project, text)
+    by_rel = {m["rel"]: m for m in ms}
+    assert by_rel["src/main.py"]["is_image"] is False
+    assert by_rel["pic.png"]["is_image"] is True
+    # the caller strips '@' using the token -> a clean path the model can use
+    for m in ms:
+        text = text.replace("@" + m["token"], m["rel"])
+    assert "@" not in text
+    assert "src/main.py" in text and "pic.png" in text
+
+
+def test_text_context_excludes_images(project):
+    from glmcode.tools import build_text_file_context, resolve_mentions
+    img = project / "pic.png"
+    img.write_bytes(b"\x00\x01\x02")
+    ms = resolve_mentions(project, "@src/main.py @pic.png")
+    block = build_text_file_context([(m["rel"], m["path"]) for m in ms
+                                     if not m["is_image"]])
+    assert "src/main.py" in block and "print('hi')" in block
+    assert "pic.png" not in block  # image never inlined as text

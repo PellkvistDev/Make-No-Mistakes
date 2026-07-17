@@ -34,7 +34,8 @@ from ..prompts import EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT
 from ..sessions import SessionStore, new_id, to_display
 from ..transcript import Transcript, search_sessions
 from ..tools import (configure_search,
-                     build_file_context as tools_build_file_context,
+                     resolve_mentions as tools_resolve_mentions,
+                     build_text_file_context as tools_build_text_file_context,
                      search_project_files as tools_search_project_files)
 from ..permissions import add_command_aliases
 
@@ -1339,26 +1340,39 @@ class Api:
         `cs`, never the active-chat accessors -- the user may be looking at a
         completely different chat by the time this finishes."""
         agent, events = cs.agent, cs.events
-        raw_text = text  # pre-wrap, for title generation
+        raw_text = text  # original user text, for title generation
         ok = False
         try:
             events.emit("chat_busy")
+            # @-mentioned files. Two things happen here: the "@" is stripped from
+            # every mention that resolves to a real file (so the model gets a
+            # clean path like generated/x.jpg, not "@generated/x.jpg" which it
+            # would try to open literally), text files have their contents
+            # inlined, and image files are collected to embed (direct mode) or
+            # left as a clean path for view_image (describe mode). Best-effort.
+            mention_images: list = []
+            try:
+                mentions = tools_resolve_mentions(agent.workdir, text)
+                for mn in mentions:
+                    text = text.replace("@" + mn["token"], mn["rel"])
+                text_files = [(mn["rel"], mn["path"]) for mn in mentions
+                              if not mn["is_image"]]
+                mention_images = [mn["path"] for mn in mentions if mn["is_image"]]
+                file_ctx = tools_build_text_file_context(text_files)
+            except Exception:
+                file_ctx = ""
             if plan and text:
                 # Read-only planning turn: the preamble sets expectations and
                 # permissions.plan_only (below) makes them non-negotiable.
                 text = PLAN_MODE_PREAMBLE.format(text=text)
-            # @-mentioned files: append their current contents so the model has
-            # exact code without a read_file round-trip. Scanned from raw_text
-            # (the user's own words), appended after any plan wrapping, and
-            # stripped from the on-screen message by to_display. Best-effort.
-            try:
-                file_ctx = tools_build_file_context(agent.workdir, raw_text)
-            except Exception:
-                file_ctx = ""
+            # File contents are appended after the marker so to_display keeps
+            # them off the on-screen message.
             if file_ctx:
                 text = text + file_ctx
-            msg = (agent.attach_uploads(text, paths) if paths
-                   else {"role": "user", "content": text})
+            if paths or mention_images:
+                msg = agent.attach_uploads(text, paths, embed_images=mention_images)
+            else:
+                msg = {"role": "user", "content": text}
             agent.permissions.plan_only = bool(plan and text)
             # File backup: commit the project's current state (i.e. how it
             # looked right before this message's own edits) so "revert to
