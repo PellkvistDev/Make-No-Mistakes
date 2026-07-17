@@ -1095,6 +1095,13 @@ body.sidebar-open #sidebar { transform: translateX(0); }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   font-family: var(--mono);
 }
+.sess-dot {
+  display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-right: 7px; vertical-align: 1px;
+}
+.sess-dot-busy { background: var(--accent); animation: sa-pulse 1s ease-in-out infinite; }
+.sess-dot-unread { background: #30d158; }
+
 .sess-snippet {
   font-size: 11px; color: var(--text-dim); margin-top: 3px;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;

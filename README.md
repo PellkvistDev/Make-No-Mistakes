@@ -77,6 +77,14 @@ break until you regenerate them) — or if `requirements.txt` changed.
 
 - **Liquid glass UI** — frameless window, translucent blurred panels, macOS-style
   traffic lights, smooth streaming markdown, dark cinematic backdrop.
+- **Parallel chats** — chats keep working when you switch away. Kick off a
+  long task, jump to another project (or start a new chat) and keep talking;
+  the sidebar shows a pulsing dot on chats that are working and a green dot
+  on ones that finished while you were away (with a toast when they do).
+  Each chat's tools are pinned to its own project folder, so simultaneous
+  chats in different projects can't touch each other's files, and each keeps
+  its own task checklist. If a background chat needs a permission answer, it
+  waits patiently and asks the moment you switch back to it.
 - **Chat history, one per project** — like Claude Code / Codex, every chat is
   tied to a project folder and saved to disk (`~/.glmcode/sessions/`). The
   sidebar (toggle button next to the traffic lights) lists all your chats with

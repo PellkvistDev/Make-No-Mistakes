@@ -100,3 +100,45 @@ def test_main_tool_result_truncated_for_display():
     ev.tool_result("read_file", "y" * 60_000)
     ps = payloads(ev)
     assert len(ps[0]["content"]) == 12_000
+
+
+def test_events_tagged_with_session_id():
+    ev = WebEvents("chat-42")
+    ev._window = FakeWindow()
+    ev._ensure_flush_thread = lambda: None
+    ev.tool_call("read_file", {"path": "x"})
+    ev.subagent_stream("sa1", "tool_call", name="grep", args={})
+    for p in payloads(ev):
+        assert p["sid"] == "chat-42"
+
+
+def test_sidless_events_stay_untagged():
+    ev = make_events()  # no sid (global sink)
+    ev.tool_call("read_file", {})
+    assert "sid" not in payloads(ev)[0]
+
+
+def test_permission_registry_shared_across_chats():
+    import threading
+    shared = {}
+    ev_a = WebEvents("chat-a", shared)
+    ev_b = WebEvents("chat-b", shared)
+    ev_a._window = FakeWindow()
+    ev_b._window = FakeWindow()
+    answers = {}
+
+    def ask():
+        answers["got"] = ev_a.ask_permission("t", "p")
+
+    t = threading.Thread(target=ask, daemon=True)  # daemon: a regression here must fail, not hang pytest
+    t.start()
+    # wait for chat A's prompt to register, then answer it THROUGH chat B's
+    # sink -- the registry is shared, so any sink can resolve any prompt
+    for _ in range(100):
+        if shared:
+            break
+        threading.Event().wait(0.01)
+    rid = next(iter(shared))
+    ev_b.resolve_permission(rid, "y")
+    t.join(timeout=5)
+    assert answers["got"] == "y"

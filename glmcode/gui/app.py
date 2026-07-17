@@ -32,7 +32,7 @@ from ..events import AgentEvents
 from ..prompts import EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT
 from ..sessions import SessionStore, new_id, to_display
 from ..transcript import Transcript, search_sessions
-from ..tools import configure_search, get_todos, restore_todos
+from ..tools import configure_search
 from ..permissions import add_command_aliases
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -46,9 +46,22 @@ WHITEBOARD_DIR = Path(__file__).resolve().parents[3] / "whiteboard"
 # --------------------------------------------------------------------- #
 
 class WebEvents(AgentEvents):
-    """Pushes agent events into the webview as JSON; blocks on permissions."""
+    """Pushes agent events into the webview as JSON; blocks on permissions.
 
-    def __init__(self):
+    One instance per chat: every event is tagged with the chat's session id
+    (sid) so the page can route it -- render it live when that chat is the
+    active one, or update the sidebar (spinner/unread/permission badge) when
+    it's running in the background. Streaming buffers and TTS state are
+    per-turn state, which is exactly why instances can't be shared between
+    concurrently-running chats. The permission registry IS shared (passed
+    in), so Api.permission_response can resolve a prompt from any chat."""
+
+    def __init__(self, sid: str = "", pending: dict | None = None):
+        self._sid = sid
+        # NOTE: an empty shared registry is still a SHARED registry -- never
+        # test this with truthiness, or every chat quietly gets its own dict
+        # and cross-chat permission resolution breaks.
+        self._pending_shared = pending
         # Underscore-prefixed: pywebview's inject_pywebview() recursively
         # introspects every non-underscore attribute of the js_api object to
         # build the exposed JS surface. A public `window` attribute gets
@@ -58,7 +71,8 @@ class WebEvents(AgentEvents):
         # own .Empty). That blows the window's UI thread and freezes the
         # app permanently. Leading underscore makes pywebview skip it.
         self._window: webview.Window | None = None
-        self._pending: dict[str, dict] = {}
+        self._pending: dict[str, dict] = (
+            self._pending_shared if self._pending_shared is not None else {})
         self._cfg = None  # set by Api.__init__ to the shared Config instance
 
         # -- read-aloud state --------------------------------------------
@@ -105,6 +119,8 @@ class WebEvents(AgentEvents):
     def emit(self, type_: str, **data) -> None:
         if not self._window:
             return
+        if self._sid:
+            data.setdefault("sid", self._sid)
         payload = json.dumps({"type": type_, **data})
         try:
             # Hand the event to the page's sink. The payload is already
@@ -429,14 +445,36 @@ def persist_env_var(name: str, value: str) -> bool:
 
 # --------------------------------------------------------------------- #
 
+class ChatState:
+    """Everything one open chat owns: its live agent (which may be mid-turn
+    on a background thread), its event sink, and its per-chat settings."""
+
+    def __init__(self, sid: str, agent: Agent, events: WebEvents):
+        self.sid = sid
+        self.agent = agent
+        self.events = events
+        self.backup_repo: BackupRepo | None = None
+        self.title = ""
+        self.provider = ""
+        self.model = ""
+        self.auto_backup = True
+        self.turn_lock = threading.Lock()  # one turn at a time PER CHAT
+
+
 class Api:
     """Methods callable from JS via window.pywebview.api.*"""
 
     def __init__(self):
         self._cfg: Config = load_config()
-        self._events = WebEvents()
-        self._events._cfg = self._cfg  # shared reference: live settings changes apply immediately
-        self._agent: Agent | None = None
+        # Shared across every chat's WebEvents so permission_response can
+        # resolve a prompt no matter which chat asked.
+        self._perm_registry: dict = {}
+        # Sid-less sink for app-level notices before/outside any chat.
+        self._events_global = WebEvents("", self._perm_registry)
+        self._events_global._cfg = self._cfg
+        # Every open chat, live agent included -- chats keep running in the
+        # background when the user switches away (see send/_run_send_turn).
+        self._chats: dict[str, ChatState] = {}
         # Underscore-prefixed: see the comment on WebEvents._window above —
         # this class is the js_api object pywebview recursively introspects,
         # so a public `window` attribute here triggers the same infinite
@@ -444,14 +482,7 @@ class Api:
         self._window: webview.Window | None = None
         self._store = SessionStore()
         self.session_id: str | None = None
-        self.session_title: str = ""   # AI-chosen chat name; "" until first turn
         self._client: ZaiClient | None = None
-        self._turn_lock = threading.Lock()
-        self.auto_backup: bool = True
-        self._backup_repo: BackupRepo | None = None
-        # Per-chat model choice; "" means the built-in free default.
-        self.session_provider: str = ""
-        self.session_model: str = ""
 
         configure_search(self._cfg.search_provider, self._cfg.resolve_tavily_key())
         # Initialize command aliases for npm/yarn/pnpm/git
@@ -462,6 +493,74 @@ class Api:
             "git": "git",
         })
 
+    # -- active-chat accessors ------------------------------------------- #
+    # Most of this class predates parallel chats and talks about THE agent/
+    # events/title; these map that vocabulary onto whichever chat is active.
+
+    @property
+    def _active(self) -> "ChatState | None":
+        return self._chats.get(self.session_id) if self.session_id else None
+
+    @property
+    def _agent(self) -> Agent | None:
+        c = self._active
+        return c.agent if c else None
+
+    @property
+    def _events(self) -> WebEvents:
+        c = self._active
+        return c.events if c else self._events_global
+
+    @property
+    def _backup_repo(self) -> BackupRepo | None:
+        c = self._active
+        return c.backup_repo if c else None
+
+    @_backup_repo.setter
+    def _backup_repo(self, value) -> None:
+        if self._active:
+            self._active.backup_repo = value
+
+    @property
+    def session_title(self) -> str:
+        c = self._active
+        return c.title if c else ""
+
+    @session_title.setter
+    def session_title(self, value: str) -> None:
+        if self._active:
+            self._active.title = value
+
+    @property
+    def auto_backup(self) -> bool:
+        c = self._active
+        return c.auto_backup if c else True
+
+    @auto_backup.setter
+    def auto_backup(self, value: bool) -> None:
+        if self._active:
+            self._active.auto_backup = bool(value)
+
+    @property
+    def session_provider(self) -> str:
+        c = self._active
+        return c.provider if c else ""
+
+    @session_provider.setter
+    def session_provider(self, value: str) -> None:
+        if self._active:
+            self._active.provider = value
+
+    @property
+    def session_model(self) -> str:
+        c = self._active
+        return c.model if c else ""
+
+    @session_model.setter
+    def session_model(self, value: str) -> None:
+        if self._active:
+            self._active.model = value
+
     def _ensure_client(self) -> ZaiClient | None:
         key = self._cfg.resolve_api_key()
         if not key:
@@ -470,11 +569,11 @@ class Api:
             self._client = ZaiClient(key, self._cfg.base_url)
         return self._client
 
-    def _fresh_agent(self) -> Agent | None:
-        client = self._ensure_client()
-        if not client:
-            return None
-        return Agent(self._cfg, client, events=self._events)
+    def _make_events(self, sid: str) -> WebEvents:
+        ev = WebEvents(sid, self._perm_registry)
+        ev._cfg = self._cfg
+        ev._window = self._window
+        return ev
 
     # -- lifecycle ------------------------------------------------------- #
 
@@ -805,34 +904,55 @@ class Api:
                           prompt_tokens: int, completion_tokens: int,
                           todos: list, title: str = "", auto_backup: bool = True,
                           model_provider: str = "", model: str = "") -> dict:
+        # A chat that's already open (possibly mid-turn in the background)
+        # just becomes the active one -- its live agent, not a disk reload.
+        if sid in self._chats:
+            return self._switch_to_live(sid)
         cwd_ok = True
         if cwd:
             try:
-                os.chdir(cwd)
+                os.chdir(cwd)  # for the file-picker dialogs' starting folder
             except OSError:
                 cwd_ok = False
-        agent = self._fresh_agent()
-        if agent is None:
+        client = self._ensure_client()
+        if client is None:
             return {"error": "no API key configured"}
+        workdir = Path(cwd) if (cwd and cwd_ok) else Path.cwd()
+        events = self._make_events(sid)
+        agent = Agent(self._cfg, client, events=events, workdir=workdir)
         agent.load_messages(messages)
         agent.set_usage(prompt_tokens, completion_tokens)
-        self._agent = agent
+        agent.todos = list(todos or [])
+        self._chats[sid] = ChatState(sid, agent, events)
         self.session_id = sid
         self.session_title = title
         self.auto_backup = auto_backup
         self._apply_chat_model(agent, model_provider, model)
-        self._backup_repo = BackupRepo(sid, Path.cwd()) if cwd_ok else None
+        self._backup_repo = BackupRepo(sid, workdir) if cwd_ok else None
         agent.backup_repo = self._backup_repo  # powers the review_changes tool
         # Append-only conversation log; rebuild so the system prompt gains
         # the note telling the model these files exist and how to grep them.
-        agent.transcript = Transcript(sid, cwd=str(Path.cwd()))
+        agent.transcript = Transcript(sid, cwd=str(workdir))
         agent.rebuild_system_prompt()
-        restore_todos(todos)
         self._cfg.last_session_id = sid
         save_config(self._cfg)
-        # cwd is already switched above, so relative image/audio paths saved
-        # by generate_image/show_image/speak resolve correctly here.
-        items = to_display(messages)
+        return self._session_payload(self._chats[sid])
+
+    def _switch_to_live(self, sid: str) -> dict:
+        cs = self._chats[sid]
+        self.session_id = sid
+        try:
+            os.chdir(cs.agent.workdir)
+        except OSError:
+            pass
+        self._cfg.last_session_id = sid
+        save_config(self._cfg)
+        return self._session_payload(cs)
+
+    def _session_payload(self, cs: "ChatState") -> dict:
+        agent = cs.agent
+        u = agent.session_usage
+        items = to_display(agent.messages)
         for it in items:
             if it.get("kind") in ("tool_image", "tool_audio") and it.get("path"):
                 try:
@@ -840,17 +960,17 @@ class Api:
                 except OSError:
                     it["src"] = ""  # file moved/deleted since it was shown
         return {
-            "ok": True, "id": sid, "cwd": str(Path.cwd()), "cwd_missing": not cwd_ok,
-            "items": items, "todos": get_todos(),
-            "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+            "ok": True, "id": cs.sid, "cwd": str(agent.workdir),
+            "cwd_missing": not agent.workdir.is_dir(),
+            "items": items, "todos": agent.todos,
+            "prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens,
             "context": agent.context_estimate(),
+            "busy": agent.busy,
         }
 
     def new_session(self, auto_backup: bool = True):
         """Start a brand-new chat. The user picks the project folder themselves —
-        nothing is auto-created or defaulted."""
-        if self._agent and self._agent.busy:
-            return {"error": "busy"}
+        nothing is auto-created or defaulted. Other chats keep running."""
         picked = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         if not picked:
             return {"cancelled": True}
@@ -866,8 +986,6 @@ class Api:
         creating it next to this app's own install directory if this is the
         first time it's used. No folder picker -- unlike new_session, there's
         nothing to choose."""
-        if self._agent and self._agent.busy:
-            return {"error": "busy"}
         WHITEBOARD_DIR.mkdir(parents=True, exist_ok=True)
         res = self._activate_session(new_id(), [], str(WHITEBOARD_DIR), 0, 0, [], auto_backup=auto_backup)
         res["sessions"] = self.list_sessions()
@@ -889,8 +1007,11 @@ class Api:
         return {"ok": True}
 
     def open_session(self, sid: str):
-        if self._agent and self._agent.busy:
-            return {"error": "busy"}
+        # Live chats (running or not) switch instantly; others load from disk.
+        if sid in self._chats:
+            res = self._switch_to_live(sid)
+            res["sessions"] = self.list_sessions()
+            return res
         data = self._store.load(sid)
         if not data:
             return {"error": "session not found"}
@@ -906,25 +1027,33 @@ class Api:
         return res
 
     def delete_session(self, sid: str):
+        live = self._chats.get(sid)
+        if live and live.agent.busy:
+            return {"error": "that chat is still working — stop it first"}
+        self._chats.pop(sid, None)
         self._store.delete(sid)
         Transcript(sid).delete()  # its transcript goes with it
         closed_active = sid == self.session_id
         if closed_active:
-            self._agent = None
             self.session_id = None
             if self._cfg.last_session_id == sid:
                 self._cfg.last_session_id = ""
                 save_config(self._cfg)
         return {"ok": True, "sessions": self.list_sessions(), "closed_active": closed_active}
 
+    def _save_chat(self, cs: "ChatState") -> None:
+        """Persist ONE chat -- callable from its own turn thread, so a
+        background chat saves itself without touching the active one."""
+        u = cs.agent.session_usage
+        self._store.save(cs.sid, str(cs.agent.workdir), cs.agent.messages,
+                         u.prompt_tokens, u.completion_tokens,
+                         todos=cs.agent.todos, title=cs.title,
+                         auto_backup=cs.auto_backup,
+                         model_provider=cs.provider, model=cs.model)
+
     def _save_current(self) -> None:
-        if self._agent and self.session_id:
-            u = self._agent.session_usage
-            self._store.save(self.session_id, str(Path.cwd()), self._agent.messages,
-                            u.prompt_tokens, u.completion_tokens, todos=get_todos(),
-                            title=self.session_title, auto_backup=self.auto_backup,
-                            model_provider=self.session_provider,
-                            model=self.session_model)
+        if self._active:
+            self._save_chat(self._active)
 
     # -- backups (per-chat shadow git repo) --------------------------------- #
 
@@ -1019,67 +1148,80 @@ class Api:
     # -- chat ---------------------------------------------------------- #
 
     def send(self, text: str, file_paths: list | None = None, plan: bool = False):
-        if not self._agent or not self.session_id:
+        """Start a turn in the ACTIVE chat and return immediately -- the turn
+        runs on its own thread, so the user can switch to (or create) other
+        chats while it works. Completion arrives as a "turn_complete" event
+        tagged with the chat's sid."""
+        cs = self._active
+        if cs is None:
             return {"error": "no active chat — start a New Chat first"}
-        if not self._turn_lock.acquire(blocking=False):
+        text = (text or "").strip()
+        paths = [Path(p) for p in (file_paths or []) if Path(p).is_file()]
+        if not text and not paths:
+            return {"error": "empty"}
+        if not cs.turn_lock.acquire(blocking=False):
             return {"error": "busy"}
+        threading.Thread(target=self._run_send_turn,
+                         args=(cs, text, paths, plan), daemon=True).start()
+        return {"ok": True, "started": True}
+
+    def _run_send_turn(self, cs: "ChatState", text: str, paths: list,
+                       plan: bool) -> None:
+        """The body of one chat turn, on its own thread. Everything here uses
+        `cs`, never the active-chat accessors -- the user may be looking at a
+        completely different chat by the time this finishes."""
+        agent, events = cs.agent, cs.events
+        raw_text = text  # pre-wrap, for title generation
+        ok = False
         try:
-            text = (text or "").strip()
-            raw_text = text  # pre-wrap, for title generation
-            paths = [Path(p) for p in (file_paths or []) if Path(p).is_file()]
-            if not text and not paths:
-                return {"error": "empty"}
+            events.emit("chat_busy")
             if plan and text:
                 # Read-only planning turn: the preamble sets expectations and
                 # permissions.plan_only (below) makes them non-negotiable.
                 text = PLAN_MODE_PREAMBLE.format(text=text)
-            if paths:
-                msg = self._agent.attach_files(text, paths)
-            else:
-                msg = {"role": "user", "content": text}
-            self._agent.permissions.plan_only = bool(plan and text)
+            msg = (agent.attach_files(text, paths) if paths
+                   else {"role": "user", "content": text})
+            agent.permissions.plan_only = bool(plan and text)
             # File backup: commit the project's current state (i.e. how it
             # looked right before this message's own edits) so "revert to
             # here" later can put it back. Best-effort -- a backup failure
             # must never block sending a message.
-            if self.auto_backup and self._backup_repo:
+            if cs.auto_backup and cs.backup_repo:
                 try:
                     # Visible in the status chip: on a big project the git
                     # snapshot can take a moment, and silent pre-turn latency
                     # reads as "the app is slow" rather than "it's working".
-                    with self._events.status("backing up project files..."):
-                        self._backup_repo.snapshot(text or "(files attached)")
+                    with events.status("backing up project files..."):
+                        cs.backup_repo.snapshot(text or "(files attached)")
                 except Exception as e:
-                    self._events.warn(f"backup snapshot failed: {e}")
+                    events.warn(f"backup snapshot failed: {e}")
             # Snapshot the read-aloud toggle for this turn only: if it's off
             # right now, TTS is never touched below, even if the user flips
             # it mid-response; if it's on, it stays on for this whole turn
             # regardless of later toggling.
-            self._events.start_turn(self._cfg.read_aloud)
-            self._agent.run_turn(msg)
+            events.start_turn(self._cfg.read_aloud)
+            agent.run_turn(msg)
             # First turn of a fresh chat: let the model name it for the sidebar.
-            if not self.session_title and raw_text:
+            if not cs.title and raw_text:
                 t = self._generate_title(raw_text)
                 if t:
-                    self.session_title = t
-                    if self._agent.transcript:
+                    cs.title = t
+                    if agent.transcript:
                         # searchable by topic, not just by session id
-                        self._agent.transcript.set_title(t)
-            self._save_current()  # persist now so the returned sidebar is current
-            u = self._agent.session_usage
-            return {"ok": True, "prompt_tokens": u.prompt_tokens,
-                    "completion_tokens": u.completion_tokens,
-                    "context": self._agent.context_estimate(),
-                    "title": self.session_title,
-                    "sessions": self.list_sessions()}
+                        agent.transcript.set_title(t)
+            ok = True
         except Exception as e:
-            self._events.error(f"{type(e).__name__}: {e}")
-            return {"error": str(e)}
+            events.error(f"{type(e).__name__}: {e}")
         finally:
-            if self._agent:
-                self._agent.permissions.plan_only = False  # never outlive the turn
-            self._save_current()
-            self._turn_lock.release()
+            agent.permissions.plan_only = False  # never outlive the turn
+            self._save_chat(cs)
+            cs.turn_lock.release()
+            u = agent.session_usage
+            events.emit("turn_complete", ok=ok, plan=bool(plan),
+                        prompt_tokens=u.prompt_tokens,
+                        completion_tokens=u.completion_tokens,
+                        context=agent.context_estimate(),
+                        title=cs.title, sessions=self.list_sessions())
 
     def execute_plan(self):
         """The 'Execute plan' button: a normal (non-plan) turn with a canned
@@ -1139,7 +1281,7 @@ class Api:
             return {"error": "busy"}
         if not self.session_id:
             return {"error": "no active chat"}
-        cwd = str(Path.cwd())
+        cwd = str(self._agent.workdir) if self._agent else str(Path.cwd())
         # Don't delete the old session — it stays in the sidebar as history
         res = self._activate_session(new_id(), [], cwd, 0, 0, [])
         res["sessions"] = self.list_sessions()  # refresh sidebar
@@ -1253,7 +1395,9 @@ def main():
         background_color="#0a0d16",
     )
     api._window = window
-    api._events._window = window
+    api._events_global._window = window
+    for cs in api._chats.values():  # chats created before the window existed
+        cs.events._window = window
 
     # Build webview.start() kwargs
     start_kwargs = dict(debug="--debug" in sys.argv)

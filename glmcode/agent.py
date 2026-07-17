@@ -24,7 +24,8 @@ from .prompts import (COMPACT_PROMPT, CONTINUE_NUDGE, STEER_NUDGE_TEMPLATE,
 from .tools import (COMPACT_CONTEXT_TOOL, GENERATE_IMAGE_TOOL, PREVIEW_PAGE_TOOL,
                     REMEMBER_TOOL, REVIEW_CHANGES_TOOL, SHOW_HTTP_CAT_TOOL,
                     SHOW_IMAGE_TOOL, SPEAK_TOOL, SUBAGENT_TOOL, TOOL_SCHEMAS,
-                    VIEW_IMAGE_TOOL, ToolError, execute_tool, get_todos)
+                    VIEW_IMAGE_TOOL, ToolError, clean_todo_items, execute_tool,
+                    set_workdir)
 
 # Tools whose output tells the model whether its changes actually work --
 # used by the verify-nudge (see _run_turn): a turn that edits files but never
@@ -128,9 +129,14 @@ class _CaptureEvents(AgentEvents):
 
 class Agent:
     def __init__(self, cfg: Config, client: ZaiClient, events: AgentEvents | None = None,
-                 allow_subagents: bool = True):
+                 allow_subagents: bool = True, workdir: Path | None = None):
         self.cfg = cfg
         self.client = client
+        # The project folder this agent works in. Pinned to its turn thread
+        # via tools.set_workdir() at every run_turn, so parallel chats in
+        # different folders can't contaminate each other through the
+        # process-global cwd.
+        self.workdir = Path(workdir) if workdir else Path.cwd()
         if events is None:
             from .ui import ConsoleEvents
             events = ConsoleEvents(cfg)
@@ -185,6 +191,9 @@ class Agent:
         self._turn_wrote_files = False
         self._turn_verified = False
         self._verify_nudged = False
+        # Per-agent todo list (todo_write is handled in-dispatch): parallel
+        # chats each keep their own checklist instead of sharing one global.
+        self.todos: list[dict] = []
         self.rebuild_system_prompt()
 
     # ------------------------------------------------------------------ #
@@ -193,7 +202,7 @@ class Agent:
         # Cached separately from the live message so refreshing the context-
         # usage note (see _refresh_context_note) doesn't need to re-run
         # build_system_prompt's git subprocess calls on every model call.
-        self._base_system_prompt = build_system_prompt(Path.cwd(), self.cfg.model)
+        self._base_system_prompt = build_system_prompt(self.workdir, self.cfg.model)
         if self.transcript:
             # Tell the model its transcript files exist and where, so it can
             # grep them for anything compacted out of context or said in a
@@ -288,7 +297,7 @@ class Agent:
         for itself whether to read_file/view_image the attachment."""
         refs = []
         for p in paths:
-            dest = Path.cwd() / "uploads" / f"{p.stem}-{uuid.uuid4().hex[:6]}{p.suffix}"
+            dest = self.workdir / "uploads" / f"{p.stem}-{uuid.uuid4().hex[:6]}{p.suffix}"
             dest.parent.mkdir(parents=True, exist_ok=True)
             try:
                 shutil.copy2(p, dest)
@@ -320,7 +329,7 @@ class Agent:
             raise ToolError(f"{tool_name} needs a 'path'")
         p = Path(raw).expanduser()
         if not p.is_absolute():
-            p = Path.cwd() / p
+            p = self.workdir / p
         if not p.is_file():
             raise ToolError(f"Image not found: {p}")
         if p.suffix.lower() not in IMAGE_EXTENSIONS:
@@ -334,7 +343,7 @@ class Agent:
     def _display_path(p: Path) -> str:
         """cwd-relative path for a nicer/portable tool-result marker, when possible."""
         try:
-            return str(p.relative_to(Path.cwd()))
+            return str(p.relative_to(self.workdir))
         except ValueError:
             return str(p)
 
@@ -374,7 +383,7 @@ class Agent:
     def _show_http_cat_tool(self, status_code: int) -> str:
         """Fetch and show the http.cat image for an HTTP status code."""
         from .tools import fetch_http_cat
-        out_path = Path.cwd() / "generated" / f"http-cat-{int(status_code)}-{uuid.uuid4().hex[:6]}"
+        out_path = self.workdir / "generated" / f"http-cat-{int(status_code)}-{uuid.uuid4().hex[:6]}"
         try:
             saved = fetch_http_cat(int(status_code), out_path)
         except ToolError:
@@ -392,7 +401,7 @@ class Agent:
         if not url:
             raise ToolError("preview_page needs a 'url'")
         slug = re.sub(r"[^a-z0-9]+", "-", url.lower()).strip("-")[:40].strip("-") or "page"
-        out_path = Path.cwd() / "generated" / f"preview-{slug}-{uuid.uuid4().hex[:6]}.png"
+        out_path = self.workdir / "generated" / f"preview-{slug}-{uuid.uuid4().hex[:6]}.png"
 
         with self.events.status(f"loading {url} in a headless browser..."):
             try:
@@ -417,10 +426,10 @@ class Agent:
         if path and path.strip():
             out_path = Path(path.strip()).expanduser()
             if not out_path.is_absolute():
-                out_path = Path.cwd() / out_path
+                out_path = self.workdir / out_path
         else:
             slug = re.sub(r"[^a-z0-9]+", "-", prompt.lower()).strip("-")[:40].strip("-") or "image"
-            out_path = Path.cwd() / "generated" / f"{slug}-{uuid.uuid4().hex[:6]}.png"
+            out_path = self.workdir / "generated" / f"{slug}-{uuid.uuid4().hex[:6]}.png"
 
         with self.events.status(f"generating image: {prompt[:60]}..."):
             try:
@@ -459,10 +468,10 @@ class Agent:
         if path and path.strip():
             out_path = Path(path.strip()).expanduser()
             if not out_path.is_absolute():
-                out_path = Path.cwd() / out_path
+                out_path = self.workdir / out_path
         else:
             slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40].strip("-") or "speech"
-            out_path = Path.cwd() / "generated" / f"{slug}-{uuid.uuid4().hex[:6]}.wav"
+            out_path = self.workdir / "generated" / f"{slug}-{uuid.uuid4().hex[:6]}.wav"
 
         with self.events.status(f"generating speech: {text[:60]}..."):
             try:
@@ -487,6 +496,7 @@ class Agent:
 
     def run_turn(self, user_message: dict) -> None:
         """One user turn: append the message, loop model+tools until done."""
+        set_workdir(self.workdir)  # pin tool path resolution to THIS thread
         self.cancel.clear()
         self.wrap_up_requested.clear()
         self.busy = True
@@ -828,6 +838,13 @@ class Agent:
                     self.rebuild_system_prompt()
                 elif name == REVIEW_CHANGES_TOOL:
                     output = self._review_changes_tool()
+                elif name == "todo_write":
+                    # Handled here (not via the module-global in tools.py) so
+                    # each chat keeps its OWN checklist -- parallel chats
+                    # otherwise scribble over one shared list.
+                    self.todos = clean_todo_items(args.get("todos", []))
+                    done = sum(1 for t in self.todos if t["status"] == "completed")
+                    output = f"Todo list updated: {done}/{len(self.todos)} completed."
                 else:
                     output = execute_tool(name, args)
                 if name in EDIT_TOOLS:
@@ -840,7 +857,7 @@ class Agent:
                                  error=True, name=name, args=args)
 
             if name == "todo_write":
-                self.events.todos(get_todos())
+                self.events.todos(self.todos)
 
     def _tool_reply(self, tc: dict, content: str, error: bool = False,
                     name: str = "", args: dict | None = None) -> None:
@@ -940,7 +957,8 @@ class Agent:
         # _run_subagents) so all sub-agents' requests stay spaced out.
         client = ZaiClient(self.client.api_key, self.client.base_url, rate_limiter=limiter)
         sink = _CaptureEvents(forward=self._emit_subagent_stream, aid=aid)
-        sub = Agent(self.cfg, client, events=sink, allow_subagents=False)
+        sub = Agent(self.cfg, client, events=sink, allow_subagents=False,
+                    workdir=self.workdir)
         # Same work-tree, same pre-turn baseline -- so review_changes works
         # inside sub-agents too.
         sub.backup_repo = self.backup_repo

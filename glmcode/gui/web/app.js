@@ -370,6 +370,35 @@ function addUserMessage(text, images, note, plan) {
   scrollDown(true);
 }
 
+function handleBackgroundEvent(ev) {
+  switch (ev.type) {
+    case "chat_busy":
+      busySessions.add(ev.sid);
+      renderSidebar();
+      break;
+    case "turn_complete": {
+      busySessions.delete(ev.sid);
+      unreadSessions.add(ev.sid);
+      if (ev.sessions) sessions = ev.sessions;
+      renderSidebar();
+      const name = ev.title || "A background chat";
+      toast(ev.ok ? `${name} finished.` : `${name} hit an error.`,
+            ev.ok ? "info" : "warn", 6000);
+      break;
+    }
+    case "permission":
+      // Don't pop a sheet for a chat the user isn't looking at -- hold it
+      // and surface it the moment they switch to that chat.
+      pendingPerms[ev.sid] = ev;
+      unreadSessions.add(ev.sid);
+      renderSidebar();
+      toast("A background chat is waiting for permission.", "warn", 6000);
+      break;
+    // Everything else (stream deltas, tool chips, notices...) is rebuilt
+    // from the agent's message history when the user switches to that chat.
+  }
+}
+
 /* Replays a saved conversation (from sessions.py to_display) into #chat. */
 function renderHistory(items, todos) {
   let wrap = null;
@@ -464,7 +493,41 @@ window.GLM = {
   },
 };
 
+/* Chats keep running when the user switches away; every event carries the
+   sid of the chat it belongs to. Events for the ACTIVE chat render live;
+   background chats only update the sidebar (spinner, unread, permission
+   badge) -- their full state is rebuilt from agent.messages on switch. */
+const busySessions = new Set();
+const unreadSessions = new Set();
+const pendingPerms = {};   // sid -> the permission event waiting for that chat
+
 function handle(ev) {
+  if (ev.sid && ev.sid !== activeSessionId) {
+    handleBackgroundEvent(ev);
+    return;
+  }
+  switch (ev.type) {
+    case "chat_busy": {
+      busySessions.add(ev.sid);
+      setBusy(true);
+      renderSidebar();
+      return;
+    }
+    case "turn_complete": {
+      busySessions.delete(ev.sid);
+      setBusy(false);
+      $("status-chip").hidden = true;
+      current = null;
+      if (ev.ok) {
+        updateUsage(ev.prompt_tokens, ev.completion_tokens, ev.context);
+        if (ev.sessions) { sessions = ev.sessions; renderSidebar(); }
+        if (ev.plan) $("plan-actions").hidden = false;
+        showTurnChanges();
+      }
+      renderSidebar();
+      return;
+    }
+  }
   switch (ev.type) {
     case "stream_start": {
       // NOTE: this fires once per agentic LLM round-trip, not once per
@@ -1362,21 +1425,19 @@ async function sendMessage() {
   current = null;
   $("plan-actions").hidden = true;
   retireOldChangeCards();
+  // The turn runs on a backend thread: send() returns immediately and the
+  // busy state / usage / plan bar / changes card are all driven by the
+  // chat_busy + turn_complete events (which follow the chat even if the
+  // user switches away and back).
   try {
     const res = await api().send(text, imgs.map((i) => i.path), plan);
-    if (res && res.error && res.error !== "busy") toast(res.error, "error", 7000);
-    if (res && res.ok) {
-      updateUsage(res.prompt_tokens, res.completion_tokens, res.context);
-      if (res.sessions) { sessions = res.sessions; renderSidebar(); }
-      if (plan) $("plan-actions").hidden = false; // the plan is in; offer to execute
-      showTurnChanges();
+    if (res && res.error) {
+      if (res.error !== "busy") toast(res.error, "error", 7000);
+      setBusy(false);
     }
   } catch (e) {
     toast("Bridge error: " + e, "error", 7000);
-  } finally {
     setBusy(false);
-    current = null;
-    $("status-chip").hidden = true;
   }
 }
 $("send-btn").addEventListener("click", sendMessage);
@@ -1408,17 +1469,13 @@ $("plan-execute").addEventListener("click", async () => {
   retireOldChangeCards();
   try {
     const res = await api().execute_plan();
-    if (res && res.error && res.error !== "busy") toast(res.error, "error", 7000);
-    if (res && res.ok) {
-      updateUsage(res.prompt_tokens, res.completion_tokens, res.context);
-      showTurnChanges();
+    if (res && res.error) {
+      if (res.error !== "busy") toast(res.error, "error", 7000);
+      setBusy(false);
     }
   } catch (e) {
     toast("Bridge error: " + e, "error", 7000);
-  } finally {
     setBusy(false);
-    current = null;
-    $("status-chip").hidden = true;
   }
 });
 
@@ -1898,8 +1955,15 @@ function renderSidebar() {
     row.title = s.cwd;
     const snippet = s.snippet
       ? `<div class="sess-snippet">${esc(s.snippet)}</div>` : "";
+    let stateDot = "";
+    if (busySessions.has(s.id)) {
+      row.classList.add("sess-busy");
+      stateDot = '<span class="sess-dot sess-dot-busy" title="Working in the background"></span>';
+    } else if (unreadSessions.has(s.id)) {
+      stateDot = '<span class="sess-dot sess-dot-unread" title="Finished while you were away"></span>';
+    }
     row.innerHTML =
-      `<div class="sess-main"><div class="sess-title">${esc(s.title || "New chat")}</div>` +
+      `<div class="sess-main"><div class="sess-title">${stateDot}${esc(s.title || "New chat")}</div>` +
       `<div class="sess-sub">${esc(basename(s.cwd))} · ${esc(timeAgo(s.updated))}</div>${snippet}</div>` +
       `<button class="sess-del" aria-label="Delete chat: ${esc(s.title || "New chat")}">${TRASH_ICON}</button>`;
     row.addEventListener("click", (e) => {
@@ -2000,6 +2064,16 @@ function applySession(res) {
   if (!hasItems) $("empty-hint-folder").textContent = basename(res.cwd);
   renderHistory(res.items, res.todos);
   if (res.cwd_missing) toast(`Project folder not found: ${res.cwd}`, "warn", 6000);
+  // Live chats may still be working when we switch to them.
+  setBusy(!!res.busy);
+  unreadSessions.delete(res.id);
+  clearSteerQueued();
+  $("plan-actions").hidden = true;
+  const heldPerm = pendingPerms[res.id];
+  if (heldPerm) {
+    delete pendingPerms[res.id];
+    showPermission(heldPerm); // it was waiting for the user to come back
+  }
   renderSidebar();
   populateModelPicker(); // each chat can use a different model -- refresh the footer
 }

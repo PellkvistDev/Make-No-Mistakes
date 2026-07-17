@@ -54,10 +54,30 @@ DEFAULT_IGNORES = {
 }
 
 
+# --------------------------------------------------------------------- #
+# Per-thread working directory. Relative tool paths used to resolve against
+# the PROCESS-global cwd -- with parallel chats (each chat's turn on its own
+# thread, possibly in a different project folder) that's a landmine: a
+# background chat's tools would silently operate on whichever folder the
+# UI-active chat chdir'd to last. Each agent turn (and each sub-agent
+# worker) now pins its own workdir on its own thread.
+
+_workdir_local = threading.local()
+
+
+def set_workdir(path) -> None:
+    """Pin the working directory for tool calls made from THIS thread."""
+    _workdir_local.path = Path(path)
+
+
+def get_workdir() -> Path:
+    return getattr(_workdir_local, "path", None) or Path.cwd()
+
+
 def _resolve(path: str) -> Path:
     p = Path(path).expanduser()
     if not p.is_absolute():
-        p = Path.cwd() / p
+        p = get_workdir() / p
     return p.resolve()
 
 
@@ -502,7 +522,7 @@ def run_powershell(command: str, timeout_seconds: int = 120) -> str:
             ["powershell", "-NoProfile", "-NonInteractive",
              "-ExecutionPolicy", "Bypass", "-Command", wrapped],
             capture_output=True, timeout=timeout_seconds,
-            cwd=str(Path.cwd()), **NO_WINDOW_KWARGS,
+            cwd=str(get_workdir()), **NO_WINDOW_KWARGS,
         )
     except subprocess.TimeoutExpired:
         raise ToolErrorBase(f"Command timed out after {timeout_seconds}s: {command[:200]}", ErrorSeverity.ERROR)
@@ -603,7 +623,7 @@ def _cleanup_background_processes() -> None:
 
 
 def run_background(command: str, cwd: str = "") -> str:
-    work_dir = _resolve(cwd) if cwd else Path.cwd()
+    work_dir = _resolve(cwd) if cwd else get_workdir()
     if not work_dir.is_dir():
         raise ToolErrorBase(f"Directory not found: {work_dir}", ErrorSeverity.ERROR)
     wrapped = (
@@ -680,8 +700,9 @@ def list_processes() -> str:
 _TODOS: list[dict] = []
 
 
-def todo_write(todos: list) -> str:
-    global _TODOS
+def clean_todo_items(todos: list) -> list[dict]:
+    """Validate/normalize a todo_write payload. Pure -- the agent stores the
+    result on itself (per-chat), the CLI keeps using the module global."""
     if not isinstance(todos, list):
         raise ToolErrorBase("todos must be a list of {content, status} objects.", ErrorSeverity.ERROR)
     cleaned = []
@@ -692,6 +713,12 @@ def todo_write(todos: list) -> str:
         if status not in ("pending", "in_progress", "completed"):
             status = "pending"
         cleaned.append({"content": str(t["content"]), "status": status})
+    return cleaned
+
+
+def todo_write(todos: list) -> str:
+    global _TODOS
+    cleaned = clean_todo_items(todos)
     _TODOS = cleaned
     done = sum(1 for t in cleaned if t["status"] == "completed")
     return f"Todo list updated: {done}/{len(cleaned)} completed."
