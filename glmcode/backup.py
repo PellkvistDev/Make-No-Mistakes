@@ -122,6 +122,54 @@ class BackupRepo:
             out = out[:max_chars] + f"\n... [diff truncated at {max_chars} chars]"
         return out
 
+    def turn_changes(self, per_file_chars: int = 4000) -> list[dict]:
+        """Structured version of turn_diff for the review UI: one entry per
+        changed file since the pre-turn snapshot: {path, status, diff} where
+        status is git's A(dded)/M(odified)/D(eleted)/R(enamed)."""
+        if not available() or not self._initialized():
+            return []
+        try:
+            self._run("add", "-A", "-N", check=False)
+            names = self._run("diff", "HEAD", "--name-status", check=False).stdout
+        except Exception:
+            return []
+        out = []
+        for line in names.splitlines():
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            status, path = parts[0][:1], parts[-1]
+            try:
+                diff = self._run("diff", "HEAD", "--", path, check=False).stdout
+            except Exception:
+                diff = ""
+            if len(diff) > per_file_chars:
+                diff = diff[:per_file_chars] + "\n... [diff truncated]"
+            out.append({"path": path, "status": status, "diff": diff})
+        return out
+
+    def revert_file(self, path: str) -> None:
+        """Put ONE file back the way it was at the pre-turn snapshot:
+        restore a modified/deleted file's snapshot content, or delete a file
+        that didn't exist yet. Path is repo-relative and must stay inside
+        the project directory."""
+        if not available() or not self._initialized():
+            raise RuntimeError("no snapshots exist for this chat")
+        target = (self.project_dir / path).resolve()
+        if not str(target).startswith(str(self.project_dir.resolve())):
+            raise RuntimeError("path escapes the project directory")
+        # Does the snapshot know this file? (exit 0 = tracked at HEAD)
+        tracked = self._run("cat-file", "-e", f"HEAD:{path}", check=False).returncode == 0
+        if tracked:
+            self._run("checkout", "HEAD", "--", path)
+        else:
+            # Added this turn: reverting means removing it.
+            self._run("rm", "--cached", "--ignore-unmatch", "-q", "--", path, check=False)
+            try:
+                target.unlink(missing_ok=True)
+            except OSError as e:
+                raise RuntimeError(f"could not remove {path}: {e}")
+
     def revert_to(self, commit: str) -> None:
         """Reset the project dir's actual files back to how they looked at
         `commit`. Does not touch the chat conversation -- only files."""

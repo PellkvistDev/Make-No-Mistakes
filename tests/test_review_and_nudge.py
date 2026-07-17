@@ -55,6 +55,69 @@ def test_turn_diff_uninitialized(tmp_path, monkeypatch):
     assert "no pre-turn snapshot" in repo.turn_diff()
 
 
+# ---------------------------------------------------------- turn_changes --
+
+@needs_git
+def test_turn_changes_structured(tmp_path, monkeypatch):
+    import glmcode.backup as backup
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "shadow")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    (proj / "gone.py").write_text("bye\n", encoding="utf-8")
+    repo = BackupRepo("sess", proj)
+    repo.snapshot("turn starts")
+
+    (proj / "mod.py").write_text("x = 2\n", encoding="utf-8")
+    (proj / "new.py").write_text("hello\n", encoding="utf-8")
+    (proj / "gone.py").unlink()
+
+    files = {f["path"]: f for f in repo.turn_changes()}
+    assert files["mod.py"]["status"] == "M" and "+x = 2" in files["mod.py"]["diff"]
+    assert files["new.py"]["status"] == "A" and "+hello" in files["new.py"]["diff"]
+    assert files["gone.py"]["status"] == "D"
+
+
+@needs_git
+def test_revert_file_each_status(tmp_path, monkeypatch):
+    import glmcode.backup as backup
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "shadow")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "mod.py").write_text("original\n", encoding="utf-8")
+    (proj / "gone.py").write_text("keep me\n", encoding="utf-8")
+    repo = BackupRepo("sess", proj)
+    repo.snapshot("turn starts")
+
+    (proj / "mod.py").write_text("clobbered\n", encoding="utf-8")
+    (proj / "new.py").write_text("junk\n", encoding="utf-8")
+    (proj / "gone.py").unlink()
+
+    repo.revert_file("mod.py")
+    assert (proj / "mod.py").read_text(encoding="utf-8") == "original\n"
+    repo.revert_file("new.py")
+    assert not (proj / "new.py").exists()  # added -> reverting deletes it
+    repo.revert_file("gone.py")
+    assert (proj / "gone.py").read_text(encoding="utf-8") == "keep me\n"
+    # ...and only those files were touched; nothing else changed
+    assert repo.turn_changes() == []
+
+
+@needs_git
+def test_revert_file_blocks_path_escape(tmp_path, monkeypatch):
+    import glmcode.backup as backup
+    monkeypatch.setattr(backup, "BACKUPS_DIR", tmp_path / "shadow")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "a.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "outside.txt").write_text("precious", encoding="utf-8")
+    repo = BackupRepo("sess", proj)
+    repo.snapshot("s")
+    with pytest.raises(RuntimeError):
+        repo.revert_file("../outside.txt")
+    assert (tmp_path / "outside.txt").read_text(encoding="utf-8") == "precious"
+
+
 # ------------------------------------------------- review_changes dispatch --
 
 @needs_git

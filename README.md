@@ -237,6 +237,15 @@ which also lists snapshots (by the message that triggered them) with a
 **Revert** button, plus a one-click **Revert last turn**. Reverting only
 changes files on disk — the chat conversation itself isn't affected.
 
+### Change review
+
+After every turn that touched files, a **Changes** card appears in the chat:
+each file with an added/modified/deleted badge and an expandable colored
+diff (against the automatic pre-turn snapshot), plus a per-file **Revert**
+button — review the agent's work like a local pull request and undo just
+the parts you don't want. When a newer turn runs, older cards retire their
+buttons (Settings → Backups still reverts to any earlier point).
+
 ### Transcripts
 
 Every chat's full conversation is also appended to a plain markdown

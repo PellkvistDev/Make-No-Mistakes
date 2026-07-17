@@ -943,6 +943,28 @@ class Api:
         self._save_current()
         return {"ok": True}
 
+    def turn_changes(self):
+        """Per-file changes since the pre-turn snapshot, for the review card
+        shown after each turn. Empty when backups are off (no baseline)."""
+        if not (self.auto_backup and self._backup_repo):
+            return {"files": []}
+        try:
+            return {"files": self._backup_repo.turn_changes()}
+        except Exception:
+            return {"files": []}
+
+    def revert_change(self, path: str):
+        """Revert ONE file to its pre-turn state (from the review card)."""
+        if not self._backup_repo:
+            return {"error": "no active chat"}
+        if self._agent and self._agent.busy:
+            return {"error": "can't revert while the agent is working"}
+        try:
+            self._backup_repo.revert_file(path)
+        except Exception as e:
+            return {"error": str(e)}
+        return self.turn_changes()
+
     def revert_backup(self, commit: str):
         if not self._backup_repo:
             return {"error": "no active chat"}

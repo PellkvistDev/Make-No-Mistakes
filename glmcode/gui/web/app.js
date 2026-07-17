@@ -776,6 +776,71 @@ function buildNoticeEl(level, text) {
   return box;
 }
 
+/* ------------------------------------------- turn change review card --
+   After a turn, everything that changed on disk (vs the automatic pre-turn
+   snapshot) is shown as a reviewable card: per-file diffs + Revert. */
+
+async function showTurnChanges() {
+  try {
+    const res = await api().turn_changes();
+    const files = (res && res.files) || [];
+    if (!files.length) return;
+    const wrap = document.createElement("div");
+    wrap.className = "msg msg-assistant";
+    wrap.appendChild(buildChangesCard(files));
+    chatEl.appendChild(wrap);
+    scrollDown();
+  } catch (e) { /* review card is best-effort */ }
+}
+
+// A newer turn moves the revert baseline; older cards' buttons would no
+// longer mean "back to before THAT turn", so retire them.
+function retireOldChangeCards() {
+  document.querySelectorAll(".change-revert:not(:disabled)").forEach((b) => {
+    b.disabled = true;
+    b.title = "A newer turn has run — use Settings → Backups to go further back";
+  });
+}
+
+function buildChangesCard(files) {
+  const card = document.createElement("div");
+  card.className = "changes-card";
+  card.innerHTML =
+    `<div class="changes-head">Changes this turn · ${files.length} ` +
+    `file${files.length === 1 ? "" : "s"} — click one to review</div>` +
+    `<div class="changes-rows"></div>`;
+  const rows = card.querySelector(".changes-rows");
+  for (const f of files) rows.appendChild(buildChangeRow(f));
+  return card;
+}
+
+function buildChangeRow(f) {
+  const row = document.createElement("details");
+  row.className = "change-row";
+  const statusName = { A: "added", M: "modified", D: "deleted", R: "renamed" }[f.status] || f.status;
+  row.innerHTML =
+    `<summary><span class="change-status st-${esc(f.status)}"></span>` +
+    `<span class="change-path"></span>` +
+    `<button class="btn btn-danger-ghost change-revert">Revert</button></summary>` +
+    `<pre class="change-diff"></pre>`;
+  row.querySelector(".change-status").textContent = statusName;
+  row.querySelector(".change-path").textContent = f.path;
+  row.querySelector(".change-diff").innerHTML = colorDiff(f.diff || "(no diff available)");
+  row.querySelector(".change-revert").addEventListener("click", async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!confirm(`Revert ${f.path} to how it was before this turn?`)) return;
+    const res = await api().revert_change(f.path);
+    if (res && res.error) { toast(res.error, "error", 5000); return; }
+    row.classList.add("reverted");
+    const btn = row.querySelector(".change-revert");
+    btn.disabled = true;
+    btn.textContent = "Reverted";
+    toast(`Reverted ${f.path}`, "info", 3000);
+  });
+  return row;
+}
+
 function buildSteeredEl(text) {
   const box = document.createElement("div");
   box.className = "steered-note";
@@ -1296,6 +1361,7 @@ async function sendMessage() {
   setBusy(true);
   current = null;
   $("plan-actions").hidden = true;
+  retireOldChangeCards();
   try {
     const res = await api().send(text, imgs.map((i) => i.path), plan);
     if (res && res.error && res.error !== "busy") toast(res.error, "error", 7000);
@@ -1303,6 +1369,7 @@ async function sendMessage() {
       updateUsage(res.prompt_tokens, res.completion_tokens, res.context);
       if (res.sessions) { sessions = res.sessions; renderSidebar(); }
       if (plan) $("plan-actions").hidden = false; // the plan is in; offer to execute
+      showTurnChanges();
     }
   } catch (e) {
     toast("Bridge error: " + e, "error", 7000);
@@ -1338,10 +1405,14 @@ $("plan-execute").addEventListener("click", async () => {
   addUserMessage("Execute the approved plan.", []);
   setBusy(true);
   current = null;
+  retireOldChangeCards();
   try {
     const res = await api().execute_plan();
     if (res && res.error && res.error !== "busy") toast(res.error, "error", 7000);
-    if (res && res.ok) updateUsage(res.prompt_tokens, res.completion_tokens, res.context);
+    if (res && res.ok) {
+      updateUsage(res.prompt_tokens, res.completion_tokens, res.context);
+      showTurnChanges();
+    }
   } catch (e) {
     toast("Bridge error: " + e, "error", 7000);
   } finally {
