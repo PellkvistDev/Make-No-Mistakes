@@ -634,6 +634,19 @@ body.subagent-open #subagent-panel { transform: translateX(0); }
   overflow-x: auto;
 }
 .md pre code { background: none; border: none; padding: 0; font-size: 12.8px; line-height: 1.55; }
+/* fenced code block + hover-reveal Copy button */
+.code-wrap { position: relative; }
+.code-wrap pre { margin-top: 4px; }
+.code-copy {
+  position: absolute; top: 9px; right: 9px; z-index: 2;
+  padding: 3px 10px; font-size: 11px; font-weight: 600; font-family: var(--font);
+  color: var(--text-dim); background: rgba(20, 26, 42, 0.85);
+  border: 1px solid var(--stroke); border-radius: 7px; cursor: pointer;
+  opacity: 0; transition: opacity 0.15s ease, color 0.15s ease, background 0.15s ease;
+}
+.code-wrap:hover .code-copy, .code-copy:focus-visible { opacity: 1; }
+.code-copy:hover { color: var(--text); background: rgba(40, 48, 70, 0.9); }
+.code-copy.copied { opacity: 1; color: var(--green); border-color: rgba(48, 209, 88, 0.5); }
 /* inline code that looks like a file path: click to open in the OS editor */
 .md code.maybe-path { cursor: pointer; text-decoration: underline dotted rgba(255,255,255,0.35); text-underline-offset: 3px; }
 .md code.maybe-path:hover { color: var(--accent); text-decoration-color: var(--accent); }

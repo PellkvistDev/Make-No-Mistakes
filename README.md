@@ -85,6 +85,8 @@ break until you regenerate them) — or if `requirements.txt` changed.
   chats in different projects can't touch each other's files, and each keeps
   its own task checklist. If a background chat needs a permission answer, it
   waits patiently and asks the moment you switch back to it.
+- **Copy code in one click** — every fenced code block in a reply has a
+  hover-reveal **Copy** button that copies the raw (un-highlighted) code.
 - **Desktop notifications** — when the app isn't the focused window, a native
   OS notification (Windows toast / macOS / Linux) fires the moment a chat
   needs a permission answer or finishes and is waiting for you, titled with

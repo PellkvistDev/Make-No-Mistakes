@@ -125,13 +125,53 @@ document.addEventListener("click", async (e) => {
   } catch (err) { /* bridge unavailable; ignore */ }
 });
 
+// Copy the raw (de-highlighted) text of a fenced code block. navigator.
+// clipboard isn't always available under WebView2's page context, so fall
+// back to the old execCommand path.
+function copyText(text) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText)
+      return navigator.clipboard.writeText(text);
+  } catch (e) { /* fall through */ }
+  return new Promise((resolve, reject) => {
+    try {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+      resolve();
+    } catch (e) { reject(e); }
+  });
+}
+
+document.addEventListener("click", async (e) => {
+  const btn = e.target.closest(".code-copy");
+  if (!btn) return;
+  const code = btn.parentElement.querySelector("pre code");
+  if (!code) return;
+  try {
+    await copyText(code.textContent);
+    btn.classList.add("copied");
+    btn.textContent = "Copied!";
+    setTimeout(() => { btn.classList.remove("copied"); btn.textContent = "Copy"; }, 1400);
+  } catch (err) {
+    toast("Couldn't copy to clipboard", "error", 3000);
+  }
+});
+
 /* Minimal markdown renderer (safe: escapes first, then adds structure). */
 function md(src) {
   const codeBlocks = [];
   src = String(src ?? "");
   // fenced code blocks out first
   src = src.replace(/```([\w+-]*)\n?([\s\S]*?)(?:```|$)/g, (_, lang, code) => {
-    codeBlocks.push(`<pre><code data-lang="${esc(lang)}">${highlight(code.replace(/\n$/, ""), lang)}</code></pre>`);
+    codeBlocks.push(
+      `<div class="code-wrap"><button class="code-copy" title="Copy code" aria-label="Copy code">Copy</button>` +
+      `<pre><code data-lang="${esc(lang)}">${highlight(code.replace(/\n$/, ""), lang)}</code></pre></div>`);
     return `\u0000${codeBlocks.length - 1}\u0000`;
   });
   src = esc(src);

@@ -213,6 +213,35 @@ def write_file(path: str, content: str) -> str:
 # --------------------------------------------------------------------- #
 # edit_file
 
+def _flexible_line_match(text: str, old: str) -> list[tuple[int, int]]:
+    """Find `old` in `text` tolerating per-line leading/trailing whitespace
+    differences -- the single most common way an LLM's old_string fails to
+    match (a stray trailing space, tabs vs spaces, an indentation guess just
+    off). Returns a list of (start_line, end_line) index spans in text's
+    lines. Blank lines in `old` are ignored at its edges so a snippet the
+    model padded with a leading/trailing newline still lines up."""
+    text_lines = text.split("\n")
+    old_lines = old.split("\n")
+    # Trim purely-blank lines from the ends of the pattern (common padding).
+    while old_lines and not old_lines[0].strip():
+        old_lines.pop(0)
+    while old_lines and not old_lines[-1].strip():
+        old_lines.pop()
+    n = len(old_lines)
+    if n == 0:
+        return []
+    target = [ln.strip() for ln in old_lines]
+    spans = []
+    i = 0
+    while i <= len(text_lines) - n:
+        if [ln.strip() for ln in text_lines[i:i + n]] == target:
+            spans.append((i, i + n))
+            i += n  # non-overlapping
+        else:
+            i += 1
+    return spans
+
+
 def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = False) -> str:
     p = _resolve(path)
     if not p.exists():
@@ -223,9 +252,27 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
 
     count = text.count(old_string)
     if count == 0:
+        # Exact match failed -- try a whitespace-tolerant line match before
+        # giving up, so a near-miss old_string still lands instead of costing
+        # the model a full re-read + retry. Only when the span is UNIQUE (or
+        # replace_all), so we never guess the wrong location.
+        spans = _flexible_line_match(text, old_string)
+        if spans and (replace_all or len(spans) == 1):
+            text_lines = text.split("\n")
+            new_lines = new_string.split("\n")
+            for start, end in reversed(spans):  # back-to-front keeps indices valid
+                text_lines[start:end] = new_lines
+            p.write_text("\n".join(text_lines), encoding="utf-8", newline="\n")
+            n = len(spans)
+            return (f"Edited {p} ({n} replacement{'s' if n != 1 else ''}, matched "
+                    f"ignoring surrounding whitespace — verify the indentation is "
+                    f"correct).{_syntax_feedback(p)}")
         stripped = old_string.strip()
         hint = ""
-        if stripped and stripped in text:
+        if len(spans) > 1:
+            hint = (f" Note: {len(spans)} whitespace-insensitive matches exist — "
+                    "add surrounding lines to make it unique, or set replace_all=true.")
+        elif stripped and stripped in text:
             hint = (" Note: the text WAS found ignoring leading/trailing whitespace — "
                     "your old_string has wrong surrounding whitespace/indentation.")
         raise ToolErrorBase(
