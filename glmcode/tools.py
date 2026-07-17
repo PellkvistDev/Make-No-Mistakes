@@ -507,7 +507,48 @@ def find_references(symbol: str, path: str = ".", glob: str = "",
 
 
 # --------------------------------------------------------------------- #
-# run_powershell
+# run_powershell (+ interruption)
+#
+# run_powershell BLOCKS the turn thread until the command exits. A command
+# that never returns on its own -- a dev server (`npm run dev`), a file
+# watcher, a tunnel -- would otherwise freeze the whole chat until the
+# timeout fires (up to 10 min). Two things guard against that: the tool
+# tells the model to use run_background for long-lived commands, and every
+# running foreground command is registered under its tool call's token so
+# the UI can offer a Stop button that kills it (and its whole child tree)
+# on demand -- the tool then returns at once and the agent keeps going.
+
+_foreground_lock = threading.Lock()
+_foreground_procs: dict[str, subprocess.Popen] = {}
+_stopped_tokens: set[str] = set()
+_call_token = threading.local()
+
+
+def set_call_token(token) -> None:
+    """The agent sets this on its turn thread before each top-level tool
+    dispatch; run_powershell reads it to register its process for stopping.
+    Thread-local so parallel chats never see each other's token."""
+    _call_token.value = token
+
+
+def get_call_token():
+    return getattr(_call_token, "value", None)
+
+
+def stop_foreground(token: str) -> bool:
+    """Kill the foreground command running under `token` and its whole child
+    tree. Returns False if nothing is running under it (already finished, or
+    never a shell command). Safe to call from another thread (the GUI)."""
+    if not token:
+        return False
+    with _foreground_lock:
+        proc = _foreground_procs.get(token)
+        if proc is None:
+            return False
+        _stopped_tokens.add(token)
+    _terminate_process_tree(proc)
+    return True
+
 
 def run_powershell(command: str, timeout_seconds: int = 120) -> str:
     timeout_seconds = max(1, min(int(timeout_seconds), 600))
@@ -517,22 +558,70 @@ def run_powershell(command: str, timeout_seconds: int = 120) -> str:
         "$OutputEncoding=[System.Text.Encoding]::UTF8; "
         + command
     )
+    token = get_call_token()
     try:
-        proc = subprocess.run(
+        # Popen (not subprocess.run) so a Stop click from another thread can
+        # reach in and kill the tree while communicate() waits.
+        proc = subprocess.Popen(
             ["powershell", "-NoProfile", "-NonInteractive",
              "-ExecutionPolicy", "Bypass", "-Command", wrapped],
-            capture_output=True, timeout=timeout_seconds,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             cwd=str(get_workdir()), **NO_WINDOW_KWARGS,
         )
-    except subprocess.TimeoutExpired:
-        raise ToolErrorBase(f"Command timed out after {timeout_seconds}s: {command[:200]}", ErrorSeverity.ERROR)
     except OSError as e:
         raise ToolErrorBase(f"Failed to start PowerShell: {e}", ErrorSeverity.ERROR)
 
-    def dec(b: bytes) -> str:
-        return b.decode("utf-8", errors="replace").strip()
+    if token:
+        with _foreground_lock:
+            _foreground_procs[token] = proc
 
-    out, err = dec(proc.stdout), dec(proc.stderr)
+    timed_out = False
+    try:
+        out_b, err_b = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        # Kill the WHOLE tree, not just powershell -- a spawned node/python
+        # server would otherwise keep running orphaned after we give up.
+        _terminate_process_tree(proc)
+        try:
+            out_b, err_b = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            out_b, err_b = b"", b""
+        timed_out = True
+    finally:
+        if token:
+            with _foreground_lock:
+                stopped = token in _stopped_tokens
+                _stopped_tokens.discard(token)
+                _foreground_procs.pop(token, None)
+        else:
+            stopped = False
+
+    def dec(b) -> str:
+        if isinstance(b, str):
+            return b.strip()
+        return (b or b"").decode("utf-8", errors="replace").strip()
+
+    out, err = dec(out_b), dec(err_b)
+
+    def _with_output(header: str) -> str:
+        parts = [header]
+        if out:
+            parts.append(out)
+        if err:
+            parts.append(f"[stderr]\n{err}")
+        return _truncate("\n".join(parts))
+
+    if stopped:
+        # A user Stop, not a failure: the model should note it and carry on,
+        # so this returns normally (non-error) rather than raising.
+        return _with_output("[Stopped by the user before it finished.]")
+    if timed_out:
+        raise ToolErrorBase(_with_output(
+            f"Command timed out after {timeout_seconds}s and was stopped "
+            f"(its process tree was killed). If this is a long-running command "
+            f"like a dev server or watcher, use run_background instead."),
+            ErrorSeverity.ERROR)
+
     parts = []
     if out:
         parts.append(out)

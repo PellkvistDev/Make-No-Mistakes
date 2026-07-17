@@ -25,7 +25,7 @@ from .tools import (COMPACT_CONTEXT_TOOL, GENERATE_IMAGE_TOOL, PREVIEW_PAGE_TOOL
                     REMEMBER_TOOL, REVIEW_CHANGES_TOOL, SHOW_HTTP_CAT_TOOL,
                     SHOW_IMAGE_TOOL, SPEAK_TOOL, SUBAGENT_TOOL, TOOL_SCHEMAS,
                     VIEW_IMAGE_TOOL, ToolError, clean_todo_items, execute_tool,
-                    set_workdir)
+                    set_call_token, set_workdir)
 
 # Tools whose output tells the model whether its changes actually work --
 # used by the verify-nudge (see _run_turn): a turn that edits files but never
@@ -101,8 +101,8 @@ class _CaptureEvents(AgentEvents):
         self.text += text
         self._forward(self._aid, "content", text=text)
 
-    def tool_call(self, name: str, args: dict) -> None:
-        self._forward(self._aid, "tool_call", name=name, args=args)
+    def tool_call(self, name: str, args: dict, call_id: str = "") -> None:
+        self._forward(self._aid, "tool_call", name=name, args=args, call_id=call_id)
 
     def tool_result(self, name: str, content: str, is_error: bool = False) -> None:
         self._forward(self._aid, "tool_result", name=name, content=content, is_error=is_error)
@@ -792,7 +792,13 @@ class Agent:
                                  error=True, name=name, args={})
                 continue
 
-            self.events.tool_call(name, args)
+            # A stable per-call token: the UI carries it on the tool box so a
+            # Stop click can name exactly which running command to kill, and
+            # run_powershell registers its process under it (see tools.py).
+            # Freshly generated (not the model's tc["id"]) so it's unique even
+            # across parallel chats.
+            run_token = uuid.uuid4().hex[:12]
+            self.events.tool_call(name, args, call_id=run_token)
 
             decision = self.permissions.check(name, args, self.events.ask_permission)
             if not decision.allowed:
@@ -809,6 +815,7 @@ class Agent:
             if name in VERIFICATION_TOOLS:
                 self._turn_verified = True
 
+            set_call_token(run_token)
             try:
                 if name == SUBAGENT_TOOL:
                     if not self.allow_subagents:
@@ -855,6 +862,8 @@ class Agent:
             except Exception as e:
                 self._tool_reply(tc, f"ERROR: unexpected {type(e).__name__}: {e}",
                                  error=True, name=name, args=args)
+            finally:
+                set_call_token(None)
 
             if name == "todo_write":
                 self.events.todos(self.todos)

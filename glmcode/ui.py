@@ -252,7 +252,7 @@ class ConsoleEvents(AgentEvents):
             self._renderer.__exit__(None, None, None)
             self._renderer = None
 
-    def tool_call(self, name: str, args: dict) -> None:
+    def tool_call(self, name: str, args: dict, call_id: str = "") -> None:
         tool_call(name, args)
 
     def tool_result(self, name: str, content: str, is_error: bool = False) -> None:

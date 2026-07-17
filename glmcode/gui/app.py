@@ -312,8 +312,8 @@ class WebEvents(AgentEvents):
                 self.emit("play_audio", seq=seq, src="", error=str(e))
 
     # tools --------------------------------------------------------------
-    def tool_call(self, name, args):
-        self.emit("tool_call", name=name, args=args)
+    def tool_call(self, name, args, call_id=""):
+        self.emit("tool_call", name=name, args=args, call_id=call_id)
 
     def tool_result(self, name, content, is_error=False):
         self.emit("tool_result", name=name, content=content[:12000], error=is_error)
@@ -1310,6 +1310,15 @@ class Api:
         if self._agent:
             self._agent.request_cancel()
         return {"ok": True}
+
+    def stop_powershell(self, call_id: str):
+        """Stop one blocking shell command (the Stop button on its chat box)
+        by killing its process tree, so the agent's turn -- stuck waiting on
+        a command that never exits, like a dev server -- unblocks at once.
+        Process-global registry keyed by unique per-call tokens, so this
+        reaches the right command even across parallel chats."""
+        from ..tools import stop_foreground
+        return {"ok": bool(stop_foreground(call_id or ""))}
 
     def steer(self, text: str):
         text = (text or "").strip()

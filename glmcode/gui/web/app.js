@@ -281,25 +281,52 @@ function toolSummary(name, args) {
 
 /* ------------------------------------------------ shared tool / todo builders */
 
-function buildToolEl(name, args) {
+// Tools that shell out and can block indefinitely (a dev server, a watch,
+// a hung test run). Their chat box gets a Stop button while running so a
+// never-ending command can't freeze the whole turn.
+const STOPPABLE_TOOLS = new Set(["run_powershell", "run_tests", "run_test_file"]);
+
+function buildToolEl(name, args, callId) {
   const el = document.createElement("div");
   el.className = "tool running";
+  let stopBtn = "";
+  if (callId && STOPPABLE_TOOLS.has(name)) {
+    el.dataset.callId = callId;
+    stopBtn = `<button class="tool-stop" title="Stop this command" aria-label="Stop this command">Stop</button>`;
+  }
   el.innerHTML =
     `<button class="tool-head" aria-expanded="false">` +
     `<span class="tool-ico">${toolIcon(name)}</span>` +
     `<span class="tool-name">${esc(name)}</span>` +
     `<span class="tool-sum">${esc(toolSummary(name, args || {}))}</span>` +
     `<span class="tool-state">running</span></button>` +
+    stopBtn +
     `<div class="tool-body"></div>`;
   el.querySelector(".tool-head").addEventListener("click", () => {
     el.classList.toggle("open");
     el.querySelector(".tool-head").setAttribute("aria-expanded", el.classList.contains("open"));
   });
+  const sb = el.querySelector(".tool-stop");
+  if (sb) {
+    sb.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      sb.disabled = true;
+      sb.textContent = "Stopping…";
+      const res = await api().stop_powershell(el.dataset.callId);
+      if (!res || !res.ok) {
+        // The command already finished on its own between click and call.
+        sb.textContent = "Stop";
+        sb.disabled = false;
+      }
+    });
+  }
   return el;
 }
 
 function finishToolEl(el, content, isError) {
   el.classList.remove("running");
+  const sb = el.querySelector(".tool-stop");
+  if (sb) sb.remove();
   if (isError) el.classList.add("error");
   el.querySelector(".tool-state").textContent = isError ? "error" : "done";
   const body = el.querySelector(".tool-body");
@@ -619,7 +646,7 @@ function handle(ev) {
     }
     case "tool_call": {
       const t = ensureTurn();
-      const el = buildToolEl(ev.name, ev.args || {});
+      const el = buildToolEl(ev.name, ev.args || {}, ev.call_id || "");
       t.wrap.appendChild(el);
       t.lastTool = el;
       scrollDown();
