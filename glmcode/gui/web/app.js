@@ -1641,6 +1641,7 @@ $("voice-speed").addEventListener("change", async () => {
 /* ---------------------------------------------- model providers (BYOM) -- */
 
 let providersCache = null;
+let provFormEditing = null; // original name of the API being edited; null = adding
 
 function refreshModelFoot(res) {
   if (!res) return;
@@ -1650,36 +1651,60 @@ function refreshModelFoot(res) {
     : `${res.chat_model} via ${res.chat_provider}`;
 }
 
-function fillModelSelect(selected) {
-  const p = (providersCache?.providers || []).find((x) => x.name === $("model-provider").value);
-  const models = (p && p.models) || [];
-  $("model-select").innerHTML = models.map((m) => `<option>${esc(m)}</option>`).join("");
-  if (selected && models.includes(selected)) $("model-select").value = selected;
+const PENCIL_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
+const CROSS_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+
+function apiRowSub(p) {
+  if (p.builtin) {
+    return p.has_key ? "free default — always $0.00"
+      : "no API key yet — edit this row and paste yours";
+  }
+  return `${p.base_url} · ${p.models.length} model${p.models.length === 1 ? "" : "s"}`;
 }
 
-function renderProviderList(providers) {
-  const list = $("provider-list");
+function renderApiList(res) {
+  const list = $("api-list");
   list.innerHTML = "";
-  for (const p of providers) {
-    if (p.builtin) continue;
+  for (const p of res.providers) {
+    const selected = p.name === res.chat_provider;
     const row = document.createElement("div");
-    row.className = "provider-row";
+    row.className = "provider-row api-row" + (selected ? " selected" : "");
     row.innerHTML =
+      `<span class="api-radio"></span>` +
       `<div class="provider-row-text"><span class="provider-name"></span>` +
       `<span class="provider-sub"></span></div>` +
-      `<button class="icon-btn-mini" aria-label="Delete provider" title="Delete">` +
-      `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`;
+      `<button class="icon-btn-mini api-edit" aria-label="Edit API" title="Edit">${PENCIL_SVG}</button>`;
     row.querySelector(".provider-name").textContent = p.name;
-    row.querySelector(".provider-sub").textContent =
-      `${p.base_url} · ${p.models.length} model${p.models.length === 1 ? "" : "s"}`;
-    row.querySelector("button").addEventListener("click", async () => {
-      const res = await api().delete_provider(p.name);
-      populateModelPicker(res);
+    row.querySelector(".provider-sub").textContent = apiRowSub(p);
+    // The selected row exposes its model choice inline (built-in excluded:
+    // its chat model is the free default, vision routes automatically).
+    if (selected && !p.builtin && p.models.length) {
+      const sel = document.createElement("select");
+      sel.className = "voice-select api-model-select";
+      sel.innerHTML = p.models.map((m) => `<option>${esc(m)}</option>`).join("");
+      if (p.models.includes(res.chat_model)) sel.value = res.chat_model;
+      sel.addEventListener("change", () => selectApi(p, sel.value));
+      row.insertBefore(sel, row.querySelector(".api-edit"));
+    }
+    row.querySelector(".api-edit").addEventListener("click", (e) => {
+      e.stopPropagation();
+      openApiForm(p, p.name);
     });
+    if (!p.builtin) {
+      const del = document.createElement("button");
+      del.className = "icon-btn-mini";
+      del.setAttribute("aria-label", "Delete API");
+      del.title = "Delete";
+      del.innerHTML = CROSS_SVG;
+      del.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const res2 = await api().delete_provider(p.name);
+        populateModelPicker(res2);
+      });
+      row.appendChild(del);
+    }
+    if (!selected) row.addEventListener("click", () => selectApi(p));
     list.appendChild(row);
-  }
-  if (!list.children.length) {
-    list.innerHTML = '<div class="row-sub">No custom providers yet. Any OpenAI-compatible endpoint works.</div>';
   }
 }
 
@@ -1687,35 +1712,69 @@ async function populateModelPicker(data) {
   const res = data || await api().providers();
   if (!res || !res.providers) return;
   providersCache = res;
-  $("model-provider").innerHTML = res.providers
-    .map((p) => `<option>${esc(p.name)}</option>`).join("");
-  $("model-provider").value = res.chat_provider;
-  fillModelSelect(res.chat_model);
-  renderProviderList(res.providers);
+  renderApiList(res);
   refreshModelFoot(res);
 }
 
-async function applyChatModel() {
-  const res = await api().set_chat_model($("model-provider").value, $("model-select").value);
+async function selectApi(p, model) {
+  const res = await api().set_chat_model(
+    p.name, model || (p.builtin ? "" : (p.models[0] || "")));
   if (res && res.error) {
     toast(res.error, "error", 5000);
     populateModelPicker();
     return;
   }
   populateModelPicker(res);
-  toast(`This chat now uses ${res.chat_model}.`, "info", 3000);
+  toast(`This chat now uses ${res.chat_model}.`, "info", 2500);
 }
 
-$("model-provider").addEventListener("change", () => { fillModelSelect(); applyChatModel(); });
-$("model-select").addEventListener("change", applyChatModel);
+function openApiForm(prefill, editingName) {
+  provFormEditing = editingName || null;
+  const isBuiltin = !!prefill.builtin;
+  $("api-form").hidden = false;
+  $("prov-name").value = prefill.name || "";
+  $("prov-url").value = prefill.base_url || "";
+  $("prov-models").value = (prefill.models || []).join(", ");
+  $("prov-key").value = "";
+  // The built-in z.ai API is fixed except for the key.
+  for (const id of ["prov-name", "prov-url", "prov-models"]) $(id).disabled = isBuiltin;
+  $("prov-key").placeholder = isBuiltin
+    ? "Paste your free z.ai API key (z.ai → profile → API Keys)"
+    : editingName ? "New API key (empty = keep the current one)"
+      : "API key (leave empty for local servers)";
+  $("prov-key").focus();
+}
 
-$("prov-add").addEventListener("click", async () => {
-  const res = await api().add_provider(
-    $("prov-name").value, $("prov-url").value, $("prov-key").value, $("prov-models").value);
+function closeApiForm() {
+  provFormEditing = null;
+  $("api-form").hidden = true;
+  for (const id of ["prov-name", "prov-url", "prov-key", "prov-models"]) {
+    $(id).value = "";
+    $(id).disabled = false;
+  }
+}
+
+$("api-add").addEventListener("click", () => {
+  const ps = providersCache?.providers || [];
+  const builtin = ps.find((p) => p.builtin);
+  // First time here with nothing configured at all: pre-fill the z.ai
+  // template so the only thing left to type is the key.
+  if (builtin && !builtin.has_key && ps.length <= 1) openApiForm(builtin, builtin.name);
+  else openApiForm({}, null);
+});
+$("prov-cancel").addEventListener("click", closeApiForm);
+
+$("prov-save").addEventListener("click", async () => {
+  const res = await api().save_provider(provFormEditing || "", $("prov-name").value,
+    $("prov-url").value, $("prov-key").value, $("prov-models").value);
   if (res && res.error) { toast(res.error, "error", 6000); return; }
-  for (const id of ["prov-name", "prov-url", "prov-key", "prov-models"]) $(id).value = "";
+  closeApiForm();
   populateModelPicker(res);
-  toast("Provider added.", "info", 3000);
+  if (res.persisted_env === false) {
+    toast("Key saved to config (couldn't set the ZAI_API_KEY environment variable).", "info", 5000);
+  } else {
+    toast("API saved.", "info", 3000);
+  }
 });
 
 $("prov-detect").addEventListener("click", async () => {
@@ -1797,6 +1856,7 @@ function syncSettingsUI() {
   });
   $("opt-thinking").setAttribute("aria-checked", !!settings.thinking);
   $("opt-reasoning").setAttribute("aria-checked", !!settings.show_reasoning);
+  $("opt-notify").setAttribute("aria-checked", !!settings.notifications);
   $("cwd-label").textContent = settings.cwd || "No chat selected";
   $("cwd-label").title = settings.cwd || "";
   $("tb-cwd").textContent = shortPath(settings.cwd || "");
@@ -1849,6 +1909,7 @@ function bindSwitch(id, key) {
 }
 bindSwitch("opt-thinking", "thinking");
 bindSwitch("opt-reasoning", "show_reasoning");
+bindSwitch("opt-notify", "notifications");
 
 $("bg-change").addEventListener("click", async () => {
   const res = await api().pick_background();

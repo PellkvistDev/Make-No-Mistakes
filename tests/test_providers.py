@@ -2,6 +2,8 @@
 vision-client split for custom providers."""
 
 import json
+import sys
+import types
 
 import glmcode.config as config
 from glmcode.config import (BUILTIN_PROVIDER_NAME, Config, all_providers,
@@ -10,6 +12,73 @@ from glmcode.config import (BUILTIN_PROVIDER_NAME, Config, all_providers,
 from glmcode.sessions import SessionStore
 
 from conftest import FakeResult, tool_call
+
+sys.modules.setdefault("webview", types.SimpleNamespace(
+    Window=object, FOLDER_DIALOG=object(), OPEN_DIALOG=object()))
+from glmcode.gui import app as gui_app  # noqa: E402
+
+
+def make_api(monkeypatch):
+    """A minimal Api for the provider CRUD paths: real Config, no window,
+    no disk writes, no setx."""
+    api = gui_app.Api.__new__(gui_app.Api)
+    api._cfg = Config()
+    api._chats = {}
+    api.session_id = None
+    api._client = None
+    monkeypatch.setattr(gui_app, "save_config", lambda cfg: None)
+    return api
+
+
+def test_save_provider_adds_then_edits_in_place(monkeypatch):
+    api = make_api(monkeypatch)
+    res = api.save_provider("", "OpenRouter", "https://openrouter.ai/api/v1/",
+                            "sk-x", "m1, m2")
+    assert "error" not in res
+    p = api._cfg.providers[0]
+    assert p["base_url"] == "https://openrouter.ai/api/v1"  # trailing / stripped
+    assert p["models"] == ["m1", "m2"]
+
+    # Edit: rename it, trim the models, leave the key field empty -> the
+    # stored key survives.
+    res = api.save_provider("OpenRouter", "OR", "https://openrouter.ai/api/v1",
+                            "", "m1")
+    assert "error" not in res
+    p = api._cfg.providers[0]
+    assert (p["name"], p["api_key"], p["models"]) == ("OR", "sk-x", ["m1"])
+
+
+def test_save_provider_validation(monkeypatch):
+    api = make_api(monkeypatch)
+    api.save_provider("", "A", "https://a/v1", "k", "m")
+    assert "already exists" in api.save_provider("", "A", "https://b/v1", "", "m")["error"]
+    assert "required" in api.save_provider("", "B", "", "", "")["error"]
+    assert "to edit" in api.save_provider("ghost", "G", "https://g/v1", "", "m")["error"]
+    # renaming one custom API onto another's name is also a clash
+    api.save_provider("", "B", "https://b/v1", "", "m")
+    assert "already exists" in api.save_provider("B", "A", "https://b/v1", "", "m")["error"]
+
+
+def test_saving_builtin_row_sets_env_key(monkeypatch):
+    api = make_api(monkeypatch)
+    persisted = {}
+
+    def fake_persist(name, value):
+        persisted[name] = value
+        return True
+
+    monkeypatch.setattr(gui_app, "persist_env_var", fake_persist)
+    res = api.save_provider(BUILTIN_PROVIDER_NAME, BUILTIN_PROVIDER_NAME,
+                            "", "zk-123", "")
+    assert "error" not in res
+    assert persisted == {"ZAI_API_KEY": "zk-123"}
+    assert api._cfg.api_key == "zk-123"
+    assert res["persisted_env"] is True
+    # no custom provider row was created for the builtin
+    assert api._cfg.providers == []
+    # and an empty key is refused with a pointer at where to get one
+    assert "z.ai" in api.save_provider(BUILTIN_PROVIDER_NAME,
+                                       BUILTIN_PROVIDER_NAME, "", "", "")["error"]
 
 
 def test_builtin_provider_always_first():

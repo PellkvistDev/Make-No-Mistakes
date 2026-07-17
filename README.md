@@ -88,7 +88,8 @@ break until you regenerate them) — or if `requirements.txt` changed.
 - **Desktop notifications** — when the app isn't the focused window, a native
   OS notification (Windows toast / macOS / Linux) fires the moment a chat
   needs a permission answer or finishes and is waiting for you, titled with
-  the chat's name. No setup, no extra dependencies. All app data — chats,
+  the chat's name. No setup, no extra dependencies; on by default, with a
+  toggle in **Settings → Notifications**. All app data — chats,
   backups, transcripts, memory, config — lives in `~/.makenomistakes/`
   (an existing `~/.glmcode/` folder from older versions is migrated
   automatically on first launch).
@@ -328,10 +329,15 @@ model doesn't follow instructions embedded in web content.
 ## Bring your own model
 
 The free z.ai models are the default, but any **OpenAI-compatible endpoint**
-can power a chat: **Settings → Model** lets you add providers (OpenRouter, a
-paid API, anything with `/chat/completions`) or hit **Detect local** to
-auto-add a running **Ollama** or **LM Studio** with its installed models.
-The model choice is **per chat** — pick a local Llama for one project while
+can power a chat. **Settings → APIs** shows every configured API as a
+selectable list — click one to use it for the current chat (with an inline
+model picker on the selected row), edit or delete it, or press **Add API…**
+to configure a new one (OpenRouter, a paid API, anything with
+`/chat/completions`). The very first time — before anything is configured —
+the form comes pre-filled with the z.ai defaults so all you paste is the key,
+which is saved to the `ZAI_API_KEY` environment variable. **Detect local**
+auto-adds a running **Ollama** or **LM Studio** with its installed models.
+The choice is **per chat** — pick a local Llama for one project while
 another stays on the free default — and it's remembered with the chat.
 Vision keeps routing through the built-in provider, so screenshots keep
 working even when the chat's model can't see images.

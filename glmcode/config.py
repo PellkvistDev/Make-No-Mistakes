@@ -98,6 +98,7 @@ class Config:
     gui_cwd: str = ""                # unused (kept for old config compatibility)
     last_session_id: str = ""        # desktop app: session to resume on launch
     read_aloud: bool = False         # desktop app: auto-speak assistant replies (Kokoro TTS)
+    notifications: bool = True       # desktop app: OS toasts while the window is unfocused
     tts_voice: str = "af_heart"      # Kokoro voice name
     tts_speed: float = 1.0           # Kokoro speech speed, 0.5-2.0
     # Custom model providers: [{"name", "base_url", "api_key", "models": [..]}].

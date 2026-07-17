@@ -86,6 +86,7 @@ def test_os_attention_only_fires_when_unfocused(monkeypatch):
     calls = []
     monkeypatch.setattr(gui_app, "notify", lambda t, b: calls.append((t, b)))
     api = gui_app.Api.__new__(gui_app.Api)
+    api._cfg = types.SimpleNamespace(notifications=True)
     api._chats = {"s1": types.SimpleNamespace(title="Fix the bug")}
 
     api._window_focused = True
@@ -97,3 +98,18 @@ def test_os_attention_only_fires_when_unfocused(monkeypatch):
     api._os_attention("unknown-sid", "Done -- waiting for you.")
     assert calls == [("Fix the bug", "Needs permission: run command"),
                      ("Make No Mistakes", "Done -- waiting for you.")]
+
+
+def test_os_attention_respects_settings_toggle(monkeypatch):
+    calls = []
+    monkeypatch.setattr(gui_app, "notify", lambda t, b: calls.append((t, b)))
+    api = gui_app.Api.__new__(gui_app.Api)
+    api._cfg = types.SimpleNamespace(notifications=False)
+    api._chats = {}
+    api._window_focused = False
+    api._os_attention("s1", "Needs permission: run command")
+    assert calls == []
+
+
+def test_notifications_default_on():
+    assert config.Config().notifications is True

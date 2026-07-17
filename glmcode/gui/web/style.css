@@ -922,24 +922,28 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 .row-sub.mono { font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .row-actions { display: flex; gap: 7px; flex: none; }
 
-/* model provider picker + editor */
-.model-picker { flex-wrap: wrap; justify-content: flex-end; max-width: 60%; }
-.model-picker select { max-width: 100%; }
-#providers-editor {
-  margin: 4px 0 12px; border: 1px solid var(--stroke-soft); border-radius: var(--r-sm);
-  background: rgba(255, 255, 255, 0.03); overflow: hidden;
-}
-#providers-editor > summary {
-  list-style: none; cursor: pointer; padding: 9px 12px;
-  font-size: 12.5px; font-weight: 600; color: var(--text-dim);
-}
-#providers-editor > summary::-webkit-details-marker { display: none; }
-#providers-editor > summary:hover { color: var(--text); }
-.provider-list { padding: 2px 12px 8px; display: flex; flex-direction: column; gap: 4px; }
+/* API list (selectable) + add/edit form */
+.provider-list { padding: 2px 0 4px; display: flex; flex-direction: column; gap: 5px; }
 .provider-row {
   display: flex; align-items: center; gap: 8px; padding: 6px 8px;
   border: 1px solid var(--stroke-soft); border-radius: 8px; font-size: 12px;
 }
+.api-row { cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+.api-row:hover { background: rgba(255, 255, 255, 0.04); }
+.api-row.selected {
+  cursor: default; border-color: var(--accent, #7aa2ff);
+  background: rgba(122, 162, 255, 0.08);
+}
+.api-radio {
+  flex: none; width: 13px; height: 13px; border-radius: 50%;
+  border: 1.5px solid var(--text-faint); box-sizing: border-box;
+}
+.api-row.selected .api-radio {
+  border-color: var(--accent, #7aa2ff);
+  background: radial-gradient(circle, var(--accent, #7aa2ff) 0 3.5px, transparent 4px);
+}
+.api-model-select { flex: none; max-width: 190px; font-size: 11.5px; }
+.api-actions { margin: 6px 0 10px; }
 .provider-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .provider-name { font-weight: 600; color: var(--text); }
 .provider-sub {

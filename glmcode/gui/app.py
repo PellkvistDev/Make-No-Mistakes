@@ -595,7 +595,7 @@ class Api:
         """OS-level toast for 'this chat needs you': a blocking permission
         prompt, or a finished turn waiting on the user. Titled with the
         chat's name so parallel chats are tellable apart."""
-        if self._window_focused:
+        if self._window_focused or not self._cfg.notifications:
             return
         cs = self._chats.get(sid)
         notify(cs.title if cs and cs.title else APP_NAME, body)
@@ -715,6 +715,7 @@ class Api:
             "cwd": str(Path.cwd()) if self.session_id else "",
             "background_custom": bool(c.background_path),
             "read_aloud": c.read_aloud, "tts_voice": c.tts_voice, "tts_speed": c.tts_speed,
+            "notifications": c.notifications,
         }
 
     def set_setting(self, key: str, value):
@@ -726,7 +727,7 @@ class Api:
                 c.mode = value
         elif key == "vision_route" and value in ("describe", "direct"):
             c.vision_route = value
-        elif key in ("thinking", "show_reasoning", "read_aloud"):
+        elif key in ("thinking", "show_reasoning", "read_aloud", "notifications"):
             setattr(c, key, bool(value))
         elif key in ("model", "vision_model") and isinstance(value, str) and value.strip():
             setattr(c, key, value.strip())
@@ -836,17 +837,63 @@ class Api:
                 "chat_model": self.session_model or self._cfg.model}
 
     def add_provider(self, name: str, base_url: str, api_key: str, models: str):
+        return self.save_provider("", name, base_url, api_key, models)
+
+    def save_provider(self, original_name: str, name: str, base_url: str,
+                      api_key: str, models: str):
+        """Add a new API or save edits to an existing one. `original_name`
+        is the row the form was opened from ("" = adding a new one).
+
+        Editing the built-in z.ai row only ever means one thing -- setting
+        or replacing the API key -- and that key is persisted to the
+        ZAI_API_KEY env var (like first-run onboarding), not to the custom
+        provider list."""
+        original_name = (original_name or "").strip()
         name = (name or "").strip()
+        api_key = (api_key or "").strip()
+        if BUILTIN_PROVIDER_NAME in (original_name, name):
+            if not api_key:
+                return {"error": "paste your z.ai API key "
+                                 "(free at z.ai → profile → API Keys)"}
+            persisted = persist_env_var("ZAI_API_KEY", api_key)
+            self._cfg.api_key = api_key  # fallback source if setx failed
+            save_config(self._cfg)
+            self._client = None  # rebuild with the new key on next use
+            res = self.providers()
+            res["persisted_env"] = persisted
+            return res
         base_url = (base_url or "").strip().rstrip("/")
         model_list = [m.strip() for m in (models or "").split(",") if m.strip()]
         if not name or not base_url or not model_list:
             return {"error": "name, base URL and at least one model id are required"}
-        if find_provider(self._cfg, name):
-            return {"error": f'a provider named "{name}" already exists'}
-        self._cfg.providers.append({"name": name, "base_url": base_url,
-                                    "api_key": (api_key or "").strip(),
-                                    "models": model_list})
+        existing = None
+        if original_name:
+            existing = next((p for p in self._cfg.providers
+                             if p.get("name") == original_name), None)
+            if existing is None:
+                return {"error": f'no API named "{original_name}" to edit'}
+        clash = find_provider(self._cfg, name)
+        if clash is not None and clash is not existing:
+            return {"error": f'an API named "{name}" already exists'}
+        # Editing with the key field left empty keeps the stored key.
+        entry = {"name": name, "base_url": base_url,
+                 "api_key": api_key or (existing or {}).get("api_key", ""),
+                 "models": model_list}
+        if existing is None:
+            self._cfg.providers.append(entry)
+        else:
+            existing.update(entry)
+            if original_name != name:  # chats pointing at the old name follow
+                for cs in self._chats.values():
+                    if cs.provider == original_name:
+                        cs.provider = name
         save_config(self._cfg)
+        # The active chat picks up new url/key/models immediately; background
+        # and reopened chats re-apply their provider on activation anyway.
+        if self.session_provider == name and self._agent and not self._agent.busy:
+            keep = self.session_model if self.session_model in model_list else ""
+            self._apply_chat_model(self._agent, name, keep)
+            self._save_current()
         return self.providers()
 
     def delete_provider(self, name: str):

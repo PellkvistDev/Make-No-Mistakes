@@ -287,29 +287,33 @@
     </section>
 
     <section>
-      <h3>Model</h3>
-      <div class="row">
-        <div class="row-text"><label for="model-provider">Chat model</label>
-          <span class="row-sub">This chat only — new chats use the free default</span></div>
-        <div class="row-actions model-picker">
-          <select id="model-provider" class="voice-select"></select>
-          <select id="model-select" class="voice-select"></select>
+      <h3>Notifications</h3>
+      <div class="row"><div class="row-text"><label for="opt-notify">Desktop notifications</label>
+        <span class="row-sub">When the app is in the background: notify when a chat needs
+          permission or finishes and is waiting for you</span></div>
+        <button id="opt-notify" class="switch" role="switch" aria-checked="true"><span></span></button></div>
+    </section>
+
+    <section>
+      <h3>APIs</h3>
+      <p class="row-sub">The API this chat talks to — click one to select it. New chats
+         always start on the free z.ai default. Any OpenAI-compatible endpoint works
+         (OpenRouter, Ollama, LM Studio, paid APIs).</p>
+      <div id="api-list" class="provider-list"></div>
+      <div class="sheet-actions api-actions">
+        <button id="prov-detect" class="btn btn-ghost">Detect local (Ollama / LM Studio)</button>
+        <button id="api-add" class="btn btn-primary">Add API…</button>
+      </div>
+      <div id="api-form" class="provider-form" hidden>
+        <input id="prov-name" class="text-input" placeholder="Name (e.g. OpenRouter)">
+        <input id="prov-url" class="text-input" placeholder="Base URL (OpenAI-compatible), e.g. https://openrouter.ai/api/v1">
+        <input id="prov-key" class="text-input" type="password" placeholder="API key (leave empty for local servers)">
+        <input id="prov-models" class="text-input" placeholder="Model ids, comma-separated">
+        <div class="sheet-actions">
+          <button id="prov-cancel" class="btn btn-ghost">Cancel</button>
+          <button id="prov-save" class="btn btn-primary">Save API</button>
         </div>
       </div>
-      <details id="providers-editor">
-        <summary>Custom providers — bring your own model…</summary>
-        <div id="provider-list" class="provider-list"></div>
-        <div class="provider-form">
-          <input id="prov-name" class="text-input" placeholder="Name (e.g. OpenRouter)">
-          <input id="prov-url" class="text-input" placeholder="Base URL (OpenAI-compatible), e.g. https://openrouter.ai/api/v1">
-          <input id="prov-key" class="text-input" type="password" placeholder="API key (leave empty for local servers)">
-          <input id="prov-models" class="text-input" placeholder="Model ids, comma-separated">
-          <div class="sheet-actions">
-            <button id="prov-detect" class="btn btn-ghost">Detect local (Ollama / LM Studio)</button>
-            <button id="prov-add" class="btn btn-primary">Add provider</button>
-          </div>
-        </div>
-      </details>
       <div class="row"><div class="row-text"><label for="opt-thinking">Extended thinking</label>
         <span class="row-sub">Model reasons before answering</span></div>
         <button id="opt-thinking" class="switch" role="switch" aria-checked="true"><span></span></button></div>
