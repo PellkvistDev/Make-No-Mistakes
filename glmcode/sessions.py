@@ -11,9 +11,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import CONFIG_DIR
-from .prompts import (CONTINUE_NUDGE, EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE,
-                      STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE, VERIFY_NUDGE,
-                      WRAP_UP_NUDGE)
+from .prompts import (CONTINUE_NUDGE, EXECUTE_PLAN_MESSAGE, FILE_CONTEXT_MARKER,
+                      PLAN_MODE_PREAMBLE, STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE,
+                      VERIFY_NUDGE, WRAP_UP_NUDGE)
 
 # Internal plumbing messages the agent injects mid-turn; they were never
 # typed by the user, so history replay must not render them as user bubbles.
@@ -184,6 +184,10 @@ def to_display(messages: list) -> list[dict]:
                 images = [p["image_url"]["url"] for p in c if p.get("type") == "image_url"]
             else:
                 text = c or ""
+            # Auto-attached @-file contents are for the model only -- the user
+            # sees just their own text and the @mentions they typed.
+            if FILE_CONTEXT_MARKER in text:
+                text = text.split(FILE_CONTEXT_MARKER, 1)[0]
             if text.startswith("[Context was compacted"):
                 items.append({"kind": "compacted", "summary": _compacted_summary(text)})
                 continue

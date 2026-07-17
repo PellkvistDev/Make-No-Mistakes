@@ -91,6 +91,121 @@ def _should_skip_dir(name: str) -> bool:
     return name in DEFAULT_IGNORES or name.startswith(".git")
 
 
+# --- project file index (powers the composer's @-mention picker) --------- #
+# Walking a big repo on every keystroke is wasteful, so the flat file list is
+# cached per directory for a few seconds and filtered in memory.
+_file_index_cache: dict[str, tuple[float, list[str]]] = {}
+_FILE_INDEX_TTL = 4.0
+_FILE_INDEX_CAP = 6000
+
+
+def project_files(root: Path, force: bool = False) -> list[str]:
+    """All non-ignored files under `root` as posix-relative paths (cached)."""
+    key = str(root)
+    now = time.time()
+    hit = _file_index_cache.get(key)
+    if hit and not force and now - hit[0] < _FILE_INDEX_TTL:
+        return hit[1]
+    files: list[str] = []
+    try:
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not _should_skip_dir(d)]
+            for name in filenames:
+                if name.startswith(".") and name not in (".env.example",):
+                    continue
+                files.append((Path(dirpath) / name).relative_to(root).as_posix())
+                if len(files) >= _FILE_INDEX_CAP:
+                    break
+            if len(files) >= _FILE_INDEX_CAP:
+                break
+    except OSError:
+        pass
+    _file_index_cache[key] = (now, files)
+    return files
+
+
+def _fuzzy_score(query: str, path: str) -> int | None:
+    """Rank `path` against a lowercase `query`. Lower is better; None = no
+    match. Favours matches in the basename and contiguous/earlier hits."""
+    q, p = query, path.lower()
+    base = p.rsplit("/", 1)[-1]
+    if not q:
+        return len(p)  # no query: shallow, short paths first
+    if q in base:
+        return base.index(q)                    # basename substring: best
+    if q in p:
+        return 100 + p.index(q)                 # path substring: good
+    # subsequence fallback (chars in order, possibly gapped)
+    i = 0
+    for ch in p:
+        if i < len(q) and ch == q[i]:
+            i += 1
+    return 1000 + len(p) if i == len(q) else None
+
+
+def search_project_files(root: Path, query: str, limit: int = 30) -> list[str]:
+    query = (query or "").strip().lower()
+    scored = []
+    for rel in project_files(root):
+        s = _fuzzy_score(query, rel)
+        if s is not None:
+            scored.append((s, len(rel), rel))
+    scored.sort()
+    return [rel for _, _, rel in scored[:limit]]
+
+
+_MENTION_RE = re.compile(r"@([\w./\-]+\.[\w./\-]+|[\w./\-]+/[\w./\-]+)")
+_LANG_BY_EXT = {"py": "python", "js": "javascript", "ts": "typescript",
+                "jsx": "jsx", "tsx": "tsx", "json": "json", "html": "html",
+                "css": "css", "md": "markdown", "sh": "bash", "rs": "rust",
+                "go": "go", "java": "java", "c": "c", "cpp": "cpp", "toml": "toml",
+                "yml": "yaml", "yaml": "yaml"}
+
+
+def build_file_context(root: Path, text: str,
+                       per_file: int = 6000, total: int = 20000) -> str:
+    """For each @-mentioned path in `text` that resolves to a real file under
+    `root`, return a delimited block of its current contents to append to the
+    message (so the model has the exact code without a read_file round-trip).
+    Empty string if nothing valid is mentioned. Guards against false positives
+    (@decorator, @user) by requiring the path to actually exist."""
+    from .prompts import FILE_CONTEXT_MARKER
+    root = Path(root)
+    seen: list[str] = []
+    for m in _MENTION_RE.finditer(text or ""):
+        rel = m.group(1).rstrip(".,;:)")
+        if rel not in seen:
+            seen.append(rel)
+    blocks, used = [], 0
+    for rel in seen:
+        p = (root / rel)
+        try:
+            if not p.is_file() or p.resolve().relative_to(root.resolve()) is None:
+                continue
+        except (OSError, ValueError):
+            continue
+        if _is_binary(p):
+            continue
+        try:
+            content = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if len(content) > per_file:
+            content = content[:per_file] + "\n... [truncated]"
+        lang = _LANG_BY_EXT.get(p.suffix.lstrip(".").lower(), "")
+        block = f"\n### {rel}\n```{lang}\n{content}\n```\n"
+        if used + len(block) > total:
+            blocks.append(f"\n### {rel}\n[omitted -- attached context size limit reached]\n")
+            break
+        blocks.append(block)
+        used += len(block)
+    if not blocks:
+        return ""
+    return (FILE_CONTEXT_MARKER +
+            "\nThe user referenced these files with @. Their current contents:\n"
+            + "".join(blocks) + "</referenced-files>")
+
+
 def _is_binary(path: Path) -> bool:
     try:
         with open(path, "rb") as f:

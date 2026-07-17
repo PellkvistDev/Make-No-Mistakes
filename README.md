@@ -87,6 +87,11 @@ break until you regenerate them) — or if `requirements.txt` changed.
   chats in different projects can't touch each other's files, and each keeps
   its own task checklist. If a background chat needs a permission answer, it
   waits patiently and asks the moment you switch back to it.
+- **@-mention files** — type `@` in the composer to fuzzy-search your project's
+  files; pick one and its current contents are attached to your message, so the
+  agent works from the exact code instead of hunting for it (or burning a turn
+  reading it). Attach as many as you like; the file dumps stay out of your
+  on-screen message.
 - **Edit & resend any past message** — hover a message you sent and click the
   pencil. The chat rewinds to just before it — **and the project files are
   reverted to how they were at that point** (via the auto-backup snapshots) —

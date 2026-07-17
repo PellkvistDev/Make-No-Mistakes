@@ -1459,6 +1459,101 @@ input.addEventListener("keydown", (e) => {
   }
 });
 
+/* ---- @-mention file picker -------------------------------------------- --
+   Type @ then part of a filename to fuzzy-search the project; pick a file and
+   its current contents are attached to the message (server-side) so the agent
+   gets exact context without hunting for it. */
+let mention = { open: false, start: -1, items: [], sel: 0, seq: 0 };
+let mentionTimer = null;
+
+function mentionContext() {
+  const pos = input.selectionStart;
+  const upto = input.value.slice(0, pos);
+  const at = upto.lastIndexOf("@");
+  if (at < 0) return null;
+  if (at > 0 && !/\s/.test(upto[at - 1])) return null; // @ must start a token
+  const frag = upto.slice(at + 1);
+  if (/\s/.test(frag)) return null;                     // whitespace ends it
+  return { start: at, query: frag };
+}
+
+function scheduleMentionUpdate() {
+  clearTimeout(mentionTimer);
+  if (!mentionContext()) { closeMentionMenu(); return; }
+  mentionTimer = setTimeout(updateMentionMenu, 70);
+}
+
+async function updateMentionMenu() {
+  const ctx = mentionContext();
+  if (!ctx) { closeMentionMenu(); return; }
+  mention.start = ctx.start;
+  const seq = ++mention.seq;
+  let files = [];
+  try { const r = await api().list_project_files(ctx.query); files = (r && r.files) || []; }
+  catch (e) { files = []; }
+  if (seq !== mention.seq) return;         // a newer keystroke already fired
+  if (!files.length) { closeMentionMenu(); return; }
+  mention.items = files;
+  mention.sel = 0;
+  mention.open = true;
+  renderMentionMenu();
+  $("mention-menu").hidden = false;
+}
+
+function renderMentionMenu() {
+  const menu = $("mention-menu");
+  menu.innerHTML = "";
+  mention.items.forEach((f, i) => {
+    const slash = f.lastIndexOf("/");
+    const row = document.createElement("button");
+    row.className = "mention-opt" + (i === mention.sel ? " sel" : "");
+    row.setAttribute("role", "option");
+    row.innerHTML = `<span class="mention-base"></span><span class="mention-dir"></span>`;
+    row.querySelector(".mention-base").textContent = slash >= 0 ? f.slice(slash + 1) : f;
+    row.querySelector(".mention-dir").textContent = slash >= 0 ? f.slice(0, slash + 1) : "";
+    row.addEventListener("mousedown", (e) => { e.preventDefault(); chooseMention(i); });
+    menu.appendChild(row);
+  });
+}
+
+function moveMentionSel(delta) {
+  mention.sel = (mention.sel + delta + mention.items.length) % mention.items.length;
+  renderMentionMenu();
+  const el = $("mention-menu").children[mention.sel];
+  if (el) el.scrollIntoView({ block: "nearest" });
+}
+
+function chooseMention(i) {
+  const file = mention.items[i];
+  if (!file) return;
+  const pos = input.selectionStart;
+  const before = input.value.slice(0, mention.start);
+  const insert = "@" + file + " ";
+  input.value = before + insert + input.value.slice(pos);
+  const caret = (before + insert).length;
+  input.setSelectionRange(caret, caret);
+  closeMentionMenu();
+  input.focus();
+  input.dispatchEvent(new Event("input")); // re-grow height
+}
+
+function closeMentionMenu() {
+  mention.open = false;
+  $("mention-menu").hidden = true;
+}
+
+input.addEventListener("input", scheduleMentionUpdate);
+input.addEventListener("blur", () => setTimeout(closeMentionMenu, 120));
+// Capture phase so this runs BEFORE the Enter-to-send handler above: while the
+// menu is open, Enter/Tab pick a file and Arrows navigate instead of sending.
+input.addEventListener("keydown", (e) => {
+  if (!mention.open) return;
+  if (e.key === "ArrowDown") { e.preventDefault(); e.stopImmediatePropagation(); moveMentionSel(1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); e.stopImmediatePropagation(); moveMentionSel(-1); }
+  else if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); e.stopImmediatePropagation(); chooseMention(mention.sel); }
+  else if (e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closeMentionMenu(); }
+}, true);
+
 function setBusy(b) {
   busy = b;
   $("stop-btn").hidden = !b;

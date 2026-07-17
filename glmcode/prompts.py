@@ -272,6 +272,13 @@ EXECUTE_PLAN_MESSAGE = (
 )
 
 
+# Delimiter for the auto-attached contents of @-mentioned files. It's appended
+# to the user's message so the model has the exact code without a read_file
+# round-trip, and stripped from the on-screen message by sessions.to_display
+# (the user only sees their own text + the @mentions they typed).
+FILE_CONTEXT_MARKER = "\n\n<referenced-files>"
+
+
 VERIFY_NUDGE = (
     "[Automatic check -- not from the user] You edited files this turn but never ran "
     "anything to verify them. If the project has a quick way to check your changes "

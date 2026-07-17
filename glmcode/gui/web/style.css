@@ -82,10 +82,12 @@ body.perf-mode #composer,
 body.perf-mode .sheet,
 body.perf-mode .tool,
 body.perf-mode .model-menu,
+body.perf-mode .mention-menu,
 body.perf-mode .backdrop {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
 }
+body.perf-mode .mention-menu { background: rgba(16, 21, 34, 0.97) !important; }
 body.perf-mode .glass,
 body.perf-mode .glass-strong,
 body.perf-mode #titlebar,
@@ -832,6 +834,28 @@ body.subagent-open #subagent-panel { transform: translateX(0); }
               right 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.05);
 }
 body.sidebar-open #composer-wrap { left: var(--sidebar-w); }
+
+/* @-mention file picker: sits as a flex item directly above the composer */
+.mention-menu {
+  max-height: 240px; overflow-y: auto;
+  padding: 5px; border-radius: var(--r-md);
+  background: var(--glass-strong); border: 1px solid var(--stroke);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  box-shadow: var(--shadow);
+  display: flex; flex-direction: column; gap: 2px;
+}
+.mention-opt {
+  display: flex; align-items: baseline; gap: 8px; width: 100%;
+  padding: 7px 10px; border-radius: var(--r-sm); cursor: pointer;
+  background: none; border: none; color: inherit; text-align: left;
+  font-family: var(--font);
+}
+.mention-opt.sel, .mention-opt:hover { background: var(--glass-hi); }
+.mention-base { font-size: 13px; font-weight: 600; color: var(--text); flex: none; }
+.mention-dir {
+  font-size: 11px; color: var(--text-faint); font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 /* Same fixed-position padding-vs-viewport issue as #chat above. */
 body.subagent-open #composer-wrap { right: 50%; padding-left: 24px; padding-right: 24px; }
 

@@ -33,7 +33,9 @@ from ..notify import APP_NAME, notify
 from ..prompts import EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT
 from ..sessions import SessionStore, new_id, to_display
 from ..transcript import Transcript, search_sessions
-from ..tools import configure_search
+from ..tools import (configure_search,
+                     build_file_context as tools_build_file_context,
+                     search_project_files as tools_search_project_files)
 from ..permissions import add_command_aliases
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -1299,6 +1301,18 @@ class Api:
                         "thumb": _thumb_uri(path) if is_image else ""})
         return out
 
+    def list_project_files(self, query: str = ""):
+        """Fuzzy file search in the active chat's project, for the composer's
+        @-mention picker. Fast (the file list is cached per folder)."""
+        cs = self._active
+        if not cs:
+            return {"files": []}
+        try:
+            files = tools_search_project_files(cs.agent.workdir, query or "", limit=30)
+        except Exception:
+            files = []
+        return {"files": files}
+
     # -- chat ---------------------------------------------------------- #
 
     def send(self, text: str, file_paths: list | None = None, plan: bool = False):
@@ -1333,6 +1347,16 @@ class Api:
                 # Read-only planning turn: the preamble sets expectations and
                 # permissions.plan_only (below) makes them non-negotiable.
                 text = PLAN_MODE_PREAMBLE.format(text=text)
+            # @-mentioned files: append their current contents so the model has
+            # exact code without a read_file round-trip. Scanned from raw_text
+            # (the user's own words), appended after any plan wrapping, and
+            # stripped from the on-screen message by to_display. Best-effort.
+            try:
+                file_ctx = tools_build_file_context(agent.workdir, raw_text)
+            except Exception:
+                file_ctx = ""
+            if file_ctx:
+                text = text + file_ctx
             msg = (agent.attach_files(text, paths) if paths
                    else {"role": "user", "content": text})
             agent.permissions.plan_only = bool(plan and text)
