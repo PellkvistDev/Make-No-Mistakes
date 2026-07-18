@@ -34,3 +34,42 @@ def test_attach_paths_empty_and_garbage():
     assert api.attach_paths([]) == []
     assert api.attach_paths(None) == []
     assert api.attach_paths(["/definitely/not/real"]) == []
+
+
+class _FakeWindow:
+    def __init__(self):
+        self.scripts = []
+
+    def evaluate_js(self, script):
+        self.scripts.append(script)
+
+
+def test_on_drop_reads_pywebview_paths_and_calls_back(tmp_path):
+    """The dropped files' REAL paths live only in pywebview's python-side
+    event (pywebviewFullPath) -- _on_drop reads them there and hands the
+    resolved attachments back to the page via __onDropResult."""
+    import json
+    api = gui_app.Api.__new__(gui_app.Api)
+    api._window = _FakeWindow()
+    doc = tmp_path / "notes.txt"
+    doc.write_text("x", encoding="utf-8")
+
+    event = {"dataTransfer": {"files": [
+        {"name": "notes.txt", "pywebviewFullPath": str(doc)},
+        {"name": "nofilepath"},  # a File without the injected path -> skipped
+    ]}}
+    api._on_drop(event)
+
+    assert len(api._window.scripts) == 1
+    script = api._window.scripts[0]
+    assert script.startswith("window.__onDropResult(")
+    payload = json.loads(script[script.index("(") + 1:script.rindex(")")])
+    assert [a["name"] for a in payload] == ["notes.txt"]
+
+
+def test_on_drop_never_raises():
+    api = gui_app.Api.__new__(gui_app.Api)
+    api._window = None
+    api._on_drop(None)
+    api._on_drop({})
+    api._on_drop({"dataTransfer": {"files": [{"pywebviewFullPath": None}]}})

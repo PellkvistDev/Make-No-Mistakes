@@ -1812,28 +1812,30 @@ window.addEventListener("dragleave", (e) => {
   dragDepth = Math.max(0, dragDepth - 1);
   if (dragDepth === 0) dropOverlay(false);
 });
-window.addEventListener("drop", async (e) => {
+window.addEventListener("drop", (e) => {
+  // The real disk paths of dropped files come from the PYTHON side (a
+  // window.dom.document.events.drop handler in app.py). Browsers hide local
+  // paths from JS for security, and pywebview injects them ONLY into the
+  // Python drop event (as pywebviewFullPath) -- they are simply not readable
+  // from JavaScript. So here we just stop the browser from opening the file
+  // and hide the overlay; Python then calls window.__onDropResult with the
+  // resolved attachments.
   e.preventDefault();
   dragDepth = 0;
   dropOverlay(false);
-  const files = [...((e.dataTransfer && e.dataTransfer.files) || [])];
-  if (!files.length) return;
-  const paths = files.map((f) => f.pywebviewFullPath).filter(Boolean);
-  if (!paths.length) {
-    toast("Couldn't read the dropped files' paths.", "warn", 3500);
-    return;
-  }
-  try {
-    const atts = await api().attach_paths(paths);
-    if (atts && atts.length) {
-      attachments.push(...atts);
-      renderAttachments();
-      input.focus();
-    }
-  } catch (err) {
-    toast("Bridge error: " + err, "error", 5000);
-  }
 });
+
+// Called from Python's drop handler (app.py Api._on_drop) with the attachment
+// objects it resolved from the dropped files' real paths.
+window.__onDropResult = function (atts) {
+  dragDepth = 0;
+  dropOverlay(false);
+  if (atts && atts.length) {
+    attachments.push(...atts);
+    renderAttachments();
+    input.focus();
+  }
+};
 
 function renderAttachments() {
   const box = $("attachments");

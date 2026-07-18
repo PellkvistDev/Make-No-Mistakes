@@ -1353,6 +1353,23 @@ class Api:
                         "thumb": _thumb_uri(path) if is_image else ""})
         return out
 
+    def _on_drop(self, event):
+        """Native file drop handler (bound in main() to
+        window.dom.document.events.drop). pywebview resolves each dropped
+        file's real disk path into pywebviewFullPath on the PYTHON-side event
+        only -- JS can't see it -- so the actual attaching happens here, then
+        we hand the resolved attachments back to the page."""
+        try:
+            files = ((event or {}).get("dataTransfer") or {}).get("files") or []
+            paths = [f.get("pywebviewFullPath") for f in files
+                     if isinstance(f, dict) and f.get("pywebviewFullPath")]
+            atts = self.attach_paths(paths) if paths else []
+            if self._window:
+                self._window.evaluate_js(
+                    "window.__onDropResult(" + json.dumps(atts) + ")")
+        except Exception:
+            pass
+
     def list_project_files(self, query: str = ""):
         """Fuzzy file search in the active chat's project, for the composer's
         @-mention picker. Fast (the file list is cached per folder)."""
@@ -1656,6 +1673,23 @@ def main():
     api._events_global._window = window
     for cs in api._chats.values():  # chats created before the window existed
         cs.events._window = window
+
+    # Native file drag & drop: the dropped files' real disk paths are only
+    # available in pywebview's PYTHON-side drop event (as pywebviewFullPath),
+    # so bind a Python handler once the DOM is ready. Best-effort -- older
+    # pywebview without DOM-event support just leaves the paperclip button.
+    def _bind_drop(w=window):
+        try:
+            from webview.dom import DOMEventHandler
+            w.dom.document.events.drop += DOMEventHandler(
+                api._on_drop, prevent_default=True, stop_propagation=False)
+            _startup_log("native drop handler bound")
+        except Exception as e:
+            _startup_log(f"native drop unavailable: {type(e).__name__}: {e}")
+    try:
+        window.events.loaded += _bind_drop
+    except Exception as e:
+        _startup_log(f"could not subscribe loaded for drop: {e}")
 
     # Build webview.start() kwargs
     start_kwargs = dict(debug="--debug" in sys.argv)
