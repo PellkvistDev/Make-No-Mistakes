@@ -87,6 +87,14 @@ break until you regenerate them) — or if `requirements.txt` changed.
   chats in different projects can't touch each other's files, and each keeps
   its own task checklist. If a background chat needs a permission answer, it
   waits patiently and asks the moment you switch back to it.
+- **Command palette (Ctrl/⌘+K)** — fuzzy-jump to any action (new chat, plan mode,
+  compact, settings, stop), open any past chat, or switch the model, all from the
+  keyboard.
+- **MCP servers** — connect any [Model Context Protocol](https://modelcontextprotocol.io)
+  server (stdio: `npx`, `uvx`, a script) in **Settings → APIs → MCP servers**, and
+  its tools appear to the agent alongside the built-in ones, permission-gated like
+  any other tool. Servers start in the background; a dead one just drops its tools
+  instead of breaking anything.
 - **Drag & drop attachments** — drop files or images anywhere on the window to
   attach them to your next message; same pipeline as the paperclip.
 - **Prompt history** — press ↑ in the (empty) composer to recall your previous

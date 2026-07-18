@@ -515,6 +515,12 @@ class Api:
         self._window_focused = True
 
         configure_search(self._cfg.search_provider, self._cfg.resolve_tavily_key())
+        # MCP servers: spawned in the background so a slow `npx` download
+        # never delays app startup; agents pick the tools up per model call.
+        from ..mcp import McpManager
+        self._mcp = McpManager(self._cfg)
+        if self._cfg.mcp_servers:
+            self._mcp.start_all_async()
         # Initialize command aliases for npm/yarn/pnpm/git
         add_command_aliases({
             "npm": "npm",
@@ -930,6 +936,36 @@ class Api:
             self._save_current()
         return self.providers()
 
+    # -- MCP servers ------------------------------------------------------- #
+
+    def mcp_status(self):
+        """Configured MCP servers with live state, for Settings."""
+        return {"servers": self._mcp.status()}
+
+    def mcp_add(self, name: str, command: str):
+        name = (name or "").strip()
+        command = (command or "").strip()
+        if not name or not command:
+            return {"error": "both a name and a command are required"}
+        if any(e.get("name") == name for e in self._cfg.mcp_servers):
+            return {"error": f'an MCP server named "{name}" already exists'}
+        self._cfg.mcp_servers.append({"name": name, "command": command})
+        save_config(self._cfg)
+        self._mcp.start_all_async()
+        return self.mcp_status()
+
+    def mcp_delete(self, name: str):
+        self._cfg.mcp_servers = [e for e in self._cfg.mcp_servers
+                                 if e.get("name") != name]
+        save_config(self._cfg)
+        self._mcp.start_all_async()  # also stops servers dropped from config
+        return self.mcp_status()
+
+    def mcp_restart(self, name: str):
+        threading.Thread(target=self._mcp.restart, args=(name,),
+                         daemon=True).start()
+        return {"ok": True}
+
     def detect_local_providers(self):
         """Probe the well-known local OpenAI-compatible servers (Ollama,
         LM Studio) and add any that respond as providers."""
@@ -1022,6 +1058,7 @@ class Api:
         workdir = Path(cwd) if (cwd and cwd_ok) else Path.cwd()
         events = self._make_events(sid)
         agent = Agent(self._cfg, client, events=events, workdir=workdir)
+        agent.mcp = self._mcp
         agent.load_messages(messages)
         agent.set_usage(prompt_tokens, completion_tokens)
         agent.todos = list(todos or [])

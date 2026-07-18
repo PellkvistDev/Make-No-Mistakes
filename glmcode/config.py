@@ -139,6 +139,10 @@ class Config:
     # Any OpenAI-compatible endpoint works; chats pick a provider+model in
     # Settings (per chat -- the free z.ai default stays the default).
     providers: list = field(default_factory=list)
+    # MCP servers: [{"name", "command"}] -- command is a full shell command
+    # line for a stdio MCP server (e.g. "npx -y @modelcontextprotocol/
+    # server-filesystem C:\\projects"). Managed in Settings -> MCP servers.
+    mcp_servers: list = field(default_factory=list)
 
     extra: dict = field(default_factory=dict)
 

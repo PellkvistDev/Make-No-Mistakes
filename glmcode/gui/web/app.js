@@ -2217,6 +2217,55 @@ $("prov-save").addEventListener("click", async () => {
   }
 });
 
+/* ---- MCP servers (Settings) ------------------------------------------- */
+
+const RELOAD_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36L21 8"/><path d="M21 3v5h-5"/></svg>';
+
+function renderMcpList(res) {
+  const list = $("mcp-list");
+  list.innerHTML = "";
+  for (const s of (res && res.servers) || []) {
+    const row = document.createElement("div");
+    row.className = "provider-row";
+    row.innerHTML =
+      `<span class="mcp-dot"></span>` +
+      `<div class="provider-row-text"><span class="provider-name"></span>` +
+      `<span class="provider-sub"></span></div>` +
+      `<button class="icon-btn-mini mcp-restart" title="Restart">${RELOAD_SVG}</button>` +
+      `<button class="icon-btn-mini mcp-del" title="Delete">${CROSS_SVG}</button>`;
+    row.querySelector(".mcp-dot").classList.add(s.running ? "on" : "off");
+    row.querySelector(".provider-name").textContent = s.name;
+    row.querySelector(".provider-sub").textContent = s.running
+      ? `${s.tools.length} tool${s.tools.length === 1 ? "" : "s"} · ${s.tools.slice(0, 4).join(", ")}${s.tools.length > 4 ? "…" : ""}`
+      : (s.error ? `error: ${s.error}` : "starting…");
+    row.querySelector(".mcp-restart").addEventListener("click", async () => {
+      await api().mcp_restart(s.name);
+      toast(`Restarting ${s.name}…`, "info", 2500);
+      setTimeout(populateMcp, 2500);
+    });
+    row.querySelector(".mcp-del").addEventListener("click", async () => {
+      renderMcpList(await api().mcp_delete(s.name));
+    });
+    list.appendChild(row);
+  }
+  if (!list.children.length) {
+    list.innerHTML = '<div class="row-sub">No MCP servers configured.</div>';
+  }
+}
+
+async function populateMcp() {
+  try { renderMcpList(await api().mcp_status()); } catch (e) { /* ignore */ }
+}
+
+$("mcp-add").addEventListener("click", async () => {
+  const res = await api().mcp_add($("mcp-name").value, $("mcp-command").value);
+  if (res && res.error) { toast(res.error, "error", 5000); return; }
+  $("mcp-name").value = ""; $("mcp-command").value = "";
+  renderMcpList(res);
+  toast("MCP server added — starting it now…", "info", 3500);
+  setTimeout(populateMcp, 3000); // refresh once it has had a moment to boot
+});
+
 $("prov-detect").addEventListener("click", async () => {
   const res = await api().detect_local_providers();
   if (res && res.error) { toast(res.error, "error", 6000); return; }
@@ -2322,6 +2371,7 @@ $("settings-btn").addEventListener("click", async () => {
   populateVoiceSelect();
   populateBackups();
   populateModelPicker();
+  populateMcp();
 });
 $("settings-close").addEventListener("click", () => { $("settings-backdrop").hidden = true; });
 $("settings-backdrop").addEventListener("click", (e) => {
@@ -2664,6 +2714,103 @@ $("key-input").addEventListener("keydown", (e) => {
 $("zai-link").addEventListener("click", (e) => {
   e.preventDefault();
   api().open_external("https://z.ai");
+});
+
+/* ------------------------------------------------ command palette (Ctrl+K) */
+
+let palItems = [];   // filtered, currently shown
+let palSel = 0;
+
+function paletteAllItems() {
+  const items = [];
+  items.push({ label: "New chat…", hint: "pick a project folder", run: () => newChat() });
+  items.push({ label: "Open whiteboard", hint: "scratch project", run: () => openWhiteboard() });
+  items.push({ label: busy ? "Stop the agent" : "Toggle plan mode",
+               hint: busy ? "interrupt the running turn" : "explore read-only, then propose a plan",
+               run: () => (busy ? $("stop-btn") : $("plan-toggle")).click() });
+  items.push({ label: "Compact conversation", hint: "summarize older history", run: () => $("compact-btn").click() });
+  items.push({ label: "Settings", hint: "", run: () => $("settings-btn").click() });
+  items.push({ label: "Toggle sidebar", hint: "chat history", run: () => $("sidebar-toggle").click() });
+  for (const s of sessions || []) {
+    if (s.id === activeSessionId) continue;
+    items.push({ label: "Open: " + (s.title || s.id), hint: s.cwd || "",
+                 run: () => openSession(s.id) });
+  }
+  for (const e of modelEntries(providersCache || { providers: [] })) {
+    items.push({ label: "Model: " + e.model, hint: "via " + e.provider,
+                 run: () => selectModel(e) });
+  }
+  return items;
+}
+
+function paletteScore(q, label) {
+  const l = label.toLowerCase();
+  if (!q) return 0;
+  if (l.startsWith(q)) return 1;
+  if (l.includes(q)) return 2 + l.indexOf(q);
+  let i = 0;
+  for (const ch of l) if (i < q.length && ch === q[i]) i++;
+  return i === q.length ? 100 + l.length : null;
+}
+
+function renderPalette() {
+  const list = $("palette-list");
+  list.innerHTML = "";
+  palItems.forEach((it, i) => {
+    const row = document.createElement("button");
+    row.className = "pal-opt" + (i === palSel ? " sel" : "");
+    row.setAttribute("role", "option");
+    row.innerHTML = `<span class="pal-label"></span><span class="pal-hint"></span>`;
+    row.querySelector(".pal-label").textContent = it.label;
+    row.querySelector(".pal-hint").textContent = it.hint || "";
+    row.addEventListener("mousedown", (e) => { e.preventDefault(); runPalette(i); });
+    list.appendChild(row);
+  });
+  if (!palItems.length) {
+    list.innerHTML = '<div class="pal-empty">No matches.</div>';
+  }
+}
+
+function filterPalette() {
+  const q = $("palette-input").value.trim().toLowerCase();
+  palItems = paletteAllItems()
+    .map((it) => ({ it, s: paletteScore(q, it.label + " " + (it.hint || "")) }))
+    .filter((x) => x.s !== null)
+    .sort((a, b) => a.s - b.s)
+    .map((x) => x.it)
+    .slice(0, 12);
+  palSel = 0;
+  renderPalette();
+}
+
+function openPalette() {
+  $("palette-backdrop").hidden = false;
+  $("palette-input").value = "";
+  filterPalette();
+  $("palette-input").focus();
+}
+function closePalette() { $("palette-backdrop").hidden = true; }
+function runPalette(i) {
+  const it = palItems[i];
+  closePalette();
+  if (it) it.run();
+}
+
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && (e.key === "k" || e.key === "K")) {
+    e.preventDefault();
+    $("palette-backdrop").hidden ? openPalette() : closePalette();
+  }
+});
+$("palette-input").addEventListener("input", filterPalette);
+$("palette-input").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); palSel = Math.min(palSel + 1, palItems.length - 1); renderPalette(); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); palSel = Math.max(palSel - 1, 0); renderPalette(); }
+  else if (e.key === "Enter") { e.preventDefault(); runPalette(palSel); }
+  else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
+});
+$("palette-backdrop").addEventListener("click", (e) => {
+  if (e.target === $("palette-backdrop")) closePalette();
 });
 
 /* ------------------------------------------------ boot */

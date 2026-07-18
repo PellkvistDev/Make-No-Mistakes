@@ -115,6 +115,13 @@
     <button id="plan-dismiss" class="btn btn-ghost">Dismiss</button>
   </div>
   <div id="mention-menu" class="mention-menu" role="listbox" hidden></div>
+  <div id="palette-backdrop" class="backdrop" hidden>
+    <div id="palette" role="dialog" aria-label="Command palette">
+      <input id="palette-input" type="text" placeholder="Type a command, chat, or model…"
+             aria-label="Search commands" autocomplete="off" spellcheck="false">
+      <div id="palette-list" role="listbox"></div>
+    </div>
+  </div>
   <div id="drop-overlay" hidden>
     <div class="drop-inner">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -335,6 +342,21 @@
           <button id="prov-save" class="btn btn-primary">Save API</button>
         </div>
       </div>
+      <details id="mcp-editor">
+        <summary>MCP servers — external tools for the agent…</summary>
+        <p class="row-sub">Connect Model Context Protocol servers (stdio). Their tools
+           appear to the agent alongside the built-in ones, permission-gated like
+           any other tool. Example command:
+           <code>npx -y @modelcontextprotocol/server-filesystem C:\projects</code></p>
+        <div id="mcp-list" class="provider-list"></div>
+        <div class="provider-form">
+          <input id="mcp-name" class="text-input" placeholder="Name (e.g. filesystem)">
+          <input id="mcp-command" class="text-input" placeholder="Command (npx / uvx / python …)">
+          <div class="sheet-actions">
+            <button id="mcp-add" class="btn btn-primary">Add server</button>
+          </div>
+        </div>
+      </details>
       <div class="row"><div class="row-text"><label for="opt-thinking">Extended thinking</label>
         <span class="row-sub">Model reasons before answering</span></div>
         <button id="opt-thinking" class="switch" role="switch" aria-checked="true"><span></span></button></div>

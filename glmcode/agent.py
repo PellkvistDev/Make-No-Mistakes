@@ -194,6 +194,10 @@ class Agent:
         # steering. Empty in "describe" mode (the default).
         self._pending_images: list[tuple[str, str]] = []
         self._routed_model_note: str | None = None  # de-dupe the routing notice
+        # MCP: an optional McpManager whose external tools are appended to the
+        # schema and dispatched via mcp.call. Shared process-wide (servers are
+        # external processes); permission-gated like any non-readonly tool.
+        self.mcp = None
         # Verify-nudge bookkeeping, reset each turn (see _run_turn).
         self._turn_wrote_files = False
         self._turn_verified = False
@@ -813,6 +817,17 @@ class Agent:
         finally:
             self.events.stream_end()
 
+    def _tools_for_call(self) -> list:
+        """Built-in tool schemas plus whatever MCP servers currently expose
+        (recomputed per call: servers can come up/go down mid-chat)."""
+        if self.mcp is None:
+            return self.tool_schemas
+        try:
+            extra = self.mcp.tool_schemas()
+        except Exception:
+            extra = []
+        return self.tool_schemas + extra if extra else self.tool_schemas
+
     def _client_for(self, model: str) -> ZaiClient:
         """The client to use for a given model id: vision calls go through
         the dedicated vision client when one is set (custom providers can't
@@ -829,7 +844,7 @@ class Agent:
             return self._client_for(model).chat(
                 model=model,
                 messages=self.messages,
-                tools=self.tool_schemas,
+                tools=self._tools_for_call(),
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
                 # `thinking` becomes GLM's z.ai-specific {"type":"enabled"}
@@ -961,6 +976,8 @@ class Agent:
                     self.todos = clean_todo_items(args.get("todos", []))
                     done = sum(1 for t in self.todos if t["status"] == "completed")
                     output = f"Todo list updated: {done}/{len(self.todos)} completed."
+                elif self.mcp is not None and self.mcp.owns(name):
+                    output = self.mcp.call(name, args)
                 else:
                     output = execute_tool(name, args)
                 if name in EDIT_TOOLS:
@@ -1080,6 +1097,9 @@ class Agent:
         # Same work-tree, same pre-turn baseline -- so review_changes works
         # inside sub-agents too.
         sub.backup_repo = self.backup_repo
+        # MCP servers are process-global external processes; sub-agents can
+        # use their tools the same way the coordinator can.
+        sub.mcp = self.mcp
         # Sub-agents inherit the chat's model (their client already points at
         # the same provider via self.client's key/url above). vision_client is
         # NOT shared -- it wraps a requests.Session, which isn't safe across
