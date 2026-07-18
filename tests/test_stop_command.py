@@ -57,6 +57,11 @@ def clean_registry():
 
 def test_stop_foreground_kills_and_returns_stopped_message(monkeypatch):
     monkeypatch.setattr(tools.subprocess, "Popen", FakePopen)
+    # Patching subprocess.Popen module-wide means _terminate_process_tree's
+    # Windows taskkill path (subprocess.run -> `with Popen(...)`) would re-enter
+    # the FakePopen, which isn't a context manager. Stub the terminator to just
+    # signal our fake process -- the test is about the stop flow, not taskkill.
+    monkeypatch.setattr(tools, "_terminate_process_tree", lambda proc: proc.terminate())
     result = {}
 
     def run():
@@ -88,6 +93,7 @@ def test_stop_foreground_unknown_token_is_noop():
 
 def test_timeout_kills_tree_and_points_at_run_background(monkeypatch):
     monkeypatch.setattr(tools.subprocess, "Popen", FakePopen)
+    monkeypatch.setattr(tools, "_terminate_process_tree", lambda proc: proc.terminate())
     set_call_token("tok-B")
     with pytest.raises(tools.ToolErrorBase) as ei:
         run_powershell("npm run dev", timeout_seconds=1)  # clamped min, ~1s
