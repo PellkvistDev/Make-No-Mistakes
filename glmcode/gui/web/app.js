@@ -2845,6 +2845,7 @@ function syncSettingsUI() {
   $("opt-notify").setAttribute("aria-checked", !!settings.notifications);
   $("opt-reduce-fx").setAttribute("aria-checked", !!settings.reduce_effects);
   $("opt-browser-headless").setAttribute("aria-checked", !!settings.browser_headless);
+  $("opt-browser-logins").setAttribute("aria-checked", !!settings.browser_keep_logins);
   applyPerfMode();
   $("cwd-label").textContent = settings.cwd || "No chat selected";
   $("cwd-label").title = settings.cwd || "";
@@ -2903,6 +2904,14 @@ bindSwitch("opt-reasoning", "show_reasoning");
 bindSwitch("opt-notify", "notifications");
 bindSwitch("opt-reduce-fx", "reduce_effects");
 bindSwitch("opt-browser-headless", "browser_headless");
+bindSwitch("opt-browser-logins", "browser_keep_logins");
+
+$("browser-clear-data").addEventListener("click", async () => {
+  if (!confirm("Log the agent browser out of everything and delete its saved data?")) return;
+  const res = await api().clear_browser_profile();
+  if (res && res.error) toast(res.error, "error", 5000);
+  else toast("Saved browser data cleared.", "info", 3000);
+});
 
 function applyPerfMode() {
   document.body.classList.toggle("perf-mode", !!(settings && settings.reduce_effects));

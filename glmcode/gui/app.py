@@ -747,6 +747,7 @@ class Api:
             "read_aloud": c.read_aloud, "tts_voice": c.tts_voice, "tts_speed": c.tts_speed,
             "notifications": c.notifications, "reduce_effects": c.reduce_effects,
             "browser_headless": c.browser_headless,
+            "browser_keep_logins": c.browser_keep_logins,
         }
 
     def set_setting(self, key: str, value):
@@ -759,7 +760,7 @@ class Api:
         elif key == "vision_route" and value in ("describe", "direct"):
             c.vision_route = value
         elif key in ("thinking", "show_reasoning", "read_aloud", "notifications",
-                     "reduce_effects", "browser_headless"):
+                     "reduce_effects", "browser_headless", "browser_keep_logins"):
             setattr(c, key, bool(value))
         elif key in ("model", "vision_model") and isinstance(value, str) and value.strip():
             setattr(c, key, value.strip())
@@ -1634,6 +1635,22 @@ class Api:
             return {"error": "no active chat"}
         if not self._agent.wrapup_subagent(aid):
             return {"error": "that sub-agent is no longer running"}
+        return {"ok": True}
+
+    def clear_browser_profile(self):
+        """Delete the saved agent-browser profile (cookies, logins). The
+        escape hatch that keeps 'Remember browser logins' from being a
+        one-way door. Refuses while any chat's browser is open on it."""
+        for cs in self._chats.values():
+            sess = getattr(cs.agent, "browser_session", None)
+            if sess is not None and sess.is_open:
+                return {"error": "a chat's browser is still open — close it first"}
+        p = CONFIG_DIR / "browser-profile"
+        try:
+            if p.exists():
+                shutil.rmtree(p)
+        except OSError as e:
+            return {"error": f"couldn't delete the profile: {e}"}
         return {"ok": True}
 
     def pause_browser(self):

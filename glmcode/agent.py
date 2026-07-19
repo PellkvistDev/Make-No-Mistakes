@@ -1238,7 +1238,14 @@ class Agent:
         sess = self.browser_session
         if sess is None or not sess.is_open:
             headless = bool(getattr(self.cfg, "browser_headless", False))
-            sess = BrowserSession(headless=headless, status=self.events.info)
+            # Opt-in persistent profile: a dedicated agent profile directory
+            # (NEVER the user's own browser) whose logins survive restarts.
+            user_data_dir = None
+            if getattr(self.cfg, "browser_keep_logins", False):
+                from .config import CONFIG_DIR
+                user_data_dir = str(CONFIG_DIR / "browser-profile")
+            sess = BrowserSession(headless=headless, status=self.events.info,
+                                  user_data_dir=user_data_dir)
             sess.start()  # raises here (surfaced to the model) if launch fails
             self.browser_session = sess
         return sess

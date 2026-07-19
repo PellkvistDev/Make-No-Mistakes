@@ -235,6 +235,17 @@ noise never floods the main conversation — the main agent just gets a clean
 report back. Approve it once per goal (in `ask` mode); it uses an isolated
 profile, not your personal Chrome.
 
+**Standing logins, safely.** By default the browser profile is a throwaway —
+every session starts logged out of everything, which is also why the agent
+never touches your personal Chrome (where a misclick or a prompt-injected
+page would act with *your* logins everywhere). If you want the convenience of
+staying signed in, flip **Settings → Remember browser logins**: the agent
+gets a persistent *dedicated* profile under `~/.makenomistakes/browser-profile/`.
+Pause the browser, sign in to the specific sites you want it to use, resume —
+it stays signed in across sessions and app restarts, but only to what you
+chose. **Settings → Saved browser data → Clear** logs it out of everything
+again (refused while a browser is open, so nothing is yanked mid-run).
+
 A **live Browser panel** slides in when the agent starts browsing: it mirrors
 the page as it works (a screenshot after each action), shows the current URL,
 and carries the Pause/Resume control. Runs headed by default so you can watch

@@ -134,6 +134,7 @@ class Config:
     notifications: bool = True       # desktop app: OS toasts while the window is unfocused
     reduce_effects: bool = False     # desktop app: drop blur/animations for weak GPUs
     browser_headless: bool = False   # control_chrome: hide the browser window (default: watch it)
+    browser_keep_logins: bool = False  # control_chrome: persistent agent profile (logins survive restarts)
     tts_voice: str = "af_heart"      # Kokoro voice name
     tts_speed: float = 1.0           # Kokoro speech speed, 0.5-2.0
     # Custom model providers: [{"name", "base_url", "api_key", "models": [..]}].

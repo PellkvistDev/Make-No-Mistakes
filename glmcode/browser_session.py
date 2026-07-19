@@ -41,17 +41,25 @@ class BrowserSession:
     def __init__(self, *, headless: bool = False, viewport=(1280, 800),
                  executable_path: str | None = None, status: StatusFn = None,
                  launch_factory: Callable | None = None,
-                 max_elements: int = 200):
-        """launch_factory(headless, executable_path, viewport) -> (teardown, page)
-        is called ON THE DRIVER THREAD to produce a Playwright page; the default
-        uses real Playwright. Tests inject a fake to exercise all the routing,
-        ref-tracking and snapshot logic without a real Chromium."""
+                 max_elements: int = 200, user_data_dir: str | None = None):
+        """launch_factory(headless, executable_path, viewport, user_data_dir)
+        -> (teardown, page) is called ON THE DRIVER THREAD to produce a
+        Playwright page; the default uses real Playwright. Tests inject a fake
+        to exercise all the routing, ref-tracking and snapshot logic without a
+        real Chromium.
+
+        user_data_dir, when set, launches a PERSISTENT context rooted at that
+        directory: cookies and logins survive across sessions and app
+        restarts. It's a dedicated agent profile (never the user's own
+        browser); the user logs into chosen sites once and the agent reuses
+        them. None (the default) keeps the fully throwaway profile."""
         self.headless = headless
         self.viewport = viewport
         self.executable_path = executable_path
         self.status = status
         self._launch_factory = launch_factory or _real_launch
         self.max_elements = max_elements
+        self.user_data_dir = user_data_dir
 
         self._cmd_q: "queue.Queue" = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -105,7 +113,8 @@ class BrowserSession:
     def _run(self) -> None:
         try:
             self._teardown, self._page = self._launch_factory(
-                self.headless, self.executable_path, self.viewport)
+                self.headless, self.executable_path, self.viewport,
+                self.user_data_dir)
         except Exception as e:  # launch failed -- report it to start()
             self._start_error = e
             self._ready.set()
@@ -370,7 +379,8 @@ class BrowserSession:
             return "(untitled)"
 
 
-def _real_launch(headless: bool, executable_path: str | None, viewport):
+def _real_launch(headless: bool, executable_path: str | None, viewport,
+                 user_data_dir: str | None = None):
     """Default driver-thread launcher: ensure Playwright+Chromium are present,
     start Playwright, launch a browser, and return (teardown, page)."""
     from .browser import _install_packages, packages_installed, ready
@@ -387,9 +397,36 @@ def _real_launch(headless: bool, executable_path: str | None, viewport):
     kwargs = {"headless": headless}
     if executable_path:
         kwargs["executable_path"] = executable_path
+    vp = {"width": viewport[0], "height": viewport[1]}
+
+    if user_data_dir:
+        # Persistent profile: cookies/logins live in user_data_dir and
+        # survive restarts. Chromium locks the dir, so a second concurrent
+        # session on the same profile fails -- surface that clearly.
+        Path(user_data_dir).mkdir(parents=True, exist_ok=True)
+        try:
+            context = pw.chromium.launch_persistent_context(
+                user_data_dir, viewport=vp, **kwargs)
+        except Exception as e:
+            pw.stop()
+            if "ProcessSingleton" in str(e) or "user data directory is already in use" in str(e).lower():
+                raise BrowserError(
+                    "The saved browser profile is already in use -- another "
+                    "chat's browser is open with it. Close that browser (or "
+                    "chat) first, or turn off 'Remember browser logins'.")
+            raise
+        page = context.pages[0] if context.pages else context.new_page()
+
+        def teardown():
+            try:
+                context.close()
+            finally:
+                pw.stop()
+
+        return teardown, page
+
     browser = pw.chromium.launch(**kwargs)
-    context = browser.new_context(
-        viewport={"width": viewport[0], "height": viewport[1]})
+    context = browser.new_context(viewport=vp)
     page = context.new_page()
 
     def teardown():

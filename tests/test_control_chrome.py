@@ -191,6 +191,32 @@ def test_state_changing_actions_emit_a_browser_frame(scripted_agent):
     assert frames == []
 
 
+def test_keep_logins_routes_profile_dir_to_session(scripted_agent, monkeypatch):
+    import glmcode.browser_session as bs_mod
+    from glmcode.config import CONFIG_DIR
+    made = {}
+
+    class SpySession:
+        def __init__(self, **kw):
+            made.update(kw)
+            self.is_open = True
+        def start(self):
+            pass
+
+    monkeypatch.setattr(bs_mod, "BrowserSession", SpySession)
+
+    agent = scripted_agent(allow_subagents=True)
+    agent.cfg.browser_keep_logins = True
+    agent._ensure_browser_session()
+    assert made["user_data_dir"] == str(CONFIG_DIR / "browser-profile")
+
+    made.clear()
+    agent2 = scripted_agent(allow_subagents=True)
+    agent2.cfg.browser_keep_logins = False
+    agent2._ensure_browser_session()
+    assert made["user_data_dir"] is None   # off = throwaway profile
+
+
 def test_subagents_do_not_get_control_chrome(scripted_agent):
     # A normal (non-coordinator) sub-agent's schema must exclude control_chrome.
     sub = scripted_agent(allow_subagents=False)

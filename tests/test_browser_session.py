@@ -109,11 +109,14 @@ class FakePage:
 def make_session(**kw):
     page = FakePage()
     torn = {"down": False}
+    seen = {}
 
-    def factory(headless, executable_path, viewport):
+    def factory(headless, executable_path, viewport, user_data_dir):
+        seen["user_data_dir"] = user_data_dir
         return (lambda: torn.__setitem__("down", True)), page
 
     sess = BrowserSession(launch_factory=factory, **kw)
+    sess._test_seen = seen
     return sess, page, torn
 
 
@@ -208,8 +211,21 @@ def test_close_tears_down_and_blocks_further_use():
 
 
 def test_launch_failure_surfaces_on_start():
-    def boom(headless, executable_path, viewport):
+    def boom(headless, executable_path, viewport, user_data_dir):
         raise RuntimeError("no chromium here")
     sess = BrowserSession(launch_factory=boom)
     with pytest.raises(RuntimeError, match="no chromium"):
         sess.navigate("example.com")
+
+
+def test_user_data_dir_reaches_the_launcher():
+    # Persistent-profile mode: the profile dir must flow to the launcher;
+    # default stays None (throwaway profile).
+    sess, _, _ = make_session(user_data_dir="/tmp/agent-profile")
+    sess.navigate("example.com")
+    assert sess._test_seen["user_data_dir"] == "/tmp/agent-profile"
+    sess.close()
+    sess2, _, _ = make_session()
+    sess2.navigate("example.com")
+    assert sess2._test_seen["user_data_dir"] is None
+    sess2.close()
