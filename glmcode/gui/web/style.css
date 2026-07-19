@@ -265,6 +265,39 @@ body.subagent-open #chat { right: 50%; padding-left: 24px; padding-right: 24px; 
 .jump-bottom:hover { color: var(--text); transform: translateY(-1px); }
 body.subagent-open .jump-bottom { right: calc(50% + 24px); }
 
+/* find-in-conversation bar (Ctrl/Cmd+F) */
+.find-bar {
+  position: fixed; top: 60px; right: max(24px, calc(50% - 430px));
+  z-index: var(--z-composer);
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 8px; border: 1px solid var(--stroke); border-radius: 12px;
+}
+body.subagent-open .find-bar { right: calc(50% + 24px); }
+.find-ico { width: 14px; height: 14px; color: var(--text-faint); flex: none; margin-left: 3px; }
+.find-input, #find-input {
+  background: none; border: none; outline: none; color: var(--text);
+  font-family: var(--font); font-size: 13px; width: 168px; padding: 2px 2px;
+}
+#find-input::placeholder { color: var(--text-faint); }
+.find-count {
+  font-family: var(--mono); font-size: 11px; color: var(--text-faint);
+  min-width: 34px; text-align: right; flex: none;
+}
+.find-nav {
+  display: flex; align-items: center; justify-content: center;
+  width: 24px; height: 24px; flex: none;
+  background: none; border: 1px solid transparent; border-radius: 7px;
+  color: var(--text-dim); font-size: 13px; cursor: pointer;
+  transition: background 0.13s ease, color 0.13s ease;
+}
+.find-nav:hover { background: var(--glass-hi); color: var(--text); }
+.find-x:hover { color: var(--red); }
+mark.find-hit {
+  background: rgba(255, 214, 10, 0.30); color: inherit;
+  border-radius: 2px; padding: 0 1px;
+}
+mark.find-current { background: #ffd60a; color: #10131a; }
+
 /* welcome */
 .welcome {
   margin: 9vh auto 0; max-width: 480px; text-align: center;

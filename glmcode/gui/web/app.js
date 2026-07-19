@@ -290,6 +290,115 @@ $("jump-bottom").addEventListener("click", () => {
   $("jump-bottom").hidden = true;
 });
 
+/* ------------------------------------------------ find in conversation
+   The webview has no native Ctrl+F, so this walks the rendered chat, wraps
+   matches in <mark>, and lets you cycle them. Highlights are transient --
+   they're torn out again on close (and before every re-search) so the real
+   DOM and its event handlers are never permanently altered. */
+const find = { hits: [], cur: -1, timer: 0 };
+
+function clearFindMarks() {
+  const marks = chatEl.querySelectorAll("mark.find-hit");
+  const parents = new Set();
+  marks.forEach((m) => {
+    parents.add(m.parentNode);
+    m.replaceWith(document.createTextNode(m.textContent));
+  });
+  parents.forEach((p) => p && p.normalize());  // re-merge the split text nodes
+  find.hits = [];
+  find.cur = -1;
+}
+
+function runFind(query) {
+  clearFindMarks();
+  const q = (query || "").trim();
+  const countEl = $("find-count");
+  if (!q) { countEl.textContent = "0/0"; return; }
+  const needle = q.toLowerCase();
+  // Collect matching text nodes first (mutating during a TreeWalker walk is
+  // asking for trouble), skipping hidden subtrees and existing marks.
+  const walker = document.createTreeWalker(chatEl, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      if (!node.nodeValue || !node.nodeValue.toLowerCase().includes(needle))
+        return NodeFilter.FILTER_REJECT;
+      const p = node.parentElement;
+      if (!p || p.offsetParent === null) return NodeFilter.FILTER_REJECT; // hidden
+      return NodeFilter.FILTER_ACCEPT;
+    },
+  });
+  const targets = [];
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) targets.push(n);
+  for (const node of targets) {
+    const text = node.nodeValue;
+    const low = text.toLowerCase();
+    const frag = document.createDocumentFragment();
+    let i = 0, idx;
+    while ((idx = low.indexOf(needle, i)) !== -1) {
+      if (idx > i) frag.appendChild(document.createTextNode(text.slice(i, idx)));
+      const mark = document.createElement("mark");
+      mark.className = "find-hit";
+      mark.textContent = text.slice(idx, idx + needle.length);
+      frag.appendChild(mark);
+      find.hits.push(mark);
+      i = idx + needle.length;
+    }
+    if (i < text.length) frag.appendChild(document.createTextNode(text.slice(i)));
+    node.parentNode.replaceChild(frag, node);
+  }
+  if (find.hits.length) setFindCurrent(0, false);
+  else countEl.textContent = "0/0";
+}
+
+function setFindCurrent(i, scroll = true) {
+  if (!find.hits.length) return;
+  find.cur = (i + find.hits.length) % find.hits.length;
+  find.hits.forEach((m, k) => m.classList.toggle("find-current", k === find.cur));
+  $("find-count").textContent = `${find.cur + 1}/${find.hits.length}`;
+  if (scroll) find.hits[find.cur].scrollIntoView({ block: "center", behavior: "smooth" });
+}
+
+function stepFind(delta) {
+  if (find.hits.length) setFindCurrent(find.cur + delta);
+}
+
+function openFind() {
+  const bar = $("find-bar");
+  bar.hidden = false;
+  const inp = $("find-input");
+  // Seed with the current selection if the user highlighted something first.
+  const sel = String(window.getSelection() || "").trim();
+  if (sel && sel.length <= 80) inp.value = sel;
+  inp.focus();
+  inp.select();
+  if (inp.value) runFind(inp.value);
+}
+
+function closeFind() {
+  clearFindMarks();
+  $("find-bar").hidden = true;
+  $("find-count").textContent = "0/0";
+}
+
+$("find-input").addEventListener("input", (e) => {
+  clearTimeout(find.timer);
+  const v = e.target.value;
+  find.timer = setTimeout(() => runFind(v), 110);
+});
+$("find-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); stepFind(e.shiftKey ? -1 : 1); }
+  else if (e.key === "Escape") { e.preventDefault(); closeFind(); }
+});
+$("find-prev").addEventListener("click", () => stepFind(-1));
+$("find-next").addEventListener("click", () => stepFind(1));
+$("find-close").addEventListener("click", closeFind);
+
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && !e.altKey && (e.key === "f" || e.key === "F")) {
+    e.preventDefault();
+    openFind();
+  }
+}, true);
+
 function toast(text, level = "info", ms = 4200) {
   const t = document.createElement("div");
   t.className = `toast ${level}`;

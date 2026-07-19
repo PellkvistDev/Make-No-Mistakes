@@ -87,6 +87,16 @@
   </div>
 </main>
 
+<!-- Find in conversation (Ctrl/Cmd+F) -->
+<div id="find-bar" class="find-bar glass" hidden>
+  <svg class="find-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+  <input id="find-input" type="text" placeholder="Find in chat…" spellcheck="false" autocomplete="off" aria-label="Find in conversation">
+  <span id="find-count" class="find-count">0/0</span>
+  <button id="find-prev" class="find-nav" title="Previous (Shift+Enter)" aria-label="Previous match">&#8593;</button>
+  <button id="find-next" class="find-nav" title="Next (Enter)" aria-label="Next match">&#8595;</button>
+  <button id="find-close" class="find-nav find-x" title="Close (Esc)" aria-label="Close find">&#10005;</button>
+</div>
+
 <button id="jump-bottom" class="jump-bottom glass" aria-label="Jump to latest" title="Jump to latest" hidden>
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg>
 </button>

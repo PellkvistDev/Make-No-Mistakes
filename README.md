@@ -342,6 +342,8 @@ or `n` (deny, optionally telling the model why).
 - `/cost` shows token usage — the price is always $0.00.
 - Non-interactive mode: `glm -p "one-shot prompt"`.
 - `Esc+Enter` inserts a newline; `Ctrl+C` interrupts the agent mid-turn.
+- `Ctrl/Cmd+F` finds text in the open conversation — highlights every match
+  and cycles through them with `Enter` / `Shift+Enter`.
 
 ### Web search
 
