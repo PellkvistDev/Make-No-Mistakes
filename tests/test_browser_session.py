@@ -81,6 +81,7 @@ class FakePage:
         self.screens = []
         self._next_ref = 1
         self.thread_ids = set()  # every op should run on the SAME driver thread
+        self.mouse_clicks = []
 
     def _record_thread(self):
         self.thread_ids.add(threading.get_ident())
@@ -161,6 +162,16 @@ class FakePage:
                 page._record_thread()
                 page.key_presses.append(key)
         return _KB()
+
+    @property
+    def mouse(self):
+        page = self
+
+        class _Mouse:
+            def click(self, x, y):
+                page._record_thread()
+                page.mouse_clicks.append((x, y))
+        return _Mouse()
 
 
 def make_session(**kw):
@@ -245,6 +256,41 @@ def test_click_uses_the_ref_from_the_snapshot():
     sess.navigate("example.com")
     sess.click(2)
     assert page.handles[1].clicked == 1     # ref [2] -> second handle
+    sess.close()
+
+
+def test_snapshot_shows_the_viewport_size():
+    sess, page, _ = make_session(viewport=(1024, 640))
+    snap = sess.navigate("example.com")
+    assert "Viewport: 1024x640 px" in snap
+    sess.close()
+
+
+def test_click_at_sends_a_raw_mouse_click_at_those_coordinates():
+    sess, page, _ = make_session(viewport=(1024, 640))
+    sess.navigate("example.com")
+    sess.click_at(300, 150)
+    assert page.mouse_clicks == [(300, 150)]
+    sess.close()
+
+
+def test_click_at_rejects_coordinates_outside_the_viewport():
+    sess, page, _ = make_session(viewport=(1024, 640))
+    sess.navigate("example.com")
+    with pytest.raises(BrowserError, match="outside the 1024x640 viewport"):
+        sess.click_at(2000, 150)
+    with pytest.raises(BrowserError, match="outside the 1024x640 viewport"):
+        sess.click_at(300, -5)
+    assert page.mouse_clicks == []   # never reached the page
+    sess.close()
+
+
+def test_click_at_rejects_non_numeric_coordinates():
+    sess, page, _ = make_session()
+    sess.navigate("example.com")
+    with pytest.raises(BrowserError, match="numeric"):
+        sess.click_at("left button", 150)
+    assert page.mouse_clicks == []
     sess.close()
 
 

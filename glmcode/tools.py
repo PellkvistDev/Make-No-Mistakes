@@ -2103,6 +2103,21 @@ BROWSER_AGENT_SCHEMAS = [
         ["ref"],
     ),
     _schema(
+        "browser_click_at",
+        "Click at exact pixel coordinates within the page, instead of by element ref. Use "
+        "this as a FALLBACK only when the thing you need to click is NOT in browser_snapshot's "
+        "element list -- canvas-drawn UI, an SVG shape, a spot on an image or map, or an "
+        "element the scan simply missed. Prefer browser_click(ref) whenever the element IS in "
+        "the snapshot; a ref click targets a real element and self-verifies, a raw coordinate "
+        "does not. Use browser_screenshot first to see the page and estimate where to click -- "
+        "every snapshot shows the viewport size (top-left is 0,0) to work out coordinates from.",
+        {
+            "x": {"type": "number", "description": "X pixels from the left edge of the viewport"},
+            "y": {"type": "number", "description": "Y pixels from the top edge of the viewport"},
+        },
+        ["x", "y"],
+    ),
+    _schema(
         "browser_type",
         "Type text into the input/textarea with the given ref. Set submit=true to press "
         "Enter afterward (e.g. to run a search). Returns the resulting snapshot.",
@@ -2241,8 +2256,8 @@ CONTROL_CHROME_TOOLS = {"control_chrome"}
 # auto-deny any prompt -- so these must run without asking (the gate was the
 # control_chrome approval). Each just manipulates that one dedicated browser.
 BROWSER_ACTION_TOOLS = {"browser_navigate", "browser_snapshot", "browser_click",
-                        "browser_type", "browser_key", "browser_read",
-                        "browser_screenshot", "browser_wait"}
+                        "browser_click_at", "browser_type", "browser_key",
+                        "browser_read", "browser_screenshot", "browser_wait"}
 
 
 def execute_tool(name: str, args: dict) -> str:

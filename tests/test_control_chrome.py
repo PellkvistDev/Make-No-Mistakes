@@ -38,9 +38,9 @@ def test_control_chrome_auto_in_autoedit_and_yolo(mode):
 def test_browser_action_tools_never_prompt(mode):
     # They only run inside an already-approved browser sub-agent.
     eng = PermissionEngine(mode=mode)
-    for name in ("browser_navigate", "browser_click", "browser_type",
-                 "browser_snapshot", "browser_read", "browser_key",
-                 "browser_screenshot"):
+    for name in ("browser_navigate", "browser_click", "browser_click_at",
+                 "browser_type", "browser_snapshot", "browser_read",
+                 "browser_key", "browser_screenshot", "browser_wait"):
         assert eng.check(name, {}, _never).allowed is True
 
 
@@ -176,6 +176,7 @@ def test_state_changing_actions_emit_a_browser_frame(scripted_agent):
         is_open = True
         def navigate(self, url): return "snap"
         def click(self, ref): return "snap"
+        def click_at(self, x, y): return "snap"
         def snapshot(self): return "snap-only"
         def screenshot_b64(self, max_width=520): return "data:image/jpeg;base64,AAAA"
         def current_url(self): return "https://x.test"
@@ -185,10 +186,25 @@ def test_state_changing_actions_emit_a_browser_frame(scripted_agent):
     assert frames[-1] == ("https://x.test", "data:image/jpeg;base64,AAAA")
     agent._browser_action("browser_click", {"ref": 1})
     assert len(frames) == 2
+    agent._browser_action("browser_click_at", {"x": 10, "y": 20})
+    assert len(frames) == 3
     # A read-only action (snapshot) pushes no frame -- the page didn't change.
     frames.clear()
     agent._browser_action("browser_snapshot", {})
     assert frames == []
+
+
+def test_browser_click_at_routes_coordinates_to_session(scripted_agent):
+    agent = scripted_agent(allow_subagents=True)
+    seen = []
+
+    class Sess:
+        is_open = True
+        def click_at(self, x, y): seen.append((x, y)); return "snap"
+
+    agent.browser_session = Sess()
+    out = agent._browser_action("browser_click_at", {"x": 42, "y": 99})
+    assert out == "snap" and seen == [(42, 99)]
 
 
 def test_keep_logins_routes_profile_dir_to_session(scripted_agent, monkeypatch):

@@ -242,6 +242,9 @@ class BrowserSession:
     def click(self, ref: int) -> str:
         return self._call("click", ref=ref)
 
+    def click_at(self, x: float, y: float) -> str:
+        return self._call("click_at", x=x, y=y)
+
     def type_text(self, ref: int, text: str, submit: bool = False) -> str:
         return self._call("type_text", ref=ref, text=text, submit=submit)
 
@@ -292,7 +295,9 @@ class BrowserSession:
         outline = data.get("outline") or []
         self._refs = {int(it["ref"]): it for it in items}
 
-        header = f"Page title: {self._title()}\nURL: {self._url()}\n"
+        header = (f"Page title: {self._title()}\nURL: {self._url()}\n"
+                 f"Viewport: {self.viewport[0]}x{self.viewport[1]} px "
+                 "(top-left is 0,0 -- for browser_click_at)\n")
         if outline:
             header += "Page sections: " + " | ".join(outline) + "\n"
         if not items:
@@ -329,7 +334,10 @@ class BrowserSession:
                   "inputs -- for a select, type the option text to choose it; "
                   "browser_click for checkboxes/radios. Elements marked "
                   "(disabled) can't be used until something enables them. "
-                  "Refs stay stable on this page; new elements get new numbers.")
+                  "Refs stay stable on this page; new elements get new numbers. "
+                  "If something isn't listed here (canvas-drawn UI, an SVG shape, "
+                  "a spot on an image/map), use browser_screenshot to see it and "
+                  "browser_click_at(x, y) to click its pixel position instead.")
 
     @staticmethod
     def _fmt_item(it: dict, counts) -> str:
@@ -359,6 +367,31 @@ class BrowserSession:
             h.click(timeout=8_000)
         except Exception as e:
             raise BrowserError(self._action_failure("click", ref, e))
+        self._settle()
+        return self._op_snapshot()
+
+    def _op_click_at(self, x, y) -> str:
+        """Raw mouse click at viewport pixel coordinates -- the fallback for
+        anything browser_click can't reach: canvas-drawn UI, SVG shapes, a
+        spot on an image/map, or an element the accessibility scan simply
+        missed. Prefer browser_click(ref) whenever the element IS in the
+        snapshot; a ref click self-verifies (it targets a real element) in a
+        way a raw coordinate never can."""
+        try:
+            x, y = float(x), float(y)
+        except (TypeError, ValueError):
+            raise BrowserError(f"click_at needs numeric x, y (got {x!r}, {y!r}).")
+        vw, vh = self.viewport
+        if not (0 <= x <= vw and 0 <= y <= vh):
+            raise BrowserError(
+                f"({x:.0f}, {y:.0f}) is outside the {vw}x{vh} viewport -- "
+                "coordinates must be within the visible page area shown at "
+                "the top of every snapshot.")
+        try:
+            self._page.mouse.click(x, y)
+        except Exception as e:
+            raise BrowserError(
+                f"Could not click at ({x:.0f}, {y:.0f}): {str(e).splitlines()[0]}")
         self._settle()
         return self._op_snapshot()
 

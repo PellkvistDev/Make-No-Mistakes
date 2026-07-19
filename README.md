@@ -274,6 +274,13 @@ this label"), and greyed-out controls show `(disabled)` — clicking or typing
 one fails *instantly* with advice instead of hanging in a 10-second retry
 loop, same for elements that vanished since the last snapshot.
 
+Most of the time the agent clicks by element ref — reliable, self-verifying,
+the default. But some things simply aren't in the accessibility tree at all
+(canvas-drawn UI, an SVG shape, a spot on an image or map): for those it has
+`browser_click_at(x, y)`, a raw pixel-coordinate click. It's a deliberate
+fallback, not the default — every snapshot shows the viewport size to work
+coordinates out from, and coordinates outside it are rejected up front.
+
 **Pause and take over.** While the Browser Agent is working, hit **Pause** on
 its row: it freezes at the next safe checkpoint and the browser window is
 yours — log in, solve a captcha, click through something fiddly, whatever.

@@ -1345,7 +1345,7 @@ class Agent:
         return report
 
     # Browser actions that change what's on screen -> push a live frame after.
-    _BROWSER_STATE_CHANGING = {"browser_navigate", "browser_click",
+    _BROWSER_STATE_CHANGING = {"browser_navigate", "browser_click", "browser_click_at",
                                "browser_type", "browser_key"}
 
     def _browser_action(self, name: str, args: dict) -> str:
@@ -1361,6 +1361,8 @@ class Agent:
                 return session.snapshot()
             if name == "browser_click":
                 return session.click(args.get("ref"))
+            if name == "browser_click_at":
+                return session.click_at(args.get("x"), args.get("y"))
             if name == "browser_type":
                 return session.type_text(args.get("ref"), args.get("text", ""),
                                          bool(args.get("submit", False)))
