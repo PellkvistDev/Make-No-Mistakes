@@ -328,6 +328,10 @@ running **locally** — no API key, no per-use cost:
   sentence; code blocks are never read aloud. The toggle is captured per
   message: turning it on or off mid-reply never changes what's already
   in flight, and TTS is never touched at all for a message sent while it's off.
+  Open a sub-agent's (or the Browser Agent's) panel and it reads from
+  **that** instead — the main chat sits silently waiting on it anyway, so
+  whichever thread you're actually watching is the one worth hearing. Switch
+  tabs or close the panel and it follows you back.
 - **`speak` tool** — the agent can generate and play a specific piece of
   speech on request (not for regular replies — that's the toggle above).
   Saved as a WAV (default: `generated/`) and played automatically.

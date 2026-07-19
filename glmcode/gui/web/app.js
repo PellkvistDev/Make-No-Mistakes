@@ -1659,6 +1659,10 @@ function showActiveSubagentThread() {
   updateSubagentComposerState();
   renderSubagentSteerQueued();
   scrollSubagentPanel();
+  // Read-aloud follows whichever thread is on screen: the main chat goes
+  // silent while a sub-agent works anyway, so this is the one thing worth
+  // hearing in the meantime.
+  api().set_active_view(activeSubagentId || "");
 }
 
 function openSubagentPanel(aid, name, status) {
@@ -1677,6 +1681,7 @@ function openSubagentPanel(aid, name, status) {
 function closeSubagentPanel() {
   document.body.classList.remove("subagent-open");
   document.body.classList.remove("browser-full");
+  api().set_active_view("");  // back to reading the main chat
 }
 
 function clearSubagentPanel() {
@@ -1690,6 +1695,7 @@ function clearSubagentPanel() {
   activeSubagentId = null;
   $("browser-view").hidden = true;
   renderSubagentSteerQueued();
+  api().set_active_view("");
 }
 
 $("subagent-panel-close").addEventListener("click", closeSubagentPanel);

@@ -49,6 +49,87 @@ WHITEBOARD_DIR = Path(__file__).resolve().parents[3] / "whiteboard"
 
 # --------------------------------------------------------------------- #
 
+class _TtsFeeder:
+    """Accumulates one logical stream of prose (the main agent's own replies,
+    or whichever sub-agent's panel is currently focused) and hands back
+    complete, speakable chunks once a sentence boundary is reached, so a
+    fast-streaming source doesn't fire one tiny synthesis call per token.
+    Two unrelated streams must never share a feeder -- their sentences would
+    interleave into garbled prose -- which is why WebEvents keeps a separate
+    instance per source instead of one shared buffer."""
+
+    _SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?=\s|$)")
+    # The very first chunk of a stream uses a much lower min_len than later
+    # ones -- e.g. a short opening line like "Sure!" or "Fixed." would
+    # otherwise sit in the buffer waiting for a second sentence to reach the
+    # normal 40-char floor before any audio starts at all. It can't drop to
+    # zero, though: a response that happens to *start* with a short
+    # abbreviation ("Mr. Smith says...", "vs. the old approach...") would
+    # then get flushed as its own broken one-word utterance the moment the
+    # abbreviation's period streams in, before the rest of the sentence
+    # arrives. 15 clears virtually all common title/Latin abbreviations
+    # (Mr., Dr., vs., etc., i.e., e.g., approx., Corp.) while still cutting
+    # latency well below the normal floor for anything longer. Later chunks
+    # keep the higher floor: a full-length sentence sounds more natural and
+    # is more efficient per synthesis call than many very short ones.
+    _FIRST_CHUNK_MIN_LEN = 15
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self._raw = ""      # cumulative raw text this stream segment (fence tracking)
+        self._sent_len = 0  # how much of the fence-filtered prose is already buffered
+        self._buffer = ""   # buffered prose not yet synthesized
+        self._first_chunk_done = False
+
+    def feed(self, text: str) -> list[str]:
+        """New raw text arrived; returns zero or more complete chunks ready
+        to synthesize, in order."""
+        from ..tts import strip_code_fences_incremental
+        self._raw += text
+        prose = strip_code_fences_incremental(self._raw)
+        new_prose = prose[self._sent_len:]
+        self._sent_len = len(prose)
+        if not new_prose:
+            return []
+        self._buffer += new_prose
+        chunks = []
+        chunk = self._pop_ready_chunk()
+        while chunk:
+            chunks.append(chunk)
+            chunk = self._pop_ready_chunk()
+        return chunks
+
+    def flush(self) -> str | None:
+        """The stream ended; return any leftover buffered prose as a final
+        chunk (or None if there's nothing left)."""
+        text = self._buffer.strip()
+        self._buffer = ""
+        return text or None
+
+    def _pop_ready_chunk(self, min_len: int = 40, max_len: int = 400) -> str | None:
+        if not self._first_chunk_done:
+            min_len = self._FIRST_CHUNK_MIN_LEN
+        buf = self._buffer
+        if len(buf) < min_len:
+            return None
+        last_boundary = None
+        for m in self._SENTENCE_BOUNDARY_RE.finditer(buf):
+            if m.end() >= min_len:
+                last_boundary = m.end()
+        if last_boundary is None:
+            if len(buf) >= max_len:
+                cut = buf.rfind(" ", 0, max_len)
+                last_boundary = cut if cut > 0 else max_len
+            else:
+                return None
+        chunk = buf[:last_boundary].strip()
+        self._buffer = buf[last_boundary:]
+        self._first_chunk_done = True
+        return chunk or None
+
+
 class WebEvents(AgentEvents):
     """Pushes agent events into the webview as JSON; blocks on permissions.
 
@@ -90,13 +171,17 @@ class WebEvents(AgentEvents):
         # a turn already in flight, and never touches TTS at all if it was
         # off when the turn started.
         self.read_aloud_this_turn = False
-        self._tts_raw = ""        # cumulative raw text this stream segment (fence tracking)
-        self._tts_sent_len = 0    # how much of the fence-filtered prose is already buffered
-        self._tts_buffer = ""     # buffered prose not yet synthesized
+        self._tts_main = _TtsFeeder()   # the main agent's own replies
+        self._tts_sub = _TtsFeeder()    # whichever sub-agent's panel is focused (see active_view)
+        # "" = read from the main chat; a sub-agent id = its inspector panel
+        # is open and focused, so THAT is what read-aloud reads instead --
+        # the user is watching it work while the main agent sits silently
+        # waiting on it anyway. Set by the frontend via set_active_view() on
+        # every panel open/switch/close.
+        self.active_view: str = ""
         self._tts_queue: "queue.Queue" = queue.Queue()
         self._tts_worker_started = False
         self._tts_seq = 0
-        self._tts_first_chunk_done = False
         # evaluate_js is not safe to call from several threads at once (see
         # emit()) -- previously this was only ever called from a single
         # thread at a time in practice (whichever thread was streaming the
@@ -197,9 +282,7 @@ class WebEvents(AgentEvents):
     def stream_start(self):
         self._flush_stream_buffers()  # flush any straggler left from a prior round
         self.emit("stream_start")
-        self._tts_raw = ""
-        self._tts_sent_len = 0
-        self._tts_buffer = ""
+        self._tts_main.reset()
 
     def reasoning_delta(self, text):
         with self._stream_lock:
@@ -211,78 +294,35 @@ class WebEvents(AgentEvents):
             self._content_buf += text
         self._ensure_flush_thread()
         if self.read_aloud_this_turn:
-            self._feed_tts(text)
+            for chunk in self._tts_main.feed(text):
+                self._enqueue_tts_chunk(chunk)
 
     def stream_end(self):
         self._flush_stream_buffers()  # make sure everything is sent before stream_end
         self.emit("stream_end")
-        if self.read_aloud_this_turn and self._tts_buffer.strip():
-            self._enqueue_tts_chunk(self._tts_buffer.strip())
-            self._tts_buffer = ""
+        if self.read_aloud_this_turn:
+            trailing = self._tts_main.flush()
+            if trailing:
+                self._enqueue_tts_chunk(trailing)
 
     # read-aloud ----------------------------------------------------------
     def start_turn(self, read_aloud: bool) -> None:
         """Called once per user turn (Api.send), before the agent runs."""
         self.read_aloud_this_turn = bool(read_aloud)
         self._tts_seq = 0
-        self._tts_first_chunk_done = False
         self.emit("tts_reset")
 
-    def _feed_tts(self, text: str) -> None:
-        from ..tts import strip_code_fences_incremental
-        self._tts_raw += text
-        prose = strip_code_fences_incremental(self._tts_raw)
-        new_prose = prose[self._tts_sent_len:]
-        self._tts_sent_len = len(prose)
-        if not new_prose:
+    def set_active_view(self, view: str) -> None:
+        """Which live stream read-aloud reads from: "" for the main chat, or
+        a sub-agent's id while its inspector panel is open and focused on it.
+        Switching drops whatever sub-agent prose was mid-sentence for the OLD
+        view -- the user just looked away, so finishing it out loud
+        afterward would be confusing, not helpful."""
+        view = view or ""
+        if view == self.active_view:
             return
-        self._tts_buffer += new_prose
-        chunk = self._pop_ready_tts_chunk()
-        while chunk:
-            self._enqueue_tts_chunk(chunk)
-            chunk = self._pop_ready_tts_chunk()
-
-    _SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?=\s|$)")
-    # The very first chunk of a turn uses a much lower min_len than later
-    # ones -- e.g. a short opening line like "Sure!" or "Fixed." would
-    # otherwise sit in the buffer waiting for a second sentence to reach the
-    # normal 40-char floor before any audio starts at all. It can't drop to
-    # zero, though: a response that happens to *start* with a short
-    # abbreviation ("Mr. Smith says...", "vs. the old approach...") would
-    # then get flushed as its own broken one-word utterance the moment the
-    # abbreviation's period streams in, before the rest of the sentence
-    # arrives. 15 clears virtually all common title/Latin abbreviations
-    # (Mr., Dr., vs., etc., i.e., e.g., approx., Corp.) while still cutting
-    # latency well below the normal floor for anything longer. Later chunks
-    # keep the higher floor: a full-length sentence sounds more natural and
-    # is more efficient per synthesis call than many very short ones.
-    _FIRST_CHUNK_MIN_LEN = 15
-
-    def _pop_ready_tts_chunk(self, min_len: int = 40, max_len: int = 400) -> str | None:
-        """Pull one complete, speakable chunk off the buffer once a sentence
-        boundary is reached (so short abbreviations like "Mr." don't fire a
-        tiny synthesis call on their own), with a safety valve that force-
-        flushes at a word break if the buffer grows too long without one
-        (e.g. unusual punctuation)."""
-        if not self._tts_first_chunk_done:
-            min_len = self._FIRST_CHUNK_MIN_LEN
-        buf = self._tts_buffer
-        if len(buf) < min_len:
-            return None
-        last_boundary = None
-        for m in self._SENTENCE_BOUNDARY_RE.finditer(buf):
-            if m.end() >= min_len:
-                last_boundary = m.end()
-        if last_boundary is None:
-            if len(buf) >= max_len:
-                cut = buf.rfind(" ", 0, max_len)
-                last_boundary = cut if cut > 0 else max_len
-            else:
-                return None
-        chunk = buf[:last_boundary].strip()
-        self._tts_buffer = buf[last_boundary:]
-        self._tts_first_chunk_done = True
-        return chunk or None
+        self.active_view = view
+        self._tts_sub.reset()
 
     def _enqueue_tts_chunk(self, text: str) -> None:
         if not text.strip():
@@ -382,6 +422,13 @@ class WebEvents(AgentEvents):
                 buf = self._sub_bufs.setdefault(id, {"reasoning": "", "content": ""})
                 buf[kind] += data.get("text", "")
             self._ensure_flush_thread()
+            # Read-aloud only ever reads CONTENT (never reasoning, matching
+            # the main agent) from whichever sub-agent's panel is currently
+            # focused -- that's the one thing worth hearing while the main
+            # chat sits silently waiting on it.
+            if kind == "content" and self.read_aloud_this_turn and id == self.active_view:
+                for chunk in self._tts_sub.feed(data.get("text", "")):
+                    self._enqueue_tts_chunk(chunk)
             return
         # Everything else is rare but must stay ordered relative to the text
         # that streamed before it.
@@ -391,6 +438,12 @@ class WebEvents(AgentEvents):
             # full content; shipping up to 60KB per blocking IPC call to the
             # UI just to fill a collapsed chip was pure waste.
             data = dict(data, content=str(data.get("content", ""))[:12000])
+        elif kind == "stream_start" and id == self.active_view:
+            self._tts_sub.reset()
+        elif kind == "stream_end" and id == self.active_view and self.read_aloud_this_turn:
+            trailing = self._tts_sub.flush()
+            if trailing:
+                self._enqueue_tts_chunk(trailing)
         self.emit("subagent_stream", id=id, kind=kind, **data)
 
     # images ----------------------------------------------------------------
@@ -1636,6 +1689,13 @@ class Api:
             return {"error": "no active chat"}
         if not self._agent.wrapup_subagent(aid):
             return {"error": "that sub-agent is no longer running"}
+        return {"ok": True}
+
+    def set_active_view(self, view: str = ""):
+        """Tell read-aloud which live stream to read from: '' for the main
+        chat, or a sub-agent's id while its inspector panel is focused on it.
+        The frontend calls this on every panel open/switch/close."""
+        self._events.set_active_view(view or "")
         return {"ok": True}
 
     def set_browser_model(self, provider_name: str, model: str):
