@@ -154,12 +154,19 @@ def test_autoedit_still_prompts_for_mutating_command():
     assert d.allowed is False
 
 
-def test_plan_mode_blocks_even_readonly_command():
-    # Plan mode is exploration-only via read-only *tools*; a shell command is
-    # not one, so it stays denied regardless of the read-only shortcut.
-    eng = PermissionEngine(mode="autoedit", plan_only=True)
+def test_plan_mode_allows_readonly_command():
+    # Exploring the repo IS the point of planning, so a read-only command runs
+    # unprompted in plan mode -- even when the underlying mode is "ask".
+    eng = PermissionEngine(mode="ask", plan_only=True)
     d = eng.check("run_powershell", {"command": "git status"}, _never)
+    assert d.allowed is True
+
+
+def test_plan_mode_still_blocks_mutating_command():
+    eng = PermissionEngine(mode="yolo", plan_only=True)  # yolo can't bypass it
+    d = eng.check("run_powershell", {"command": "rm -rf build"}, _deny)
     assert d.allowed is False
+    assert "Plan mode" in d.feedback
 
 
 def test_readonly_shortcut_does_not_apply_to_run_background():

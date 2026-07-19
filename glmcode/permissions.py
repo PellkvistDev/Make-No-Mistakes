@@ -168,10 +168,21 @@ class PermissionEngine:
         """asker(prompt_lines, preview) -> 'y' | 'a' | 'n' | ('n', feedback)"""
         if name in READONLY_TOOLS:
             return Decision(True)
+
+        # A provably read-only shell command (git status, ls, cat, grep, ...)
+        # counts as reading. It runs unprompted in plan mode -- exploring the
+        # repo is the whole point of planning -- and in every normal mode
+        # except "ask".
+        if name == "run_powershell" \
+                and is_readonly_command(str(args.get("command", ""))):
+            if self.plan_only or self.mode != "ask":
+                return Decision(True)
+
         if self.plan_only:
             return Decision(False, (
-                "Plan mode is active: only read-only exploration tools are "
-                "allowed this turn. Finish exploring and write the plan."))
+                "Plan mode is active: only read-only exploration (reads, "
+                "searches, and read-only commands) is allowed this turn. "
+                "Finish exploring and write the plan."))
         if self.mode == "yolo":
             return Decision(True)
         if name in self.allowed_tools:
@@ -184,11 +195,6 @@ class PermissionEngine:
 
         if name in ("run_powershell", "run_background"):
             command = str(args.get("command", ""))
-            # Provably read-only inspection commands (git status, ls, cat,
-            # grep, ...) run unprompted in every mode except "ask".
-            if name == "run_powershell" and self.mode != "ask" \
-                    and is_readonly_command(command):
-                return Decision(True)
             prefix = command_prefix(command)
             # Resolve aliases (e.g., "npm run dev" -> "npm")
             resolved_prefix = self.command_aliases.get(prefix, prefix)
