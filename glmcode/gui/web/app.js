@@ -1317,11 +1317,44 @@ function updateSubagent(turn, ev) {
   row.className = "subagent-row sa-" + (ev.status || "running");
   row.dataset.status = ev.status || "running";
   row.querySelector(".subagent-name").textContent = ev.name || ev.id;
-  const detail = ev.status === "running" ? (ev.mission || "") : (ev.summary || "");
+  const detail = (ev.status === "running" || ev.status === "paused")
+    ? (ev.mission || ev.summary || "") : (ev.summary || "");
   row.querySelector(".subagent-detail").textContent = detail;
-  const label = { running: "running…", done: "done", error: "failed" }[ev.status] || ev.status;
+  const label = { running: "running…", paused: "paused — you drive",
+                  done: "done", error: "failed" }[ev.status] || ev.status;
   row.querySelector(".subagent-status").textContent = label;
+  // A Browser Agent can be paused so the human takes over the browser window,
+  // then resumed (same agent). Only browser agents get this control.
+  syncBrowserPauseBtn(row, ev);
   updateSubagentTabStatus(ev.id, ev.status);
+}
+
+function syncBrowserPauseBtn(row, ev) {
+  const isBrowser = (ev.name || "") === "browser";
+  const active = ev.status === "running" || ev.status === "paused";
+  let btn = row.querySelector(".subagent-act");
+  if (!isBrowser || !active) { if (btn) btn.remove(); return; }
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.className = "subagent-act";
+    btn.addEventListener("click", async (e) => {
+      e.stopPropagation(); // don't also open the inspector panel
+      btn.disabled = true;
+      const paused = row.dataset.status === "paused";
+      let res;
+      try { res = paused ? await api().resume_browser() : await api().pause_browser(); }
+      catch (err) { res = { error: String(err) }; }
+      btn.disabled = false;
+      if (res && res.error) toast(res.error, "warn", 3000);
+      else if (!paused) toast("Paused — the browser is yours. Click Resume when done.", "info", 5000);
+    });
+    row.appendChild(btn);
+  }
+  const paused = ev.status === "paused";
+  btn.textContent = paused ? "Resume" : "Pause";
+  btn.title = paused
+    ? "Resume the browser agent — it re-reads the page first"
+    : "Pause and take over the browser window yourself";
 }
 
 /* ------------------------------------------------ sub-agent inspector panel

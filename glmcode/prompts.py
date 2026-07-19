@@ -283,6 +283,16 @@ Your goal:
 {goal}"""
 
 
+BROWSER_RESUME_NOTE = (
+    "[Resumed by the user] You were paused, and the user may have taken over the browser "
+    "themselves in the meantime — navigating, clicking, logging in, solving a captcha, "
+    "dismissing a dialog, or scrolling. The page is very likely NOT where you left it. "
+    "Before doing anything else, call browser_snapshot (and browser_read if you need the "
+    "text) to see the CURRENT state, and re-orient — element refs from before the pause "
+    "are stale. Then continue toward your goal from wherever the page is now."
+)
+
+
 TITLE_PROMPT = """Write a very short title (3-6 words, Title Case, no quotes, no trailing punctuation) naming what this chat is about, based on the user's first message below. Reply with ONLY the title.
 
 User message:

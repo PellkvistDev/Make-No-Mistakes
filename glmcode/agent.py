@@ -17,10 +17,10 @@ from .api import ApiError, Cancelled, RateLimiter, Usage, ZaiClient, estimate_to
 from .config import Config
 from .events import AgentEvents
 from .permissions import PermissionEngine
-from .prompts import (BROWSER_AGENT_SYSTEM, COMPACT_PROMPT, CONTINUE_NUDGE,
-                      STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE, SUBAGENT_PREAMBLE,
-                      VERIFY_NUDGE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
-                      WRAP_UP_NUDGE, build_system_prompt)
+from .prompts import (BROWSER_AGENT_SYSTEM, BROWSER_RESUME_NOTE, COMPACT_PROMPT,
+                      CONTINUE_NUDGE, STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE,
+                      SUBAGENT_PREAMBLE, VERIFY_NUDGE, VIEW_IMAGE_PROMPT,
+                      VISION_ANALYSIS_PROMPT, WRAP_UP_NUDGE, build_system_prompt)
 from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
                     COMPACT_CONTEXT_TOOL, CONTROL_CHROME_TOOL,
                     GENERATE_IMAGE_TOOL, PREVIEW_PAGE_TOOL, REMEMBER_TOOL,
@@ -215,6 +215,14 @@ class Agent:
         # across control_chrome calls; a spawned Browser Agent shares this same
         # session to run its browser_* action tools. None until first used.
         self.browser_session = None
+        self._browser_agent_aid: str | None = None  # the running Browser Agent, if any
+        # Pause / take-over: only meaningful for the Browser Agent (pausable
+        # set True there). The human can freeze the loop at a safe checkpoint,
+        # drive the (headed, now-idle) browser themselves, then resume the SAME
+        # agent -- which re-perceives the page and carries on with full memory.
+        self.pausable = False
+        self._pause_flag = threading.Event()
+        self._resume_flag = threading.Event()
         self.rebuild_system_prompt()
 
     # ------------------------------------------------------------------ #
@@ -687,6 +695,73 @@ class Agent:
         sub.clear_steer()
         return True
 
+    # -- pause / take-over (Browser Agent) -------------------------------- #
+
+    def request_pause(self) -> bool:
+        """Ask this agent to freeze at the next safe checkpoint (after the
+        in-flight tool finishes). Only pausable agents honor it."""
+        if not self.pausable:
+            return False
+        self._resume_flag.clear()
+        self._pause_flag.set()
+        return True
+
+    def request_resume(self) -> bool:
+        if not self.pausable:
+            return False
+        self._resume_flag.set()
+        return True
+
+    @property
+    def is_paused(self) -> bool:
+        return self._pause_flag.is_set()
+
+    def _paused_browser_agents(self) -> list:
+        with self._active_subagents_lock:
+            return [s for s in self._active_subagents.values()
+                    if getattr(s, "pausable", False)]
+
+    def pause_browser_agent(self) -> bool:
+        """Coordinator entry point: freeze the running Browser Agent so the
+        user can take over its browser window. Returns False if none is
+        running."""
+        subs = self._paused_browser_agents()
+        for s in subs:
+            s.request_pause()
+        if subs and self._browser_agent_aid:
+            self._emit_subagent(self._browser_agent_aid, "browser", "paused",
+                                summary="paused — you have the browser")
+        return bool(subs)
+
+    def resume_browser_agent(self) -> bool:
+        """Resume the Browser Agent; it re-reads the (possibly user-changed)
+        page and continues its mission."""
+        subs = self._paused_browser_agents()
+        for s in subs:
+            s.request_resume()
+        if subs and self._browser_agent_aid:
+            self._emit_subagent(self._browser_agent_aid, "browser", "running",
+                                summary="resumed")
+        return bool(subs)
+
+    def _maybe_pause(self) -> None:
+        """Loop checkpoint: if paused, block here until resumed (or cancelled/
+        wrapped up). The browser sits idle and open while blocked, so the human
+        can drive it; on resume, tell the agent the page may have changed."""
+        if not (self.pausable and self._pause_flag.is_set()):
+            return
+        resumed = False
+        while self._pause_flag.is_set():
+            if self.cancel.is_set() or self.wrap_up_requested.is_set():
+                break
+            if self._resume_flag.wait(timeout=0.3):
+                resumed = True
+                break
+        self._resume_flag.clear()
+        self._pause_flag.clear()
+        if resumed:
+            self.messages.append({"role": "user", "content": BROWSER_RESUME_NOTE})
+
     def _take_pending_steer(self) -> str | None:
         with self._steer_lock:
             text, self._steer_pending = self._steer_pending, None
@@ -778,6 +853,7 @@ class Agent:
 
             self._inject_steer_messages()
             self._inject_pending_images()
+            self._maybe_pause()
 
             if self.wrap_up_requested.is_set():
                 self.wrap_up_requested.clear()
@@ -1213,18 +1289,21 @@ class Agent:
                     workdir=self.workdir)
         sub.model_override = self.model_override
         sub.browser_session = session
+        sub.pausable = True  # the human can pause it and take over the browser
         # Restrict the sub-agent to ONLY the browser action tools, and give it
         # the specialized browser system prompt in place of the coding one.
         sub.tool_schemas = list(BROWSER_AGENT_SCHEMAS)
         sub._base_system_prompt = BROWSER_AGENT_SYSTEM.format(goal=goal)
         with self._active_subagents_lock:
             self._active_subagents[aid] = sub
+        self._browser_agent_aid = aid
         try:
             sub.run_turn({"role": "user", "content": "Begin. Work toward the goal, "
                           "one action at a time, and report when done or blocked."})
         finally:
             with self._active_subagents_lock:
                 self._active_subagents.pop(aid, None)
+            self._browser_agent_aid = None
         report = _final_report_text(sub.messages) or sink.text.strip()
         if not report:
             raise ToolError(sink.last_error

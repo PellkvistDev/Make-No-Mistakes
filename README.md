@@ -236,6 +236,15 @@ report back. Approve it once per goal (in `ask` mode); it uses an isolated
 profile, not your personal Chrome. Runs headed by default so you can watch
 (`browser_headless` in config to hide it).
 
+**Pause and take over.** While the Browser Agent is working, hit **Pause** on
+its row: it freezes at the next safe checkpoint and the browser window is
+yours — log in, solve a captcha, click through something fiddly, whatever.
+It's the *same* window (the agent's driver just sits idle), so there's no
+hand-off dance. Hit **Resume** and the *same* agent picks up where it was: it
+re-reads the now-current page first (its old element refs are stale, and it's
+told so) and continues its goal from wherever you left things. No lost
+context, no fighting over the page.
+
 ### Plan mode
 
 The checklist icon in the composer toggles **plan first**: your next message

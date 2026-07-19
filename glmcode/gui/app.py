@@ -1635,6 +1635,22 @@ class Api:
             return {"error": "that sub-agent is no longer running"}
         return {"ok": True}
 
+    def pause_browser(self):
+        """Freeze the running Browser Agent so the user can take over the
+        browser window; resume_browser continues the same agent."""
+        if not self._agent:
+            return {"error": "no active chat"}
+        if not self._agent.pause_browser_agent():
+            return {"error": "no browser agent is running"}
+        return {"ok": True}
+
+    def resume_browser(self):
+        if not self._agent:
+            return {"error": "no active chat"}
+        if not self._agent.resume_browser_agent():
+            return {"error": "no browser agent is running"}
+        return {"ok": True}
+
     def permission_response(self, rid: str, answer: str, feedback: str = ""):
         self._events.resolve_permission(rid, answer, feedback)
         return {"ok": True}

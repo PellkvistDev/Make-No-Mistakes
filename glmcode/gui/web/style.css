@@ -483,6 +483,21 @@ mark.find-current { background: #ffd60a; color: #10131a; }
 .sa-error .subagent-status { color: var(--danger, #e5484d); }
 .subagent-row { cursor: pointer; transition: background 0.15s ease; }
 .subagent-row:hover { background: rgba(255, 255, 255, 0.05); }
+/* Browser Agent paused: the human has the wheel */
+.sa-paused .subagent-dot { background: #ffd60a; animation: none; }
+.sa-paused .subagent-status { color: #ffd60a; }
+.sa-paused { background: rgba(255, 214, 10, 0.06); }
+/* Pause / Resume button on the Browser Agent row */
+.subagent-act {
+  flex: none; align-self: center; margin-left: 4px;
+  padding: 3px 12px; font-size: 11px; font-weight: 650; font-family: var(--font);
+  color: var(--text-dim); background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--stroke); border-radius: 999px; cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.subagent-act:hover { background: rgba(255, 255, 255, 0.13); color: var(--text); }
+.subagent-act:disabled { opacity: 0.5; cursor: default; }
+.sa-paused .subagent-act { color: #ffd60a; border-color: rgba(255, 214, 10, 0.4); }
 
 /* ------------------------------------------------ sub-agent inspector panel
    A live mirror of the main chat, scoped to one sub-agent's own thread, in
