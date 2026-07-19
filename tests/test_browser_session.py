@@ -1,8 +1,10 @@
 """BrowserSession drives Playwright from a dedicated thread and marshals every
-command onto it. These tests exercise all of that routing -- snapshot ref
-tracking, action dispatch, error handling, lifecycle -- with a FAKE page, so
-no real Chromium (or display) is needed."""
+command onto it. These tests exercise all of that routing -- the one-pass
+snapshot with STABLE stamped refs, region grouping, action dispatch with
+locate-at-action-time, error handling, lifecycle -- with a FAKE page, so no
+real Chromium (or display) is needed."""
 
+import re
 import threading
 
 import pytest
@@ -11,34 +13,37 @@ from glmcode.browser_session import BrowserError, BrowserSession
 
 
 class FakeHandle:
+    """One interactive element: snapshot data + action surface."""
+
     def __init__(self, tag, attrs=None, text="", visible=True, enabled=True,
-                 attached=True):
+                 attached=True, region="main", value=None, options=None,
+                 checked=False):
         self._tag = tag
         self._attrs = attrs or {}
         self._text = text
         self._visible = visible
         self._enabled = enabled
         self._attached = attached
+        self.region = region
+        self.value = value
+        self.options = options
+        self.checked = checked
+        self.ref = None          # data-mnm-ref stamp (assigned on snapshot)
         self.clicked = 0
         self.filled = None
         self.pressed = []
+        self.selected = None
 
-    def is_visible(self):
-        return self._visible
+    def label(self):
+        for a in ("aria-label", "placeholder", "name", "alt", "title"):
+            v = self._attrs.get(a)
+            if v:
+                return v
+        return self._text or ""
 
+    # -- action surface (used after query_selector resolves the stamp) ---- #
     def is_enabled(self):
         return self._enabled
-
-    def evaluate(self, js):
-        if "isConnected" in js:
-            return self._attached
-        return self._tag.upper()
-
-    def get_attribute(self, name):
-        return self._attrs.get(name)
-
-    def text_content(self):
-        return self._text
 
     def scroll_into_view_if_needed(self, timeout=0):
         pass
@@ -52,17 +57,29 @@ class FakeHandle:
     def press(self, key):
         self.pressed.append(key)
 
+    def select_option(self, label=None, value=None):
+        want = label if label is not None else value
+        if not self.options or want not in self.options:
+            raise RuntimeError(f"no option {want!r}")
+        self.selected = want
+
 
 class FakePage:
+    """Models the page contract the driver relies on: one evaluate() call
+    returns the whole snapshot (emulating the data-mnm-ref stamping), and
+    query_selector('[data-mnm-ref=\"N\"]') resolves a stamp to a handle."""
+
     def __init__(self):
         self.url = "about:blank"
         self._title = "Blank"
         self.handles = []
+        self.outline = []
         self.goto_calls = []
         self.back_calls = 0
         self.body_text = ""
         self.key_presses = []
         self.screens = []
+        self._next_ref = 1
         self.thread_ids = set()  # every op should run on the SAME driver thread
 
     def _record_thread(self):
@@ -73,21 +90,53 @@ class FakePage:
         self.goto_calls.append(url)
         self.url = url
         self._title = "Example Domain"
+        # A navigation is a fresh JS world: stamps and the counter reset.
+        self._next_ref = 1
         self.handles = [
             FakeHandle("input", {"name": "q", "placeholder": "Search"}),
             FakeHandle("a", text="More information"),
             FakeHandle("button", {"aria-label": "Go"}),
             FakeHandle("a", text="hidden link", visible=False),
         ]
+        self.outline = []
 
     def go_back(self, wait_until=None, timeout=0):
         self._record_thread()
         self.back_calls += 1
         self.url = "about:blank"
 
-    def query_selector_all(self, _sel):
+    def evaluate(self, js, arg=None):
         self._record_thread()
-        return self.handles
+        assert "mnmNextRef" in js, "unexpected evaluate"
+        items, seen = [], set()
+        for el in self.handles:
+            if not el._visible:
+                continue
+            if not el.ref or el.ref in seen:
+                el.ref = self._next_ref
+                self._next_ref += 1
+            seen.add(el.ref)
+            item = {"ref": el.ref, "tag": el._tag, "label": el.label(),
+                    "region": el.region, "disabled": not el._enabled,
+                    "type": (el._attrs.get("type") or "").lower()}
+            if el.value is not None:
+                item["value"] = el.value
+            if el.options is not None:
+                item["options"] = list(el.options)
+            if el.checked:
+                item["checked"] = True
+            items.append(item)
+        return {"items": items, "outline": list(self.outline)}
+
+    def query_selector(self, sel):
+        self._record_thread()
+        m = re.search(r'\[data-mnm-ref="(\d+)"\]', sel)
+        assert m, sel
+        ref = int(m.group(1))
+        for el in self.handles:
+            if el.ref == ref and el._attached:
+                return el
+        return None
 
     def inner_text(self, _sel):
         self._record_thread()
@@ -128,20 +177,70 @@ def make_session(**kw):
     return sess, page, torn
 
 
-def test_navigate_returns_numbered_snapshot():
+def test_navigate_returns_grouped_numbered_snapshot():
     sess, page, _ = make_session()
     snap = sess.navigate("example.com")
     assert page.goto_calls == ["https://example.com"]   # bare host gets https
-    # visible interactive elements are numbered; the hidden one is skipped
-    assert "[1] input" in snap and "Search" in snap
-    assert "[2] a" in snap and "More information" in snap
-    assert "[3] button" in snap and "Go" in snap
+    assert "Main content:" in snap
+    assert '[1] input "Search"' in snap
+    assert '[2] a "More information"' in snap
+    assert '[3] button "Go"' in snap
     assert "hidden link" not in snap
-    assert "Interactive elements (3)" in snap
     sess.close()
 
 
-def test_click_uses_the_ref_from_the_last_snapshot():
+def test_refs_are_stable_across_snapshots():
+    """The #1 wrong-button cause: refs used to renumber every snapshot, so a
+    remembered number silently pointed at a different element. Now refs are
+    stamped into the DOM and persist; new elements get NEW numbers."""
+    sess, page, _ = make_session()
+    sess.navigate("example.com")
+    # The page mutates: a cookie banner injects a button at the TOP of the DOM.
+    page.handles.insert(0, FakeHandle("button", text="Accept all", region="dialog"))
+    snap2 = sess.snapshot()
+    # Existing elements keep their original numbers despite the reordering...
+    assert '[1] input "Search"' in snap2
+    assert '[3] button "Go"' in snap2
+    # ...and the newcomer gets the next fresh number, not somebody else's.
+    assert '[4] button "Accept all"' in snap2
+    # A remembered ref still hits the RIGHT element after the DOM changed.
+    sess.click(3)
+    assert page.handles[3].clicked == 1     # "Go" (now 4th in DOM order)
+    sess.close()
+
+
+def test_dialog_region_is_listed_first_with_warning():
+    sess, page, _ = make_session()
+    sess.navigate("example.com")
+    page.handles.append(FakeHandle("button", text="Accept cookies", region="dialog"))
+    snap = sess.snapshot()
+    assert "OPEN DIALOG / POPUP" in snap and "deal with this first" in snap
+    assert snap.index("Accept cookies") < snap.index('input "Search"')
+    sess.close()
+
+
+def test_input_values_and_duplicates_are_shown():
+    sess, page, _ = make_session()
+    sess.navigate("example.com")
+    page.handles[0].value = "laptops"
+    page.handles.append(FakeHandle("button", text="Add to cart"))
+    page.handles.append(FakeHandle("button", text="Add to cart"))
+    snap = sess.snapshot()
+    assert '[1] input "Search" = "laptops"' in snap
+    assert snap.count("(one of 2 with this label)") == 2
+    sess.close()
+
+
+def test_outline_is_shown_when_present():
+    sess, page, _ = make_session()
+    sess.navigate("example.com")
+    page.outline = ["Checkout", "Payment details"]
+    snap = sess.snapshot()
+    assert "Page sections: Checkout | Payment details" in snap
+    sess.close()
+
+
+def test_click_uses_the_ref_from_the_snapshot():
     sess, page, _ = make_session()
     sess.navigate("example.com")
     sess.click(2)
@@ -158,12 +257,39 @@ def test_type_text_fills_and_optionally_submits():
     sess.close()
 
 
-def test_stale_ref_gives_a_helpful_error():
+def test_typing_into_a_select_chooses_the_option():
+    sess, page, _ = make_session()
+    sess.navigate("example.com")
+    page.handles.append(FakeHandle("select", {"name": "country"},
+                                   options=["Sweden", "Norway"]))
+    snap = sess.snapshot()
+    assert "(options: Sweden, Norway)" in snap
+    ref = int(re.search(r'\[(\d+)\] select', snap).group(1))
+    sess.type_text(ref, "Sweden")
+    assert page.handles[-1].selected == "Sweden"
+    assert page.handles[-1].filled is None   # fill() never used on a select
+    # A non-existent option fails with the real options listed.
+    with pytest.raises(BrowserError, match="Sweden, Norway"):
+        sess.type_text(ref, "Atlantis")
+    sess.close()
+
+
+def test_typing_into_a_checkbox_says_click_instead():
+    sess, page, _ = make_session()
+    sess.navigate("example.com")
+    page.handles.append(FakeHandle("input", {"type": "checkbox", "name": "tos"}))
+    snap = sess.snapshot()
+    ref = int(re.search(r'\[(\d+)\] input "tos"', snap).group(1))
+    with pytest.raises(BrowserError, match="browser_click"):
+        sess.type_text(ref, "yes")
+    sess.close()
+
+
+def test_unknown_ref_gives_a_helpful_error():
     sess, _, _ = make_session()
     sess.navigate("example.com")
-    with pytest.raises(BrowserError) as ei:
+    with pytest.raises(BrowserError, match="browser_snapshot"):
         sess.click(99)
-    assert "re-snapshot" in str(ei.value) or "snapshot again" in str(ei.value)
     sess.close()
 
 
@@ -192,7 +318,6 @@ def test_press_and_go_back_and_screenshot(tmp_path):
 def test_every_op_runs_on_one_dedicated_driver_thread():
     sess, page, _ = make_session()
     sess.navigate("example.com")
-    # Drive commands from several different caller threads...
     def worker():
         sess.snapshot()
         sess.read_text()
@@ -201,8 +326,6 @@ def test_every_op_runs_on_one_dedicated_driver_thread():
         t.start()
     for t in ts:
         t.join()
-    # ...yet Playwright was only ever touched from a single thread (the driver),
-    # and never from any caller thread.
     assert len(page.thread_ids) == 1
     assert threading.get_ident() not in page.thread_ids
     sess.close()
@@ -232,8 +355,8 @@ def test_disabled_elements_are_flagged_in_the_snapshot():
     page.handles.append(FakeHandle("button", text="Submit", enabled=False))
     snap = sess.snapshot()
     assert '[4] button "Submit" (disabled)' in snap
-    assert "(disabled) can't be used" in snap       # the footer explains it
-    assert '[3] button "Go" (disabled)' not in snap  # enabled ones unflagged
+    assert "(disabled) can't be used" in snap
+    assert '[3] button "Go" (disabled)' not in snap
     sess.close()
 
 
@@ -244,18 +367,18 @@ def test_typing_into_disabled_element_fails_instantly_with_advice():
     import time
     sess, page, _ = make_session()
     sess.navigate("example.com")
-    page.handles[0]._enabled = False   # the input is greyed out
-    snap = sess.snapshot()             # refs now know about it
+    page.handles[0]._enabled = False
+    snap = sess.snapshot()
     assert "(disabled)" in snap
     t0 = time.monotonic()
     with pytest.raises(BrowserError) as ei:
         sess.type_text(1, "x=0")
     took = time.monotonic() - t0
-    assert took < 1.0                        # instant, not a 10s timeout
+    assert took < 1.0
     msg = str(ei.value)
     assert "disabled" in msg and "[1]" in msg
-    assert "Call log" not in msg             # no Playwright noise
-    assert page.handles[0].filled is None    # fill was never attempted
+    assert "Call log" not in msg
+    assert page.handles[0].filled is None
     sess.close()
 
 
@@ -280,13 +403,11 @@ def test_action_failure_message_drops_the_call_log():
     msg = str(ei.value)
     assert "Timeout 8000ms exceeded." in msg
     assert "Call log" not in msg and "retrying" not in msg
-    assert "browser_snapshot" in msg   # actionable next step
+    assert "browser_snapshot" in msg
     sess.close()
 
 
 def test_user_data_dir_reaches_the_launcher():
-    # Persistent-profile mode: the profile dir must flow to the launcher;
-    # default stays None (throwaway profile).
     sess, _, _ = make_session(user_data_dir="/tmp/agent-profile")
     sess.navigate("example.com")
     assert sess._test_seen["user_data_dir"] == "/tmp/agent-profile"

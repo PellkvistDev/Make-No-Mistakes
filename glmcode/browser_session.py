@@ -30,6 +30,80 @@ INTERACTIVE_SELECTOR = (
     "[role=radio], [role=tab], [role=menuitem], [role=switch], [onclick]"
 )
 
+# One JS pass builds the whole snapshot: enumerates visible interactive
+# elements, STAMPS each with a persistent data-mnm-ref (so refs stay stable
+# across snapshots while the page lives -- the #1 cause of wrong-element
+# clicks was renumbering on every snapshot), and reports label/region/state
+# per element plus the page's heading outline. A single evaluate instead of
+# 4-5 round trips per element also makes snapshots much faster.
+SNAPSHOT_JS = """(sel) => {
+  const regionOf = (e) => {
+    if (e.closest('[role=dialog],[aria-modal="true"],dialog')) return 'dialog';
+    if (e.closest('nav,[role=navigation]')) return 'nav';
+    if (e.closest('header,[role=banner]')) return 'header';
+    if (e.closest('footer,[role=contentinfo]')) return 'footer';
+    return 'main';
+  };
+  const labelOf = (e) => {
+    const cand = e.getAttribute('aria-label') || e.getAttribute('placeholder')
+      || e.getAttribute('name') || e.getAttribute('alt') || e.getAttribute('title');
+    if (cand && cand.trim()) return cand.trim();
+    const t = (e.innerText || e.textContent || '').trim().replace(/\\s+/g, ' ');
+    if (t) return t;
+    if (typeof e.value === 'string' && e.value.trim()) return e.value.trim();
+    return '';
+  };
+  let next = window.__mnmNextRef || 1;
+  const seen = new Set();
+  const out = [];
+  for (const e of document.querySelectorAll(sel)) {
+    const cs = getComputedStyle(e);
+    if (cs.display === 'none' || cs.visibility === 'hidden') continue;
+    const r = e.getBoundingClientRect();
+    if (r.width < 2 || r.height < 2) continue;
+    let ref = parseInt(e.dataset.mnmRef || '', 10);
+    if (!ref || seen.has(ref)) { ref = next++; e.dataset.mnmRef = String(ref); }
+    seen.add(ref);
+    const tag = e.tagName.toLowerCase();
+    const item = {
+      ref, tag,
+      label: labelOf(e).slice(0, 80),
+      region: regionOf(e),
+      disabled: !!(e.disabled || e.getAttribute('aria-disabled') === 'true'),
+      type: (e.getAttribute('type') || '').toLowerCase(),
+    };
+    if ((tag === 'input' || tag === 'textarea') && typeof e.value === 'string'
+        && e.value && item.type !== 'submit' && item.type !== 'button')
+      item.value = e.value.slice(0, 40);
+    if (tag === 'select') {
+      item.options = [...e.options].slice(0, 12).map(o => (o.label || o.value || '').slice(0, 40));
+      const so = e.selectedOptions && e.selectedOptions[0];
+      if (so) item.value = (so.label || so.value || '').slice(0, 40);
+    }
+    if (e.checked === true) item.checked = true;
+    out.push(item);
+  }
+  window.__mnmNextRef = next;
+  const outline = [...document.querySelectorAll('h1,h2')].slice(0, 6)
+    .map(h => (h.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 60))
+    .filter(Boolean);
+  return { items: out, outline };
+}"""
+
+# Region presentation order + captions. Dialogs first: a cookie banner or
+# modal blocks everything else, so the model must see and handle it first.
+_REGION_ORDER = {"dialog": 0, "main": 1, "header": 2, "nav": 3, "footer": 4}
+_REGION_TITLES = {
+    "dialog": "OPEN DIALOG / POPUP — deal with this first (accept, close or "
+              "dismiss it); the page behind it is blocked:",
+    "main": "Main content:",
+    "header": "Header:",
+    "nav": "Navigation:",
+    "footer": "Footer:",
+}
+# Chrome regions are usually noise for the task at hand -- cap them.
+_REGION_CAPS = {"header": 20, "nav": 20, "footer": 12}
+
 StatusFn = Optional[Callable[[str], None]]
 
 
@@ -207,43 +281,73 @@ class BrowserSession:
         return self._op_snapshot()
 
     def _op_snapshot(self) -> str:
-        page = self._page
         try:
-            handles = page.query_selector_all(INTERACTIVE_SELECTOR)
+            data = self._page.evaluate(SNAPSHOT_JS, INTERACTIVE_SELECTOR) or {}
         except Exception as e:
             raise BrowserError(f"Could not read the page: {e}")
-        self._refs = {}
-        lines: list[str] = []
-        i = 0
-        for h in handles:
-            try:
-                if not h.is_visible():
-                    continue
-            except Exception:
-                continue
-            tag = self._tag(h)
-            label = self._describe(h, tag)
-            i += 1
-            self._refs[i] = h
-            # Disabled (greyed-out) elements are listed but flagged, so the
-            # model knows they exist without wasting an action on them.
-            flag = "" if self._enabled(h) else " (disabled)"
-            lines.append((f"[{i}] {tag} {label}".rstrip()) + flag)
-            if i >= self.max_elements:
-                break
+        items = data.get("items") or []
+        outline = data.get("outline") or []
+        self._refs = {int(it["ref"]): it for it in items}
+
         header = f"Page title: {self._title()}\nURL: {self._url()}\n"
-        if not lines:
+        if outline:
+            header += "Page sections: " + " | ".join(outline) + "\n"
+        if not items:
             return (header + "(No interactive elements detected. Use "
                     "browser_read to read the page's text content.)")
-        return (header + f"Interactive elements ({len(lines)}):\n"
-                + "\n".join(lines)
-                + "\n\nClick with browser_click(ref), fill inputs with "
-                  "browser_type(ref, text). Elements marked (disabled) can't "
-                  "be used until something enables them.")
+
+        # How many share a (tag, label): duplicates get flagged so the model
+        # knows "Add to cart" isn't unique and double-checks which one.
+        from collections import Counter
+        counts = Counter((it["tag"], it["label"]) for it in items)
+
+        groups: dict[str, list] = {}
+        for it in items:
+            groups.setdefault(it.get("region") or "main", []).append(it)
+
+        lines: list[str] = []
+        total = 0
+        for region in sorted(groups, key=lambda r: _REGION_ORDER.get(r, 9)):
+            its = groups[region]
+            cap = min(_REGION_CAPS.get(region, self.max_elements),
+                      max(0, self.max_elements - total))
+            lines.append(_REGION_TITLES.get(region, region + ":"))
+            shown = 0
+            for it in its:
+                if shown >= cap:
+                    lines.append(f"  (+{len(its) - shown} more {region} "
+                                 "elements not shown)")
+                    break
+                shown += 1
+                total += 1
+                lines.append("  " + self._fmt_item(it, counts))
+        return (header + "\n".join(lines)
+                + "\n\nActs: browser_click(ref); browser_type(ref, text) for "
+                  "inputs -- for a select, type the option text to choose it; "
+                  "browser_click for checkboxes/radios. Elements marked "
+                  "(disabled) can't be used until something enables them. "
+                  "Refs stay stable on this page; new elements get new numbers.")
+
+    @staticmethod
+    def _fmt_item(it: dict, counts) -> str:
+        lab = f' "{it["label"]}"' if it.get("label") else (
+            f' ({it["type"]})' if it.get("type") else "")
+        s = f'[{it["ref"]}] {it["tag"]}{lab}'
+        if it.get("value"):
+            s += f' = "{it["value"]}"'
+        if it.get("checked"):
+            s += " (checked)"
+        if it.get("options"):
+            s += " (options: " + ", ".join(it["options"]) + ")"
+        if it.get("disabled"):
+            s += " (disabled)"
+        n = counts[(it["tag"], it.get("label"))]
+        if n > 1 and it.get("label"):
+            s += f" (one of {n} with this label)"
+        return s
 
     def _op_click(self, ref: int) -> str:
-        h = self._ref(ref)
-        self._require_usable(h, ref, "click")
+        h, it = self._locate(ref, "click")
         try:
             h.scroll_into_view_if_needed(timeout=5000)
         except Exception:
@@ -256,10 +360,30 @@ class BrowserSession:
         return self._op_snapshot()
 
     def _op_type_text(self, ref: int, text: str, submit: bool) -> str:
-        h = self._ref(ref)
-        self._require_usable(h, ref, "type into")
+        h, it = self._locate(ref, "type into")
+        text = str(text)
+        if it.get("tag") == "select":
+            # A <select> can't be fill()ed -- choose the option instead. The
+            # snapshot listed its options, so `text` should be one of them.
+            try:
+                h.select_option(label=text)
+            except Exception:
+                try:
+                    h.select_option(value=text)
+                except Exception:
+                    opts = ", ".join(it.get("options") or []) or "(none seen)"
+                    raise BrowserError(
+                        f"[{ref}] is a dropdown and has no option '{text}'. "
+                        f"Its options are: {opts}. browser_type the exact "
+                        "option text to choose it.")
+            self._settle()
+            return self._op_snapshot()
+        if it.get("type") in ("checkbox", "radio"):
+            raise BrowserError(
+                f"[{ref}] is a {it['type']} -- use browser_click({ref}) to "
+                "toggle it, not typing.")
         try:
-            h.fill(str(text), timeout=8_000)
+            h.fill(text, timeout=8_000)
             if submit:
                 h.press("Enter")
         except Exception as e:
@@ -269,21 +393,27 @@ class BrowserSession:
 
     # -- action pre-flight (driver thread) --------------------------------- #
 
-    def _enabled(self, h) -> bool:
+    def _locate(self, ref, verb: str):
+        """Resolve a ref to a FRESH element handle at action time (via its
+        data-mnm-ref stamp), so we never act through a stale handle. Fails
+        instantly with an actionable message when the ref is unknown, the
+        element left the page, or it's disabled -- instead of letting
+        Playwright spin its multi-second retry loop."""
         try:
-            return bool(h.is_enabled())
-        except Exception:
-            return True  # unknown -> let the action itself decide
-
-    def _require_usable(self, h, ref, verb: str) -> None:
-        """Fail INSTANTLY with an actionable message instead of letting
-        Playwright spin its multi-second retry loop against an element that is
-        disabled or already gone from the page."""
+            ref = int(ref)
+        except (TypeError, ValueError):
+            raise BrowserError(f"Invalid element ref: {ref!r}")
+        it = self._refs.get(ref)
+        if it is None:
+            raise BrowserError(
+                f"No element [{ref}] in the current snapshot. Call "
+                "browser_snapshot and use the refs it shows.")
+        h = None
         try:
-            attached = h.evaluate("e => e.isConnected")
+            h = self._page.query_selector(f'[data-mnm-ref="{ref}"]')
         except Exception:
-            attached = False
-        if not attached:
+            pass
+        if h is None:
             raise BrowserError(
                 f"Element [{ref}] is no longer on the page -- it changed since "
                 "your snapshot. Call browser_snapshot and use the fresh refs.")
@@ -298,6 +428,7 @@ class BrowserSession:
             raise
         except Exception:
             pass  # enabled-check itself failed -> let the action try
+        return h, it
 
     @staticmethod
     def _action_failure(verb: str, ref, e) -> str:
@@ -367,49 +498,11 @@ class BrowserSession:
 
     # -- driver-thread helpers -------------------------------------------- #
 
-    def _ref(self, ref):
-        try:
-            ref = int(ref)
-        except (TypeError, ValueError):
-            raise BrowserError(f"Invalid element ref: {ref!r}")
-        h = self._refs.get(ref)
-        if h is None:
-            raise BrowserError(
-                f"No element [{ref}] in the current snapshot. Call "
-                "browser_snapshot again -- refs change after every action.")
-        return h
-
     def _settle(self) -> None:
         try:
             self._page.wait_for_timeout(600)
         except Exception:
             pass
-
-    def _tag(self, h) -> str:
-        try:
-            return (h.evaluate("e => e.tagName") or "").lower()
-        except Exception:
-            return "?"
-
-    def _describe(self, h, tag: str) -> str:
-        for attr in ("aria-label", "placeholder", "name", "alt", "title", "value"):
-            try:
-                v = h.get_attribute(attr)
-            except Exception:
-                v = None
-            if v and v.strip():
-                return f'"{v.strip()[:90]}"'
-        try:
-            txt = (h.text_content() or "").strip()
-        except Exception:
-            txt = ""
-        if txt:
-            return f'"{" ".join(txt.split())[:90]}"'
-        try:
-            typ = h.get_attribute("type")
-        except Exception:
-            typ = None
-        return f"({typ})" if typ else ""
 
     def _url(self) -> str:
         try:

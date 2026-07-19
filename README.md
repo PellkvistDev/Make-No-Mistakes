@@ -255,10 +255,17 @@ default so you can watch the real window too; flip **Settings → Hide the
 browser window** (`browser_headless`) to run it invisibly and just watch the
 panel.
 
-Snapshots flag greyed-out controls as `(disabled)`, and trying to click/type
-one fails *instantly* with advice (find the step that enables it) instead of
-hanging in a 10-second retry loop — same for elements that vanished since the
-last snapshot, which get a "re-snapshot" pointer rather than a raw timeout.
+The snapshot engine is built for reliability with a small model: element
+refs are **stamped into the DOM and stay stable** while you're on a page (no
+more acting on a remembered number that silently moved), actions **re-locate
+the element at click time** (stale handles can't happen), the element list is
+**grouped by region with any open dialog/cookie banner listed first** and
+flagged "deal with this first", inputs show their **current value** so the
+agent can verify its typing landed, dropdowns list their **options** (chosen
+by typing the option text), duplicate labels are flagged ("one of 3 with
+this label"), and greyed-out controls show `(disabled)` — clicking or typing
+one fails *instantly* with advice instead of hanging in a 10-second retry
+loop, same for elements that vanished since the last snapshot.
 
 **Pause and take over.** While the Browser Agent is working, hit **Pause** on
 its row: it freezes at the next safe checkpoint and the browser window is
