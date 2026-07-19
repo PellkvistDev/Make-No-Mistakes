@@ -12,6 +12,7 @@ per command-prefix (first word, e.g. `git`, `npm`) for PowerShell.
 from __future__ import annotations
 
 import difflib
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -20,6 +21,130 @@ from .tools import (READONLY_TOOLS, FILE_WRITE_TOOLS, NETWORK_TOOLS, GIT_TOOLS,
 
 # Module-level command alias registry
 _COMMAND_ALIASES: dict = {}
+
+# --------------------------------------------------------------------- #
+# Read-only command detection.
+#
+# The agent constantly runs inspection commands (git status, ls, cat, grep,
+# ...) that can't change anything on disk. Asking for those every time is pure
+# friction, so in every mode EXCEPT "ask" we let a *provably* read-only command
+# run unprompted. The bar for "provably" is deliberately high: anything that
+# could redirect to a file, substitute a subcommand, chain into a stage we
+# don't recognize, or pass a mutating subcommand/argument falls through to the
+# normal prompt. When in doubt, we ask.
+
+# Whole commands that only ever read state (lower-cased, path stripped).
+_SAFE_COMMANDS = frozenset({
+    # navigation / shell no-ops
+    "ls", "dir", "pwd", "cd", "tree", "clear", "cls", "true", "false",
+    # printing / reading files
+    "echo", "printf", "cat", "bat", "type", "head", "tail", "more", "less",
+    "nl", "tac", "rev", "wc", "od", "hexdump", "xxd", "strings",
+    # text search / compare (all non-mutating in their bare forms)
+    "grep", "egrep", "fgrep", "rg", "ag", "ack", "findstr", "diff", "comm",
+    "cmp", "sort", "uniq", "cut", "column", "fold", "expand", "look",
+    # info / environment
+    "whoami", "hostname", "uname", "id", "groups", "date", "cal", "uptime",
+    "env", "printenv", "history", "which", "where", "whereis", "command",
+    "file", "stat", "du", "df", "basename", "dirname", "realpath", "readlink",
+    "wc", "ps", "top", "free", "lsof", "ifconfig", "ipconfig", "arch",
+    # PowerShell read-only cmdlets / aliases
+    "get-content", "gc", "get-childitem", "gci", "get-item",
+    "get-itemproperty", "get-location", "gl", "test-path", "resolve-path",
+    "select-string", "sls", "get-command", "gcm", "get-help", "get-member",
+    "get-process", "get-date", "get-history", "measure-object",
+    "select-object", "where-object", "sort-object", "group-object",
+    "format-list", "format-table", "out-string", "write-output", "write-host",
+    "compare-object", "convertto-json", "convertfrom-json",
+})
+
+# Tools where only certain *subcommands* are read-only. The first non-flag
+# argument must be in the set; everything else falls through to a prompt.
+_SAFE_SUBCOMMANDS = {
+    "npm": {"ls", "list", "view", "outdated", "why", "root", "prefix", "help"},
+    "pnpm": {"ls", "list", "why", "outdated", "root"},
+    "yarn": {"list", "why", "outdated"},
+    "pip": {"list", "show", "freeze", "check", "help"},
+    "pip3": {"list", "show", "freeze", "check", "help"},
+    "docker": {"ps", "images", "version", "info", "inspect", "logs"},
+    "kubectl": {"get", "describe", "version", "logs", "explain"},
+    "cargo": {"tree", "metadata"},
+    "dotnet": {"--list-sdks", "--list-runtimes", "--info", "--version"},
+}
+
+# git is special: a bunch of subcommands only read, and a few are read-only
+# *only in their listing form* (no positional argument -- e.g. `git branch`
+# lists, but `git branch foo` / `git branch -D foo` mutate).
+_GIT_READONLY = frozenset({
+    "status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree",
+    "cat-file", "blame", "describe", "shortlog", "for-each-ref", "grep",
+    "rev-list", "merge-base", "name-rev", "count-objects", "whatchanged",
+    "cherry", "help", "version", "show-ref", "symbolic-ref",
+})
+_GIT_LIST_ONLY = frozenset({"branch", "tag", "remote", "config", "reflog", "notes"})
+
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||[|;]")
+_FORBIDDEN_SEG = ("<", ">", "`", "&", "|", "$(", "${", "@(", "$(")
+
+
+def _cmd_basename(tok: str) -> str:
+    tok = tok.strip().strip('"').strip("'")
+    tok = re.split(r"[\\/]", tok)[-1]
+    return tok.lower()
+
+
+def _segment_readonly(seg: str) -> bool:
+    toks = seg.split()
+    if not toks:
+        return False
+    cmd = _cmd_basename(toks[0])
+    rest = toks[1:]
+    # Universal safe form: `<tool> --version` / `<tool> --help` and nothing
+    # else. Well-behaved tools print and exit, ignoring any real work.
+    if len(rest) == 1 and rest[0].lower() in ("--version", "--help", "-version"):
+        return True
+    if cmd in _SAFE_COMMANDS:
+        return True
+    if cmd == "git":
+        return _git_segment_readonly(rest)
+    if cmd in _SAFE_SUBCOMMANDS:
+        args = [t for t in rest if t]
+        return bool(args) and args[0].lower() in _SAFE_SUBCOMMANDS[cmd]
+    return False
+
+
+def _git_segment_readonly(rest: list) -> bool:
+    args = [t for t in rest if t]
+    if not args:
+        return False
+    sub = args[0].lower()
+    if sub in _GIT_READONLY:
+        return True
+    if sub in _GIT_LIST_ONLY:
+        # read-only only when there's no positional argument (flags are fine)
+        return all(t.startswith("-") for t in args[1:])
+    return False
+
+
+def is_readonly_command(command: str) -> bool:
+    """True only when `command` provably just reads state (see module note).
+
+    Conservative by design: any redirection, command substitution, unknown
+    command, or mutating subcommand/argument makes this return False so the
+    caller falls back to asking the user.
+    """
+    cmd = (command or "").strip()
+    if not cmd or "\n" in cmd or "\r" in cmd:
+        return False
+    segments = [s.strip() for s in _SEGMENT_SPLIT.split(cmd) if s.strip()]
+    if not segments:
+        return False
+    for seg in segments:
+        if any(tok in seg for tok in _FORBIDDEN_SEG):
+            return False
+        if not _segment_readonly(seg):
+            return False
+    return True
 
 
 @dataclass
@@ -59,6 +184,11 @@ class PermissionEngine:
 
         if name in ("run_powershell", "run_background"):
             command = str(args.get("command", ""))
+            # Provably read-only inspection commands (git status, ls, cat,
+            # grep, ...) run unprompted in every mode except "ask".
+            if name == "run_powershell" and self.mode != "ask" \
+                    and is_readonly_command(command):
+                return Decision(True)
             prefix = command_prefix(command)
             # Resolve aliases (e.g., "npm run dev" -> "npm")
             resolved_prefix = self.command_aliases.get(prefix, prefix)

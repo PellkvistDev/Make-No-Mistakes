@@ -316,8 +316,14 @@ away, even if that conversation was compacted long ago.
 | Mode | File edits | Shell commands |
 |---|---|---|
 | `ask` (default) | ask, with diff preview | ask |
-| `autoedit` | auto | ask |
+| `autoedit` | auto | read-only auto, rest ask |
 | `yolo` | auto | auto |
+
+In every mode except `ask`, commands that only read state (`git status`,
+`ls`, `cat`, `grep`, `Get-Content`, …) run without a prompt — the classifier
+is strict, so anything that redirects to a file, substitutes a subcommand,
+chains into an unrecognized stage, or passes a mutating subcommand/argument
+still asks.
 
 Switch with `/mode yolo` etc. When asked, answer `y` (once), `a` (always for
 this session — for commands this allowlists the command prefix, e.g. `git`),
