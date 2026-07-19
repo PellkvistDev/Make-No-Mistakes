@@ -186,6 +186,20 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
     </button>
   </div>
+  <div id="browser-view" class="browser-view" hidden>
+    <div class="browser-view-bar">
+      <span class="browser-view-dot" aria-hidden="true"></span>
+      <span id="browser-view-url" class="browser-view-url">about:blank</span>
+      <button id="browser-view-toggle" class="browser-view-btn">Pause</button>
+    </div>
+    <div class="browser-view-frame">
+      <img id="browser-view-img" alt="Live browser view" />
+      <div id="browser-view-takeover" class="browser-view-takeover" hidden>
+        <span>You have the browser — do your thing, then</span>
+        <button id="browser-view-resume" class="browser-view-btn primary">Resume agent</button>
+      </div>
+    </div>
+  </div>
   <div id="subagent-panel-body" aria-live="polite"></div>
   <div id="subagent-steer-queued" class="steer-queued" hidden>
     <span class="steer-queued-icon">↪</span>
@@ -278,6 +292,11 @@
         <span class="row-sub">Turn off the glass blur &amp; animations — much faster on
           older or low-powered machines</span></div>
         <button id="opt-reduce-fx" class="switch" role="switch" aria-checked="false"><span></span></button></div>
+      <div class="row"><div class="row-text"><label for="opt-browser-headless">Hide the browser window</label>
+        <span class="row-sub">Run <code>control_chrome</code> headless — the browser works
+          invisibly. Watch it live in the Browser panel instead. Off by default so you can
+          see (and take over) the real window.</span></div>
+        <button id="opt-browser-headless" class="switch" role="switch" aria-checked="false"><span></span></button></div>
     </section>
 
     <section>

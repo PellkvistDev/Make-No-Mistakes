@@ -118,6 +118,9 @@ class _CaptureEvents(AgentEvents):
     def wrapup_requested(self) -> None:
         self._forward(self._aid, "wrapup_requested")
 
+    def browser_frame(self, url: str = "", image: str = "") -> None:
+        self._forward(self._aid, "browser_frame", url=url, image=image)
+
     def info(self, msg: str) -> None:
         self._forward(self._aid, "notice", level="info", text=msg)
 
@@ -1310,30 +1313,48 @@ class Agent:
                             or "browser agent ended without producing a report")
         return report
 
+    # Browser actions that change what's on screen -> push a live frame after.
+    _BROWSER_STATE_CHANGING = {"browser_navigate", "browser_click",
+                               "browser_type", "browser_key"}
+
     def _browser_action(self, name: str, args: dict) -> str:
         """Dispatch a browser_* tool (only ever called inside a Browser Agent,
         which has self.browser_session set)."""
         session = self.browser_session
         if session is None or not session.is_open:
             raise ToolError("The browser is not open.")
-        if name == "browser_navigate":
-            return session.navigate(args.get("url", ""))
-        if name == "browser_snapshot":
-            return session.snapshot()
-        if name == "browser_click":
-            return session.click(args.get("ref"))
-        if name == "browser_type":
-            return session.type_text(args.get("ref"), args.get("text", ""),
-                                     bool(args.get("submit", False)))
-        if name == "browser_key":
-            return session.press(args.get("key", ""))
-        if name == "browser_read":
-            return session.read_text()
-        if name == "browser_screenshot":
-            out = self.workdir / "generated" / f"browser-{uuid.uuid4().hex[:8]}.png"
-            path = session.screenshot(out)
-            return self._view_image(path, args.get("question", ""))
-        raise ToolError(f"unknown browser action {name}")
+        try:
+            if name == "browser_navigate":
+                return session.navigate(args.get("url", ""))
+            if name == "browser_snapshot":
+                return session.snapshot()
+            if name == "browser_click":
+                return session.click(args.get("ref"))
+            if name == "browser_type":
+                return session.type_text(args.get("ref"), args.get("text", ""),
+                                         bool(args.get("submit", False)))
+            if name == "browser_key":
+                return session.press(args.get("key", ""))
+            if name == "browser_read":
+                return session.read_text()
+            if name == "browser_screenshot":
+                out = self.workdir / "generated" / f"browser-{uuid.uuid4().hex[:8]}.png"
+                path = session.screenshot(out)
+                return self._view_image(path, args.get("question", ""))
+            raise ToolError(f"unknown browser action {name}")
+        finally:
+            if name in self._BROWSER_STATE_CHANGING:
+                self._emit_browser_frame(session)
+
+    def _emit_browser_frame(self, session) -> None:
+        """Push a small live screenshot of the page to the UI's Browser panel.
+        Best-effort: a failed frame never disrupts the browsing itself."""
+        try:
+            image = session.screenshot_b64()
+            if image:
+                self.events.browser_frame(url=session.current_url(), image=image)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     # Context management

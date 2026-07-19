@@ -746,6 +746,7 @@ class Api:
             "background_custom": bool(c.background_path),
             "read_aloud": c.read_aloud, "tts_voice": c.tts_voice, "tts_speed": c.tts_speed,
             "notifications": c.notifications, "reduce_effects": c.reduce_effects,
+            "browser_headless": c.browser_headless,
         }
 
     def set_setting(self, key: str, value):
@@ -758,7 +759,7 @@ class Api:
         elif key == "vision_route" and value in ("describe", "direct"):
             c.vision_route = value
         elif key in ("thinking", "show_reasoning", "read_aloud", "notifications",
-                     "reduce_effects"):
+                     "reduce_effects", "browser_headless"):
             setattr(c, key, bool(value))
         elif key in ("model", "vision_model") and isinstance(value, str) and value.strip():
             setattr(c, key, value.strip())

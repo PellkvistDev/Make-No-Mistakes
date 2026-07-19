@@ -547,6 +547,49 @@ body.subagent-open #subagent-panel { transform: translateX(0); }
   scroll-behavior: smooth; user-select: text;
 }
 
+/* live Browser viewport at the top of the inspector */
+.browser-view {
+  flex: none; border-bottom: 1px solid var(--stroke-soft);
+  background: rgba(6, 9, 18, 0.5);
+}
+.browser-view-bar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  font-size: 11.5px; font-family: var(--mono);
+}
+.browser-view-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--accent); animation: sa-pulse 1s ease-in-out infinite;
+}
+.browser-view.paused .browser-view-dot { background: #ffd60a; animation: none; }
+.browser-view-url {
+  flex: 1; min-width: 0; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.browser-view-btn {
+  flex: none; padding: 3px 12px; font-size: 11px; font-weight: 650;
+  font-family: var(--font); color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.06); border: 1px solid var(--stroke);
+  border-radius: 999px; cursor: pointer; transition: background 0.15s ease;
+}
+.browser-view-btn:hover { background: rgba(255, 255, 255, 0.13); color: var(--text); }
+.browser-view-btn:disabled { opacity: 0.5; cursor: default; }
+.browser-view-btn.primary {
+  color: #10131a; background: #ffd60a; border-color: #ffd60a;
+}
+.browser-view.paused .browser-view-btn { color: #ffd60a; border-color: rgba(255, 214, 10, 0.45); }
+.browser-view-frame { position: relative; background: #0a0d16; }
+#browser-view-img {
+  display: block; width: 100%; max-height: 42vh; object-fit: contain;
+  object-position: top;
+}
+.browser-view.paused .browser-view-frame { outline: 2px solid #ffd60a; outline-offset: -2px; }
+.browser-view-takeover {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center; gap: 10px;
+  flex-wrap: wrap; padding: 10px 14px; font-size: 12px; color: #ffe98a;
+  background: linear-gradient(transparent, rgba(20, 16, 0, 0.9));
+}
+
 /* queued-steering-message bubble: shown above whichever composer it belongs
    to (main #composer-wrap or the sub-agent mini-composer) while a message
    is waiting to be delivered. Same orange as steer-mode/the send button. */

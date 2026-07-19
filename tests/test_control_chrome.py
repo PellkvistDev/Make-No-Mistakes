@@ -167,6 +167,30 @@ def test_close_browser_tears_down(scripted_agent):
     assert agent.browser_session is None
 
 
+def test_state_changing_actions_emit_a_browser_frame(scripted_agent):
+    agent = scripted_agent(allow_subagents=True)
+    frames = []
+    agent.events.browser_frame = lambda url="", image="": frames.append((url, image))
+
+    class Sess:
+        is_open = True
+        def navigate(self, url): return "snap"
+        def click(self, ref): return "snap"
+        def snapshot(self): return "snap-only"
+        def screenshot_b64(self, max_width=520): return "data:image/jpeg;base64,AAAA"
+        def current_url(self): return "https://x.test"
+
+    agent.browser_session = Sess()
+    agent._browser_action("browser_navigate", {"url": "https://x.test"})
+    assert frames[-1] == ("https://x.test", "data:image/jpeg;base64,AAAA")
+    agent._browser_action("browser_click", {"ref": 1})
+    assert len(frames) == 2
+    # A read-only action (snapshot) pushes no frame -- the page didn't change.
+    frames.clear()
+    agent._browser_action("browser_snapshot", {})
+    assert frames == []
+
+
 def test_subagents_do_not_get_control_chrome(scripted_agent):
     # A normal (non-coordinator) sub-agent's schema must exclude control_chrome.
     sub = scripted_agent(allow_subagents=False)

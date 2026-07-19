@@ -177,6 +177,11 @@ class BrowserSession:
     def current_url(self) -> str:
         return self._call("current_url")
 
+    def screenshot_b64(self, max_width: int = 520) -> str:
+        """A small JPEG data-URL of the current page, for the live Browser
+        panel. Returns '' on any failure (best-effort live frame)."""
+        return self._call("screenshot_b64", max_width=max_width)
+
     # -- operations (driver thread only) ---------------------------------- #
 
     def _op_navigate(self, url: str) -> str:
@@ -284,6 +289,27 @@ class BrowserSession:
 
     def _op_current_url(self) -> str:
         return self._url()
+
+    def _op_screenshot_b64(self, max_width: int) -> str:
+        try:
+            png = self._page.screenshot()
+        except Exception:
+            return ""
+        try:
+            import base64
+            import io
+
+            from PIL import Image
+            img = Image.open(io.BytesIO(png))
+            if img.width > max_width:
+                h = max(1, int(img.height * max_width / img.width))
+                img = img.resize((max_width, h))
+            buf = io.BytesIO()
+            img.convert("RGB").save(buf, "JPEG", quality=70)
+            return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
+        except Exception:
+            import base64
+            return "data:image/png;base64," + base64.b64encode(png).decode()
 
     # -- driver-thread helpers -------------------------------------------- #
 

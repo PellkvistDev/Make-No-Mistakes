@@ -71,6 +71,10 @@ class AgentEvents:
         payload. Lets a UI show a sub-agent's own thread live, not just the
         coarse start/done/error status from subagent()."""
 
+    def browser_frame(self, url: str = "", image: str = "") -> None:
+        """A live frame from the Browser Agent's page: `url` and a small JPEG
+        data-URL `image`, for a UI to mirror the browser. No-op without a UI."""
+
     # -- images ------------------------------------------------------------ #
     def show_image(self, path: str, caption: str = "") -> None:
         """Display an image inline for the user. No-op unless a UI is attached."""

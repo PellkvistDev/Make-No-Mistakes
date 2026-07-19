@@ -233,8 +233,13 @@ chat** (cookies, logins, current page survive), so you can delegate follow-up
 goals. The browser is quarantined inside the sub-agent so its step-by-step
 noise never floods the main conversation — the main agent just gets a clean
 report back. Approve it once per goal (in `ask` mode); it uses an isolated
-profile, not your personal Chrome. Runs headed by default so you can watch
-(`browser_headless` in config to hide it).
+profile, not your personal Chrome.
+
+A **live Browser panel** slides in when the agent starts browsing: it mirrors
+the page as it works (a screenshot after each action), shows the current URL,
+and carries the Pause/Resume control. Runs headed by default so you can watch
+the real window too; flip **Settings → Hide the browser window**
+(`browser_headless`) to run it invisibly and just watch the panel.
 
 **Pause and take over.** While the Browser Agent is working, hit **Pause** on
 its row: it freezes at the next safe checkpoint and the browser window is

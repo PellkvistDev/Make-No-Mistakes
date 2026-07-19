@@ -1039,6 +1039,7 @@ function handle(ev) {
     case "subagent": {
       const t = ensureTurn();
       updateSubagent(t, ev);
+      noteBrowserAgent(ev);
       scrollDown();
       break;
     }
@@ -1368,6 +1369,57 @@ const subagentStatus = {};    // aid -> "running" | "done" | "error"
 const subagentSteerPending = {}; // aid -> queued (undelivered) steering text, or absent
 let activeSubagentId = null;
 
+/* Live Browser panel: a viewport at the top of the sub-agent inspector that
+   mirrors the Browser Agent's page (screenshots pushed as "browser_frame"
+   events) with a Pause/Resume + take-over control. Shown only while the
+   inspector is focused on a browser agent. */
+const browserAgents = {};     // aid -> {url, image, paused, done, opened}
+
+function noteBrowserAgent(ev) {
+  if ((ev.name || "") !== "browser") return;
+  const st = browserAgents[ev.id] ||
+    (browserAgents[ev.id] = { url: "", image: "", paused: false, done: false });
+  st.paused = ev.status === "paused";
+  st.done = ev.status === "done" || ev.status === "error";
+  // Auto-open the inspector on the browser the first time it runs, so the
+  // user sees it working (and can pause it) without hunting for the row.
+  if (ev.status === "running" && !st.opened) {
+    st.opened = true;
+    openSubagentPanel(ev.id, "browser", ev.status);
+  }
+  if (activeSubagentId === ev.id) refreshBrowserView();
+}
+
+function refreshBrowserView() {
+  const view = $("browser-view");
+  const st = activeSubagentId && browserAgents[activeSubagentId];
+  if (!st) { view.hidden = true; return; }
+  view.hidden = false;
+  if (st.image) $("browser-view-img").src = st.image;
+  $("browser-view-url").textContent = st.url || "…";
+  const toggle = $("browser-view-toggle");
+  toggle.hidden = st.done;
+  toggle.textContent = st.paused ? "Resume" : "Pause";
+  $("browser-view-takeover").hidden = !st.paused || st.done;
+  view.classList.toggle("paused", st.paused && !st.done);
+}
+
+async function toggleBrowserPause() {
+  const st = activeSubagentId && browserAgents[activeSubagentId];
+  if (!st) return;
+  const btn = $("browser-view-toggle");
+  btn.disabled = true;
+  let res;
+  try { res = st.paused ? await api().resume_browser() : await api().pause_browser(); }
+  catch (e) { res = { error: String(e) }; }
+  btn.disabled = false;
+  if (res && res.error) toast(res.error, "warn", 3000);
+  else if (!st.paused) toast("Paused — the browser is yours. Resume when done.", "info", 5000);
+}
+
+$("browser-view-toggle").addEventListener("click", toggleBrowserPause);
+$("browser-view-resume").addEventListener("click", toggleBrowserPause);
+
 function getSubagentThread(aid) {
   let t = subagentThreads[aid];
   if (!t) {
@@ -1388,6 +1440,14 @@ function getSubagentThread(aid) {
 }
 
 function renderSubagentEvent(aid, ev) {
+  if (ev.kind === "browser_frame") {
+    const st = browserAgents[aid] ||
+      (browserAgents[aid] = { url: "", image: "", paused: false, done: false });
+    if (ev.url) st.url = ev.url;
+    if (ev.image) st.image = ev.image;
+    if (activeSubagentId === aid) refreshBrowserView();
+    return;  // a live frame, not a transcript event
+  }
   const t = getSubagentThread(aid);
   switch (ev.kind) {
     case "stream_start":
@@ -1581,6 +1641,7 @@ function showActiveSubagentThread() {
   $("subagent-tabs").querySelectorAll(".subagent-tab").forEach((tab) => {
     tab.classList.toggle("active", tab.dataset.aid === activeSubagentId);
   });
+  refreshBrowserView();  // show/hide the live viewport for the newly-active agent
   updateSubagentComposerState();
   renderSubagentSteerQueued();
   scrollSubagentPanel();
@@ -1595,6 +1656,7 @@ function openSubagentPanel(aid, name, status) {
   if (status) updateSubagentTabStatus(aid, status);
   activeSubagentId = aid;
   showActiveSubagentThread();
+  refreshBrowserView();  // reveal the live viewport iff this is a browser agent
   document.body.classList.add("subagent-open");
 }
 
@@ -1608,7 +1670,9 @@ function clearSubagentPanel() {
   $("subagent-panel-body").innerHTML = "";
   for (const key of Object.keys(subagentThreads)) delete subagentThreads[key];
   for (const key of Object.keys(subagentSteerPending)) delete subagentSteerPending[key];
+  for (const key of Object.keys(browserAgents)) delete browserAgents[key];
   activeSubagentId = null;
+  $("browser-view").hidden = true;
   renderSubagentSteerQueued();
 }
 
@@ -2780,6 +2844,7 @@ function syncSettingsUI() {
   $("opt-reasoning").setAttribute("aria-checked", !!settings.show_reasoning);
   $("opt-notify").setAttribute("aria-checked", !!settings.notifications);
   $("opt-reduce-fx").setAttribute("aria-checked", !!settings.reduce_effects);
+  $("opt-browser-headless").setAttribute("aria-checked", !!settings.browser_headless);
   applyPerfMode();
   $("cwd-label").textContent = settings.cwd || "No chat selected";
   $("cwd-label").title = settings.cwd || "";
@@ -2837,6 +2902,7 @@ bindSwitch("opt-thinking", "thinking");
 bindSwitch("opt-reasoning", "show_reasoning");
 bindSwitch("opt-notify", "notifications");
 bindSwitch("opt-reduce-fx", "reduce_effects");
+bindSwitch("opt-browser-headless", "browser_headless");
 
 function applyPerfMode() {
   document.body.classList.toggle("perf-mode", !!(settings && settings.reduce_effects));
