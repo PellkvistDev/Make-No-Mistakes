@@ -403,6 +403,14 @@ tells you out loud. Ask "how's it going?" any time and it'll check.
   push-to-talk key, and a toggle for the sound cues.
 - **It's saved** — the voice conversation is written into the chat's
   searchable transcript, so it isn't lost when you close the overlay.
+- **Wake word** — turn it on in **Settings → Dictation** and set your own
+  phrase ("hey assistant" by default); the app then listens (locally — nothing
+  leaves the machine) and opens a hands-free session when it hears you. Anything
+  you say after the phrase becomes the first request.
+- **"What did it change?" / "revert that"** — ask and the delegator tells you
+  which files a worker touched; say to undo it and it rolls the project back to
+  how it was right before that worker ran (it confirms first). Each worker
+  snapshots a baseline when it starts, so this targets that worker's work.
 - **Sensitivity** — one slider in **Settings → Dictation** if you want it to
   pick up quieter speech, or to ignore more background noise.
 - **Warm start** — opening a voice session pre-loads the speech models in the

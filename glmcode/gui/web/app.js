@@ -2708,6 +2708,18 @@ window.addEventListener("keydown", async (e) => {
 function pttKeyName(code) {
   return String(code || "Space").replace(/^Key/, "").replace(/^Digit/, "").replace(/^Arrow/, "");
 }
+$("opt-wake").addEventListener("click", async () => {
+  const next = $("opt-wake").getAttribute("aria-checked") !== "true";
+  settings = await api().set_setting("voice_wake_enabled", next);
+  $("opt-wake").setAttribute("aria-checked", String(next));
+  $("wake-word-row").hidden = !next;
+  refreshWake();
+});
+$("voice-wake-word").addEventListener("change", async () => {
+  const v = $("voice-wake-word").value.trim() || "hey assistant";
+  settings = await api().set_setting("voice_wake_word", v);
+  if (wake.armed) { disarmWake(); refreshWake(); }  // pick up the new phrase
+});
 
 /* ---------------------------------------------- model providers (BYOM) -- */
 
@@ -3126,6 +3138,10 @@ function syncSettingsUI() {
   $("voice-silence-label").textContent = silenceLabel(sil);
   $("opt-earcons").setAttribute("aria-checked", settings.voice_earcons !== false);
   $("voice-ptt-key-label").textContent = pttKeyName(settings.voice_ptt_key || "Space");
+  const wakeOn = !!settings.voice_wake_enabled;
+  $("opt-wake").setAttribute("aria-checked", wakeOn);
+  $("wake-word-row").hidden = !wakeOn;
+  $("voice-wake-word").value = settings.voice_wake_word || "hey assistant";
   applyModeChip();
   applyReadAloudChip();
 }
@@ -3690,6 +3706,7 @@ async function boot() {
   setBackground(b.background);
   $("about-version").textContent = "v" + b.version;
   syncSettingsUI();
+  refreshWake();  // start listening for the wake word if it's enabled
 
   if (b.needsKey) {
     showNoSession();
@@ -3759,6 +3776,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function startVoice() {
   if (voice.active) return;
+  disarmWake();  // release the wake listener's mic before opening our own
   let res;
   try { res = await api().voice_mode(true); } catch (e) { res = { error: String(e) }; }
   if (!res || res.error) { toast(res && res.error ? res.error : "Couldn't start voice mode.", "error", 5000); return; }
@@ -3851,6 +3869,7 @@ function stopVoice() {
   $("voice-chip").setAttribute("aria-pressed", "false");
   $("voice-chip").classList.remove("active");
   try { api().voice_mode(false); } catch (e) { /* ignore */ }
+  refreshWake();  // go back to listening for the wake word, if enabled
 }
 
 function micEnergy() {
@@ -4315,6 +4334,140 @@ function replayLastReply() {
   setVoiceOrb("speaking");
   setVoiceStatus("Replaying…");
   for (const src of voice.lastReply) enqueueTtsPlayback(src);
+}
+
+// -- wake word: start a hands-free session by saying a phrase --------------- //
+// When armed (and voice mode is off) this keeps a light energy-VAD listener
+// going, transcribing only the short bursts where you actually spoke, and opens
+// voice mode when it hears the configured phrase. All local -- nothing leaves
+// the machine. Opt-in; off by default.
+const wake = {
+  armed: false, stream: null, ctx: null, analyser: null, data: null, timer: 0,
+  rec: null, chunks: [], recording: false, busy: false,
+  voicedMs: 0, silenceMs: 0, recMs: 0, noiseFloor: 0.012,
+};
+const WK_FRAME_MS = 60, WK_SILENCE_MS = 550, WK_MIN_MS = 250, WK_MAX_MS = 5000;
+
+async function armWake() {
+  if (wake.armed || voice.active) return;
+  if (!settings || !settings.voice_wake_enabled) return;
+  try {
+    wake.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    });
+  } catch (e) { return; }  // no mic permission -> silently not armed
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  wake.ctx = new Ctx();
+  const src = wake.ctx.createMediaStreamSource(wake.stream);
+  wake.analyser = wake.ctx.createAnalyser();
+  wake.analyser.fftSize = 1024;
+  wake.data = new Uint8Array(wake.analyser.fftSize);
+  src.connect(wake.analyser);
+  wake.armed = true;
+  $("voice-chip").classList.add("armed");
+  $("voice-chip").title = `Listening for “${(settings.voice_wake_word || "hey assistant")}” — click to open voice`;
+  wake.timer = setInterval(wakeTick, WK_FRAME_MS);
+}
+
+function disarmWake() {
+  if (wake.timer) { clearInterval(wake.timer); wake.timer = 0; }
+  try { if (wake.rec && wake.recording) wake.rec.stop(); } catch (e) { /* ignore */ }
+  wake.recording = false;
+  if (wake.stream) { wake.stream.getTracks().forEach((t) => t.stop()); wake.stream = null; }
+  if (wake.ctx) { try { wake.ctx.close(); } catch (e) { /* ignore */ } wake.ctx = null; }
+  wake.armed = false;
+  $("voice-chip").classList.remove("armed");
+  $("voice-chip").title = "Talk to it — hands-free voice conversation";
+}
+
+function wakeEnergy() {
+  wake.analyser.getByteTimeDomainData(wake.data);
+  let sum = 0;
+  for (let i = 0; i < wake.data.length; i++) { const v = (wake.data[i] - 128) / 128; sum += v * v; }
+  return Math.sqrt(sum / wake.data.length);
+}
+
+function wakeTick() {
+  if (!wake.armed || wake.busy) return;
+  const e = wakeEnergy();
+  const startT = Math.max(0.012, wake.noiseFloor * 3);
+  if (wake.recording) {
+    wake.recMs += WK_FRAME_MS;
+    if (e > wake.noiseFloor * 1.8) { wake.voicedMs += WK_FRAME_MS; wake.silenceMs = 0; }
+    else wake.silenceMs += WK_FRAME_MS;
+    if (wake.silenceMs >= WK_SILENCE_MS || wake.recMs >= WK_MAX_MS) wakeEndUtterance();
+    return;
+  }
+  if (e > startT) { wakeStartUtterance(); }
+  else {
+    wake.noiseFloor = 0.98 * wake.noiseFloor + 0.02 * e;
+    wake.noiseFloor = Math.min(0.05, Math.max(0.004, wake.noiseFloor));
+  }
+}
+
+function wakeStartUtterance() {
+  let mime = "";
+  if (window.MediaRecorder) {
+    if (MediaRecorder.isTypeSupported("audio/webm")) mime = "audio/webm";
+    else if (MediaRecorder.isTypeSupported("audio/ogg")) mime = "audio/ogg";
+  }
+  try {
+    wake.rec = mime ? new MediaRecorder(wake.stream, { mimeType: mime }) : new MediaRecorder(wake.stream);
+  } catch (e) { return; }
+  wake.chunks = []; wake.recording = true; wake.voicedMs = 0; wake.silenceMs = 0; wake.recMs = 0;
+  wake.rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) wake.chunks.push(ev.data); };
+  wake.rec.onstop = wakeFinish;
+  wake.rec.start(200);
+}
+
+function wakeEndUtterance() {
+  if (!wake.recording) return;
+  wake.recording = false;
+  wake.discard = wake.voicedMs < WK_MIN_MS;
+  try { wake.rec.stop(); } catch (e) { /* onstop fires */ }
+}
+
+async function wakeFinish() {
+  if (wake.discard || !wake.chunks.length || !wake.armed) return;
+  wake.busy = true;
+  const blob = new Blob(wake.chunks, { type: wake.chunks[0].type || "audio/webm" });
+  wake.chunks = [];
+  const dataUrl = await new Promise((resolve) => {
+    const r = new FileReader();
+    r.onloadend = () => resolve(r.result);
+    r.onerror = () => resolve("");
+    r.readAsDataURL(blob);
+  });
+  let text = "";
+  try {
+    const res = await api().transcribe_audio(dataUrl);
+    if (res && res.text) text = res.text.trim();
+  } catch (e) { /* ignore */ }
+  wake.busy = false;
+  if (!wake.armed) return;
+  const m = text && wakeMatches(text);
+  if (m) {
+    disarmWake();
+    await startVoice();
+    if (m.command && voice.active) { addVoiceTurn(m.command, false); voice.sendTries = 0; sendVoiceTurn(m.command); }
+  }
+}
+
+// True (with any trailing command) if the transcript contains the wake phrase.
+function wakeMatches(text) {
+  const norm = (s) => s.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  const phrase = norm((settings && settings.voice_wake_word) || "hey assistant");
+  if (!phrase) return null;
+  const t = norm(text);
+  const idx = t.indexOf(phrase);
+  if (idx === -1) return null;
+  return { command: t.slice(idx + phrase.length).trim() };
+}
+
+// Keep the wake listener in sync with the setting and voice-mode state.
+function refreshWake() {
+  if (settings && settings.voice_wake_enabled && !voice.active) armWake();
+  else disarmWake();
 }
 
 $("voice-chip").addEventListener("click", () => { if (voice.active) stopVoice(); else startVoice(); });

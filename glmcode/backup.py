@@ -172,6 +172,37 @@ class BackupRepo:
             except OSError as e:
                 raise RuntimeError(f"could not remove {path}: {e}")
 
+    def changed_files_since(self, commit: str) -> list[tuple[str, str]]:
+        """Files changed in the work-tree since `commit`, as (status, path)
+        pairs where status is git's A/M/D/R... Used to describe what a specific
+        background worker changed relative to a baseline taken when it started."""
+        if not available() or not self._initialized() or not commit:
+            return []
+        try:
+            self._run("add", "-A", "-N", check=False)  # so new files show up
+            out = self._run("diff", commit, "--name-status", check=False).stdout
+        except Exception:
+            return []
+        changes = []
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                changes.append((parts[0][:1], parts[-1]))
+        return changes
+
+    def diff_since(self, commit: str, max_chars: int = 6000) -> str:
+        """Full git diff of the work-tree since `commit` (a worker's baseline)."""
+        if not available() or not self._initialized() or not commit:
+            return ""
+        try:
+            self._run("add", "-A", "-N", check=False)
+            patch = self._run("diff", commit, check=False).stdout
+        except Exception:
+            return ""
+        if len(patch) > max_chars:
+            patch = patch[:max_chars] + f"\n... [truncated at {max_chars} chars]"
+        return patch
+
     def revert_to(self, commit: str) -> None:
         """Reset the project dir's actual files back to how they looked at
         `commit`. Does not touch the chat conversation -- only files."""

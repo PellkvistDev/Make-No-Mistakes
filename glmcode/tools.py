@@ -2217,6 +2217,21 @@ CONVERSATIONAL_SCHEMAS = [
         {"worker": {"type": "string", "description": "The worker's id (e.g. 'wk1') or name."}},
         ["worker"],
     ),
+    _schema(
+        "worker_changes",
+        "Describe exactly what files a finished worker changed (added/edited/deleted). Use "
+        "when the user asks what a worker did or changed. Identify it by id (wk1) or name.",
+        {"worker": {"type": "string", "description": "The worker's id (e.g. 'wk1') or name."}},
+        ["worker"],
+    ),
+    _schema(
+        "revert_worker",
+        "Undo a worker's file changes, rolling the project back to how it was right before "
+        "that worker started. Use when the user says to undo or revert a worker's work. This "
+        "is destructive, so CONFIRM with the user first. Identify it by id (wk1) or name.",
+        {"worker": {"type": "string", "description": "The worker's id (e.g. 'wk1') or name."}},
+        ["worker"],
+    ),
 ]
 
 # Handled specially by the agent (needs the client/events), not via TOOL_FUNCTIONS.
@@ -2224,6 +2239,8 @@ DISPATCH_WORKER_TOOL = "dispatch_worker"
 CHECK_WORKERS_TOOL = "check_workers"
 STEER_WORKER_TOOL = "steer_worker"
 STOP_WORKER_TOOL = "stop_worker"
+WORKER_CHANGES_TOOL = "worker_changes"
+REVERT_WORKER_TOOL = "revert_worker"
 SUBAGENT_TOOL = "spawn_agents"
 CONTROL_CHROME_TOOL = "control_chrome"
 VIEW_IMAGE_TOOL = "view_image"

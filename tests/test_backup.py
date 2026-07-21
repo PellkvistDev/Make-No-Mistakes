@@ -53,6 +53,26 @@ def test_snapshot_revert_roundtrip(project):
     assert not (project / "b.txt").exists()
 
 
+def test_changed_files_since_baseline(project):
+    # Powers the voice mode "what did this worker change?" / "revert that" flow:
+    # a baseline snapshot, then diff the work-tree against it.
+    repo = backup.BackupRepo("sess-changes", project)
+    (project / "a.txt").write_text("original")
+    baseline = repo.snapshot("before worker")
+    (project / "a.txt").write_text("edited")     # modify existing
+    (project / "new.py").write_text("print(1)")  # add a new file
+
+    changed = dict((path, st) for st, path in repo.changed_files_since(baseline))
+    assert changed.get("new.py") == "A"
+    assert changed.get("a.txt") == "M"
+    diff = repo.diff_since(baseline)
+    assert "new.py" in diff and "a.txt" in diff
+
+    # And the baseline still works as a revert target.
+    repo.revert_to(baseline)
+    assert not (project / "new.py").exists()
+
+
 def test_real_git_dir_survives_untouched(project):
     repo = backup.BackupRepo("sess-2", project)
     repo.snapshot("msg")

@@ -453,6 +453,17 @@
           <span class="row-sub" id="voice-ptt-key-label">Space</span></div>
         <button id="voice-ptt-key" class="btn btn-ghost">Click, then press a key</button>
       </div>
+      <div class="row">
+        <div class="row-text"><label for="opt-wake">Wake word</label>
+          <span class="row-sub">Listen for a phrase to open voice hands-free. Keeps the mic on and
+            transcribes locally — nothing leaves your machine.</span></div>
+        <button id="opt-wake" class="switch" role="switch" aria-checked="false"><span></span></button>
+      </div>
+      <div class="row" id="wake-word-row" hidden>
+        <div class="row-text"><label for="voice-wake-word">Wake phrase</label>
+          <span class="row-sub">What to say to start a session</span></div>
+        <input type="text" id="voice-wake-word" class="text-input" placeholder="hey assistant" style="max-width:200px">
+      </div>
     </section>
 
     <section>

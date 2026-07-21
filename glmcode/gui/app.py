@@ -849,6 +849,8 @@ class Api:
             "voice_sensitivity": c.voice_sensitivity,
             "voice_earcons": c.voice_earcons, "voice_ptt_key": c.voice_ptt_key,
             "voice_silence_ms": c.voice_silence_ms,
+            "voice_wake_enabled": c.voice_wake_enabled,
+            "voice_wake_word": c.voice_wake_word,
             "notifications": c.notifications, "reduce_effects": c.reduce_effects,
             "browser_headless": c.browser_headless,
             "browser_keep_logins": c.browser_keep_logins,
@@ -891,6 +893,10 @@ class Api:
                 c.voice_silence_ms = int(min(1600, max(400, float(value))))
             except (TypeError, ValueError):
                 pass
+        elif key == "voice_wake_enabled":
+            c.voice_wake_enabled = bool(value)
+        elif key == "voice_wake_word" and isinstance(value, str) and value.strip():
+            c.voice_wake_word = value.strip()[:60]
         elif key == "tts_speed":
             try:
                 c.tts_speed = min(2.0, max(0.5, float(value)))

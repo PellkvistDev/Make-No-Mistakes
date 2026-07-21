@@ -26,11 +26,11 @@ from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
                     CHECK_WORKERS_TOOL, COMPACT_CONTEXT_TOOL,
                     CONTROL_CHROME_TOOL, CONVERSATIONAL_SCHEMAS,
                     DISPATCH_WORKER_TOOL, GENERATE_IMAGE_TOOL, PREVIEW_PAGE_TOOL,
-                    REMEMBER_TOOL, REVIEW_CHANGES_TOOL, SHOW_HTTP_CAT_TOOL,
-                    SHOW_IMAGE_TOOL, SPEAK_TOOL, STEER_WORKER_TOOL,
-                    STOP_WORKER_TOOL, SUBAGENT_TOOL, TOOL_SCHEMAS,
-                    VIEW_IMAGE_TOOL, ToolError, clean_todo_items, execute_tool,
-                    set_call_token, set_workdir)
+                    REMEMBER_TOOL, REVERT_WORKER_TOOL, REVIEW_CHANGES_TOOL,
+                    SHOW_HTTP_CAT_TOOL, SHOW_IMAGE_TOOL, SPEAK_TOOL,
+                    STEER_WORKER_TOOL, STOP_WORKER_TOOL, SUBAGENT_TOOL,
+                    TOOL_SCHEMAS, VIEW_IMAGE_TOOL, WORKER_CHANGES_TOOL, ToolError,
+                    clean_todo_items, execute_tool, set_call_token, set_workdir)
 
 # Tools whose output tells the model whether its changes actually work --
 # used by the verify-nudge (see _run_turn): a turn that edits files but never
@@ -1092,6 +1092,10 @@ class Agent:
                                                      args.get("message", ""))
                 elif name == STOP_WORKER_TOOL:
                     output = self._stop_worker_tool(args.get("worker", ""))
+                elif name == WORKER_CHANGES_TOOL:
+                    output = self._worker_changes_tool(args.get("worker", ""))
+                elif name == REVERT_WORKER_TOOL:
+                    output = self._revert_worker_tool(args.get("worker", ""))
                 elif name == SUBAGENT_TOOL:
                     if not self.allow_subagents:
                         raise ToolError("sub-agents cannot spawn further sub-agents")
@@ -1306,13 +1310,21 @@ class Agent:
         task = str(task or "").strip()
         if not task:
             raise ToolError("dispatch_worker needs a non-empty 'task'")
+        # Snapshot the project's current state as this worker's baseline, so we
+        # can later show exactly what IT changed and revert just its work.
+        baseline = None
+        if self.backup_repo is not None:
+            try:
+                baseline = self.backup_repo.snapshot(f"before worker: {name}")
+            except Exception:
+                baseline = None
         with self._workers_lock:
             self._worker_seq += 1
             wid = f"wk{self._worker_seq}"
             name = str(name or "").strip()[:60] or f"worker-{self._worker_seq}"
             self._workers[wid] = {
                 "id": wid, "name": name, "task": task, "status": "running",
-                "result": "", "error": None,
+                "result": "", "error": None, "baseline": baseline, "changes": [],
             }
         # One rate limiter shared by every background worker in this chat, so
         # several running at once stay spaced out on the free tier's ~1 req/s.
@@ -1333,11 +1345,15 @@ class Agent:
         try:
             report, usage = self._run_single_subagent(
                 name, task, self._worker_limiter, wid)
+            # What did this worker actually change (vs its dispatch baseline)?
+            changes = self._worker_changed_files(wid)
             # A worker the user stopped (cancelled) may still return a partial
             # report -- don't flip its "stopped" status back to "done".
             stopped = False
             with self._workers_lock:
                 w = self._workers.get(wid)
+                if w is not None:
+                    w["changes"] = changes
                 if w is not None and w["status"] == "stopped":
                     stopped = True
                 elif w is not None:
@@ -1350,8 +1366,13 @@ class Agent:
                     self.session_usage.add(usage)
             if not stopped:
                 self._emit_subagent(wid, name, "done", summary=_first_line(report))
+                # Fold the concrete file changes into the result so the spoken
+                # announcement can mention what actually changed.
+                ann = report
+                if changes:
+                    ann = f"{report}\n\nFiles changed: {self._describe_changes(changes)}."
                 self.events.worker_update(wid, name, "done",
-                                          summary=_first_line(report), result=report)
+                                          summary=_first_line(report), result=ann)
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             with self._workers_lock:
@@ -1421,6 +1442,64 @@ class Agent:
                 self._workers[wid]["status"] = "stopped"
         self._emit_subagent(wid, name, "error", summary="stopped by user")
         return f"Stopping '{name}'."
+
+    def _worker_changed_files(self, wid: str) -> list:
+        """(status, path) pairs for what a worker changed vs its baseline."""
+        with self._workers_lock:
+            baseline = self._workers.get(wid, {}).get("baseline")
+        if not baseline or self.backup_repo is None:
+            return []
+        try:
+            return self.backup_repo.changed_files_since(baseline)
+        except Exception:
+            return []
+
+    @staticmethod
+    def _describe_changes(changes: list) -> str:
+        if not changes:
+            return "no file changes"
+        verb = {"A": "added", "M": "changed", "D": "deleted", "R": "renamed"}
+        parts = [f"{verb.get(st, 'touched')} {path}" for st, path in changes[:12]]
+        extra = len(changes) - 12
+        if extra > 0:
+            parts.append(f"and {extra} more")
+        return "; ".join(parts)
+
+    def _worker_changes_tool(self, ident: str) -> str:
+        wid = self._resolve_worker(ident)
+        if wid is None:
+            raise ToolError(f"No worker matches '{ident}'. Use check_workers to see them.")
+        with self._workers_lock:
+            w = self._workers.get(wid, {})
+            name, changes = w.get("name", wid), w.get("changes", [])
+        if not changes:
+            return f"'{name}' didn't change any project files."
+        return (f"'{name}' changed {len(changes)} file(s): "
+                f"{self._describe_changes(changes)}.")
+
+    def _revert_worker_tool(self, ident: str) -> str:
+        wid = self._resolve_worker(ident)
+        if wid is None:
+            raise ToolError(f"No worker matches '{ident}'. Use check_workers to see them.")
+        with self._workers_lock:
+            w = self._workers.get(wid, {})
+            name, baseline, changes = w.get("name", wid), w.get("baseline"), w.get("changes", [])
+        if self.backup_repo is None or not baseline:
+            return (f"I can't revert '{name}' -- backups aren't on for this chat, so "
+                    f"there's no snapshot to roll back to.")
+        if not changes:
+            return f"'{name}' didn't change any files, so there's nothing to revert."
+        try:
+            self.backup_repo.revert_to(baseline)
+        except Exception as e:
+            raise ToolError(f"Could not revert '{name}': {e}")
+        with self._workers_lock:
+            if wid in self._workers:
+                self._workers[wid]["status"] = "reverted"
+        self._emit_subagent(wid, name, "error", summary="reverted by user")
+        return (f"Reverted the project to before '{name}' ran, undoing its changes "
+                f"({self._describe_changes(changes)}). Note: this also rolls back any "
+                f"changes other workers made after '{name}' started.")
 
     def _worker_ask(self, wid: str, title: str, preview: str, always_label):
         """Called ON A WORKER THREAD when that worker hits a permission-gated

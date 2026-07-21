@@ -1590,6 +1590,12 @@ body.sidebar-open #sidebar { transform: translateX(0); }
 
 /* -------------------------------------------------------- voice mode -- */
 #voice-chip.active { color: #ff453a; background: rgba(255, 69, 58, 0.14); }
+#voice-chip.armed { color: var(--accent); }
+#voice-chip.armed::after {
+  content: ""; position: absolute; top: 5px; right: 5px; width: 6px; height: 6px;
+  border-radius: 50%; background: var(--accent); animation: voice-blink 1.6s ease-in-out infinite;
+}
+#voice-chip { position: relative; }
 #voice-mute.active { color: #ff453a; background: rgba(255, 69, 58, 0.14); }
 
 .voice-overlay {

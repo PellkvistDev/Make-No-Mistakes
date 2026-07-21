@@ -45,7 +45,8 @@ def _wait_worker(agent, wid, timeout=5.0):
 def test_conversational_agent_has_only_delegation_tools(monkeypatch, events):
     convo = _convo(monkeypatch, events)
     names = {s["function"]["name"] for s in convo.tool_schemas}
-    assert names == {"dispatch_worker", "check_workers", "steer_worker", "stop_worker"}
+    assert names == {"dispatch_worker", "check_workers", "steer_worker", "stop_worker",
+                     "worker_changes", "revert_worker"}
     # None of the real file/command tools are exposed to the voice agent.
     assert "edit_file" not in names and "run_powershell" not in names
 
@@ -160,6 +161,52 @@ def test_stop_worker_cancels_and_marks_stopped(monkeypatch, events):
     assert "Stopping" in out
     with convo._workers_lock:
         assert convo._workers["wk1"]["status"] == "stopped"
+
+
+class _FakeBackup:
+    def __init__(self):
+        self.snaps = 0
+        self.reverted_to = None
+        self.changes = [("M", "auth.py"), ("A", "settings.js")]
+
+    def snapshot(self, msg):
+        self.snaps += 1
+        return f"commit{self.snaps}"
+
+    def changed_files_since(self, commit):
+        return list(self.changes)
+
+    def revert_to(self, commit):
+        self.reverted_to = commit
+
+
+def test_worker_changes_and_revert(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    convo.backup_repo = _FakeBackup()
+    ScriptedClient.scripts = [lambda n: FakeResult(content="edited files")]
+    convo._dispatch_worker("edits", "edit some files")
+    assert _wait_worker(convo, "wk1") == "done"
+    # A baseline was snapshotted at dispatch, and the changes were recorded.
+    with convo._workers_lock:
+        assert convo._workers["wk1"]["baseline"] == "commit1"
+        assert convo._workers["wk1"]["changes"] == [("M", "auth.py"), ("A", "settings.js")]
+    desc = convo._worker_changes_tool("edits")
+    assert "auth.py" in desc and "settings.js" in desc
+    out = convo._revert_worker_tool("wk1")
+    assert convo.backup_repo.reverted_to == "commit1"
+    assert "Reverted" in out
+    with convo._workers_lock:
+        assert convo._workers["wk1"]["status"] == "reverted"
+
+
+def test_revert_worker_without_backups(monkeypatch, events):
+    convo = _convo(monkeypatch, events)  # no backup_repo
+    with convo._workers_lock:
+        convo._workers["wk1"] = {"id": "wk1", "name": "w", "status": "done",
+                                 "task": "t", "result": "r", "error": None,
+                                 "baseline": None, "changes": []}
+    out = convo._revert_worker_tool("wk1")
+    assert "can't revert" in out or "nothing to revert" in out
 
 
 def test_worker_ask_blocks_until_resolved(monkeypatch, events):

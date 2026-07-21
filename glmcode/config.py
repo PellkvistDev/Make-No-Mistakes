@@ -145,6 +145,8 @@ class Config:
     voice_earcons: bool = True       # short tones on turn hand-off in voice mode
     voice_ptt_key: str = "Space"     # push-to-talk key (KeyboardEvent.code)
     voice_silence_ms: int = 750      # trailing silence (ms) that ends your turn, 400-1600
+    voice_wake_enabled: bool = False # listen for a wake word to start voice mode hands-free
+    voice_wake_word: str = "hey assistant"  # the spoken phrase that starts a voice session
     # Custom model providers: [{"name", "base_url", "api_key", "models": [..]}].
     # Any OpenAI-compatible endpoint works; chats pick a provider+model in
     # Settings (per chat -- the free z.ai default stays the default).
