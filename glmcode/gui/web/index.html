@@ -7,7 +7,7 @@
 <link rel="icon" href="app_icon.png" type="image/png">
 <link rel="stylesheet" href="style.css">
 </head>
-<body>
+<body class="perf-mode">
 
 <div id="bg" role="presentation"></div>
 <div id="bg-overlay" role="presentation"></div>
@@ -291,9 +291,10 @@
         </div>
       </div>
       <div id="bg-preview-wrap"><img id="bg-preview" alt="Current background preview"></div>
-      <div class="row"><div class="row-text"><label for="opt-reduce-fx">Reduce visual effects</label>
-        <span class="row-sub">Turn off the glass blur &amp; animations — much faster on
-          older or low-powered machines</span></div>
+      <div class="row"><div class="row-text"><label for="opt-reduce-fx">Fast mode (no glass blur)</label>
+        <span class="row-sub">On by default. Drops the GPU-heavy background blur &amp; big shadows
+          that repaint constantly — the biggest cause of general sluggishness. Turn OFF for the
+          full frosted-glass look if your machine handles it smoothly.</span></div>
         <button id="opt-reduce-fx" class="switch" role="switch" aria-checked="false"><span></span></button></div>
       <div class="row"><div class="row-text"><label for="opt-browser-headless">Hide the browser window</label>
         <span class="row-sub">Run <code>control_chrome</code> headless — the browser works

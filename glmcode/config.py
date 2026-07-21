@@ -132,7 +132,7 @@ class Config:
     last_session_id: str = ""        # desktop app: session to resume on launch
     read_aloud: bool = False         # desktop app: auto-speak assistant replies (Kokoro TTS)
     notifications: bool = True       # desktop app: OS toasts while the window is unfocused
-    reduce_effects: bool = False     # desktop app: drop blur/animations for weak GPUs
+    reduce_effects: bool = True      # desktop app: blur-free fast theme (default); glass is opt-in
     browser_headless: bool = False   # control_chrome: hide the browser window (default: watch it)
     browser_keep_logins: bool = False  # control_chrome: persistent agent profile (logins survive restarts)
     browser_provider: str = ""       # control_chrome: dedicated Browser Agent provider ("" = same as chat)

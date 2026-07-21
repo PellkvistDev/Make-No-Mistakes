@@ -169,9 +169,12 @@ def test_notifications_default_on():
     assert config.Config().notifications is True
 
 
-def test_reduce_effects_default_off_and_exposed_in_settings():
-    assert config.Config().reduce_effects is False
+def test_reduce_effects_default_on_and_exposed_in_settings():
+    # Fast (blur-free) theme is the default now -- the GPU-heavy backdrop
+    # blur/shadows were the dominant cause of general UI sluggishness. Glass
+    # is opt-in via the Settings toggle.
+    assert config.Config().reduce_effects is True
     api = gui_app.Api.__new__(gui_app.Api)
     api._cfg = config.Config()
     api.session_id = None
-    assert api._settings()["reduce_effects"] is False
+    assert api._settings()["reduce_effects"] is True

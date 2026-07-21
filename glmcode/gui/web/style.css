@@ -14,15 +14,20 @@
   --glass-hi: rgba(255, 255, 255, 0.08);
   --stroke: rgba(255, 255, 255, 0.13);
   --stroke-soft: rgba(255, 255, 255, 0.08);
-  --shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+  /* Large-radius shadows are re-rasterized on every repaint (scroll, hover,
+     focus) and there are ~19 of them; a 50px blur was the single most
+     expensive one. 8px/22px reads the same at a glance but composites far
+     cheaper. */
+  --shadow: 0 8px 22px rgba(0, 0, 0, 0.42);
   --r-lg: 22px;
   --r-md: 16px;
   --r-sm: 11px;
-  /* Kept modest on purpose: backdrop-filter is recomputed by WebView2's
-     compositor whenever content behind a glass panel changes (every scroll/
-     stream frame), and cost climbs steeply with radius. 18px still reads as
-     glass but composites far cheaper than the old 28px. */
-  --blur: blur(18px) saturate(145%);
+  /* backdrop-filter is recomputed by WebView2's compositor whenever anything
+     behind a glass panel repaints, and cost climbs steeply with radius. 10px
+     still reads as glass but is much cheaper than 18px; the extra saturate()
+     pass is dropped entirely. The blur-free "Reduce visual effects" mode
+     (default) skips this altogether. */
+  --blur: blur(10px);
   --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text",
           "Segoe UI Variable Display", "Segoe UI", Inter, system-ui, sans-serif;
   --mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
@@ -71,10 +76,12 @@ body {
   * { transition-duration: 0.01ms !important; animation-duration: 0.01ms !important; }
 }
 
-/* "Reduce visual effects" (Settings): the escape hatch for weak GPUs.
-   Drops EVERY backdrop-filter (the expensive part) for solid translucent
-   panels, and kills animations. Turns the glass UI into a flat -- but fully
-   responsive -- one. */
+/* "Reduce visual effects" (Settings, ON by default): the fast path. Drops the
+   two things re-rasterized on every repaint -- backdrop-filter blur AND the
+   big glass shadows -- for flat translucent panels. The UI stays 100% intact,
+   just composited for free. Small status animations (spinners/pulses) are
+   deliberately KEPT: they're cheap once the blur is gone and they're the only
+   "it's working" feedback. */
 body.perf-mode .glass,
 body.perf-mode .glass-strong,
 body.perf-mode #titlebar,
@@ -83,9 +90,22 @@ body.perf-mode .sheet,
 body.perf-mode .tool,
 body.perf-mode .model-menu,
 body.perf-mode .mention-menu,
+body.perf-mode #subagent-panel,
 body.perf-mode .backdrop {
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
+}
+/* Kill the expensive large-radius shadows in fast mode; keep small accent
+   glows (send button etc.) which are cheap and part of the look. */
+body.perf-mode .glass,
+body.perf-mode .glass-strong,
+body.perf-mode #titlebar,
+body.perf-mode #composer,
+body.perf-mode .tool,
+body.perf-mode .changes-card,
+body.perf-mode .todos,
+body.perf-mode #subagent-panel {
+  box-shadow: none !important;
 }
 body.perf-mode .mention-menu { background: rgba(16, 21, 34, 0.97) !important; }
 body.perf-mode .glass,
@@ -93,10 +113,6 @@ body.perf-mode .glass-strong,
 body.perf-mode #titlebar,
 body.perf-mode #composer {
   background: rgba(16, 21, 34, 0.92) !important;
-}
-body.perf-mode * {
-  animation-duration: 0.001ms !important;
-  animation-iteration-count: 1 !important;
 }
 
 /* ------------------------------------------------ glass primitives */
@@ -511,11 +527,12 @@ mark.find-current { background: #ffd60a; color: #10131a; }
   background: var(--glass-strong);
   -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
   border-left: 1px solid var(--stroke);
-  box-shadow: -18px 0 50px rgba(0, 0, 0, 0.35);
+  box-shadow: -10px 0 26px rgba(0, 0, 0, 0.35);
   transform: translateX(100%);
   transition: transform 0.3s cubic-bezier(0.2, 0.9, 0.3, 1.05);
 }
 body.subagent-open #subagent-panel { transform: translateX(0); }
+body.perf-mode #subagent-panel { box-shadow: none; }
 
 .subagent-panel-head {
   display: flex; align-items: center; gap: 8px;
