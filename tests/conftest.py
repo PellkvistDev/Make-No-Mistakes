@@ -121,6 +121,10 @@ class RecordingEvents(AgentEvents):
     def worker_update(self, id, name, status, summary="", result=""):
         self.worker_events.append((id, name, status, summary, result))
 
+    def worker_permission(self, rid, worker, title, preview, spoken="", always=""):
+        self.worker_perms = getattr(self, "worker_perms", [])
+        self.worker_perms.append((rid, worker, title, spoken))
+
 
 @pytest.fixture
 def events():

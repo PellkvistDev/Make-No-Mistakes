@@ -4,6 +4,7 @@ worker on its own thread, never blocking the conversation) with the outcome
 surfaced through worker_update events. The heavy work is scripted, no network.
 """
 
+import threading
 import time
 
 from glmcode.agent import Agent
@@ -42,7 +43,7 @@ def _wait_worker(agent, wid, timeout=5.0):
 def test_conversational_agent_has_only_delegation_tools(monkeypatch, events):
     convo = _convo(monkeypatch, events)
     names = {s["function"]["name"] for s in convo.tool_schemas}
-    assert names == {"dispatch_worker", "check_workers"}
+    assert names == {"dispatch_worker", "check_workers", "steer_worker", "stop_worker"}
     # None of the real file/command tools are exposed to the voice agent.
     assert "edit_file" not in names and "run_powershell" not in names
 
@@ -113,6 +114,96 @@ def test_ids_increment_across_dispatches(monkeypatch, events):
     assert "wk1" in o1 and "wk2" in o2
     assert _wait_worker(convo, "wk1") == "done"
     assert _wait_worker(convo, "wk2") == "done"
+
+
+def test_resolve_worker_by_id_and_name(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    with convo._workers_lock:
+        convo._workers["wk1"] = {"id": "wk1", "name": "dark-mode", "status": "running",
+                                 "task": "t", "result": "", "error": None}
+        convo._workers["wk2"] = {"id": "wk2", "name": "login-fix", "status": "done",
+                                 "task": "t", "result": "r", "error": None}
+    assert convo._resolve_worker("wk1") == "wk1"
+    assert convo._resolve_worker("dark") == "wk1"      # loose name match
+    assert convo._resolve_worker("login-fix") == "wk2"
+    assert convo._resolve_worker("nope") is None
+
+
+def test_steer_and_stop_unknown_worker_error(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    for call in (lambda: convo._steer_worker_tool("ghost", "hi"),
+                 lambda: convo._stop_worker_tool("ghost")):
+        try:
+            call()
+            assert False, "expected ToolError"
+        except Exception as e:
+            assert "No worker matches" in str(e)
+
+
+def test_stop_worker_cancels_and_marks_stopped(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    # A worker that would run "forever": its scripted client keeps asking for a
+    # tool until cancelled. Simpler: register a fake running sub we can assert on.
+    class FakeSub:
+        def __init__(self): self.cancelled = False
+        def request_cancel(self): self.cancelled = True
+    sub = FakeSub()
+    with convo._workers_lock:
+        convo._workers["wk1"] = {"id": "wk1", "name": "task", "status": "running",
+                                 "task": "t", "result": "", "error": None}
+    with convo._active_subagents_lock:
+        convo._active_subagents["wk1"] = sub
+    out = convo._stop_worker_tool("wk1")
+    assert sub.cancelled is True
+    assert "Stopping" in out
+    with convo._workers_lock:
+        assert convo._workers["wk1"]["status"] == "stopped"
+
+
+def test_worker_ask_blocks_until_resolved(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    with convo._workers_lock:
+        convo._workers["wk1"] = {"id": "wk1", "name": "refactor", "status": "running",
+                                 "task": "t", "result": "", "error": None}
+    answer = {}
+
+    def worker_side():
+        answer["v"] = convo._worker_ask("wk1", "Run command: npm test", "npm test", None)
+
+    th = threading.Thread(target=worker_side)
+    th.start()
+    # The worker is now blocked; a permission request was surfaced + spoken.
+    for _ in range(200):
+        if getattr(events, "worker_perms", None):
+            break
+        time.sleep(0.005)
+    perms = getattr(events, "worker_perms", [])
+    assert perms and perms[0][1] == "refactor" and "npm test" in perms[0][3]
+    rid = perms[0][0]
+    assert convo.resolve_worker_permission(rid, "y")
+    th.join(timeout=2)
+    assert answer["v"] == "y"
+
+
+def test_deny_pending_worker_permissions_unblocks(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    with convo._workers_lock:
+        convo._workers["wk1"] = {"id": "wk1", "name": "w", "status": "running",
+                                 "task": "t", "result": "", "error": None}
+    answer = {}
+
+    def worker_side():
+        answer["v"] = convo._worker_ask("wk1", "Write file: x", "x", None)
+
+    th = threading.Thread(target=worker_side)
+    th.start()
+    for _ in range(200):
+        if convo.pending_worker_permission():
+            break
+        time.sleep(0.005)
+    convo.deny_pending_worker_permissions("closed")
+    th.join(timeout=2)
+    assert answer["v"][0] == "n"
 
 
 def test_run_turn_dispatches_without_blocking(monkeypatch, events):

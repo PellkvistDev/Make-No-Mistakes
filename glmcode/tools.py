@@ -2199,11 +2199,31 @@ CONVERSATIONAL_SCHEMAS = [
         {},
         [],
     ),
+    _schema(
+        "steer_worker",
+        "Send a running worker a course-correction or extra instruction WITHOUT stopping it "
+        "-- use when the user adds to or redirects a task in flight ('also add a dark theme', "
+        "'use the other library'). Identify the worker by its id (wk1) or its name.",
+        {
+            "worker": {"type": "string", "description": "The worker's id (e.g. 'wk1') or name."},
+            "message": {"type": "string", "description": "The instruction to send it."},
+        },
+        ["worker", "message"],
+    ),
+    _schema(
+        "stop_worker",
+        "Stop a running worker -- use when the user says to cancel or abandon a task in "
+        "flight. It stops at the next safe point. Identify the worker by its id (wk1) or name.",
+        {"worker": {"type": "string", "description": "The worker's id (e.g. 'wk1') or name."}},
+        ["worker"],
+    ),
 ]
 
 # Handled specially by the agent (needs the client/events), not via TOOL_FUNCTIONS.
 DISPATCH_WORKER_TOOL = "dispatch_worker"
 CHECK_WORKERS_TOOL = "check_workers"
+STEER_WORKER_TOOL = "steer_worker"
+STOP_WORKER_TOOL = "stop_worker"
 SUBAGENT_TOOL = "spawn_agents"
 CONTROL_CHROME_TOOL = "control_chrome"
 VIEW_IMAGE_TOOL = "view_image"

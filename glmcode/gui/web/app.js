@@ -3692,6 +3692,7 @@ const voice = {
   speaking: false, thinking: false, transcribing: false, turnComplete: true,
   voiceFrames: 0, voicedMs: 0, silenceMs: 0, recMs: 0,
   noiseFloor: 0.01, sens: 1.0, announceQ: [], workers: {}, sendTries: 0,
+  perm: null, permQ: [],
 };
 const V_FRAME_MS = 50;         // VAD poll cadence
 const V_CAL_MS = 500;          // ambient sampling at start to seed the noise floor
@@ -3735,6 +3736,9 @@ async function startVoice() {
   voice.speaking = voice.thinking = voice.recording = voice.transcribing = false;
   voice.announceQ = [];
   voice.workers = {};
+  voice.perm = null;
+  voice.permQ = [];
+  $("voice-perm").hidden = true;
   voice.sens = (settings && settings.voice_sensitivity) || 1.0;
   renderVoiceWorkers();
   $("voice-caption").textContent = "";
@@ -3908,12 +3912,22 @@ async function finishUtterance() {
   voice.transcribing = false;
   if (!text || !voice.active) { idleOrListen(); return; }
   $("voice-caption").innerHTML = `<div class="voice-you">${esc(text)}</div>`;
+  // If a worker is waiting on a yes/no, this utterance answers that -- not a
+  // new request for the delegator.
+  if (voice.perm) {
+    const ans = classifyPermission(text);
+    if (ans) { resolvePerm(ans); return; }
+    toast("Say “yes”, “no”, or “always” — or tap a button.", "info", 3500);
+    setVoiceStatus("Needs your OK — say “yes” or “no”");
+    return;
+  }
   voice.sendTries = 0;
   sendVoiceTurn(text);
 }
 
 function idleOrListen() {
   if (!voice.active) return;
+  if (voice.perm) { setVoiceOrb("listening"); setVoiceStatus("Needs your OK — say “yes” or “no”"); return; }
   if (voice.speaking) { setVoiceOrb("speaking"); setVoiceStatus("Speaking…"); }
   else if (voice.thinking) { setVoiceOrb("thinking"); setVoiceStatus("Thinking…"); }
   else if (voice.ptt) { setVoiceOrb("idle"); setVoiceStatus("Your turn — hold to talk"); }
@@ -3968,16 +3982,77 @@ function processAnnounceQueue() {
   }).catch(() => {});
 }
 
+// -- approve-by-voice: a worker needs an OK for a gated action ------------- //
+function showNextPerm() {
+  if (voice.perm || !voice.permQ.length) return;
+  voice.perm = voice.permQ.shift();
+  const p = voice.perm;
+  $("voice-perm-q").textContent = `“${p.worker}” wants to ${spokenTitle(p.title)}`;
+  $("voice-perm-detail").textContent = (p.preview || "").slice(0, 400);
+  $("voice-perm-always").hidden = !p.always;
+  $("voice-perm-always").textContent = p.always || "Always";
+  $("voice-perm").hidden = false;
+  setVoiceStatus("Needs your OK — say “yes” or “no”");
+}
+function spokenTitle(t) {
+  t = String(t || "do that").split("\n")[0];
+  return t.length > 60 ? t.slice(0, 60) + "…" : t;
+}
+function hidePermCard() {
+  voice.perm = null;
+  $("voice-perm").hidden = true;
+  if (voice.permQ.length) showNextPerm();
+  else idleOrListen();
+}
+function resolvePerm(answer) {
+  if (!voice.perm) return;
+  const rid = voice.perm.rid;
+  try { api().resolve_worker_permission(rid, answer, ""); } catch (e) { /* ignore */ }
+  hidePermCard();
+}
+// Map a spoken reply to an approval answer, or null if it isn't a clear yes/no.
+function classifyPermission(text) {
+  const t = " " + text.toLowerCase().replace(/[^a-z\s]/g, " ") + " ";
+  if (/\balways\b/.test(t)) return "a";
+  if (/\b(yes|yeah|yep|yup|sure|ok|okay|okey|fine|allow|approve|approved|go ahead|do it|go for it|sounds good|please do|affirmative)\b/.test(t)) return "y";
+  if (/\b(no|nope|nah|dont|do not|deny|denied|stop|cancel|skip|don t|negative)\b/.test(t)) return "n";
+  return null;
+}
+
 function renderVoiceWorkers() {
   const el = $("voice-workers");
   if (!el) return;
   const ws = Object.values(voice.workers);
   if (!ws.length) { el.innerHTML = ""; return; }
   el.innerHTML = ws.map((w) => {
-    const cls = w.status === "running" ? "vw-run" : (w.status === "done" ? "vw-done" : "vw-err");
-    const icon = w.status === "running" ? "●" : (w.status === "done" ? "✓" : "✕");
-    return `<div class="voice-worker ${cls}"><span class="vw-icon">${icon}</span>${esc(w.name)}</div>`;
+    const cls = w.status === "running" ? "vw-run"
+      : (w.status === "done" ? "vw-done" : (w.status === "stopped" ? "vw-stop" : "vw-err"));
+    const icon = w.status === "running" ? "●"
+      : (w.status === "done" ? "✓" : (w.status === "stopped" ? "◼" : "✕"));
+    const act = (w.status === "running" && w.activity)
+      ? `<span class="vw-activity">${esc(w.activity)}</span>` : "";
+    return `<div class="voice-worker ${cls}"><span class="vw-icon">${icon}</span>` +
+           `<span class="vw-name">${esc(w.name)}</span>${act}</div>`;
   }).join("");
+}
+
+// Turn a worker's streamed action into a short human activity line.
+function workerActivity(kind, data) {
+  if (kind === "tool_call") {
+    const n = data.name || "working";
+    const map = {
+      edit_file: "editing", write_file: "writing", read_file: "reading",
+      run_powershell: "running a command", run_tests: "running tests",
+      run_test_file: "running tests", grep: "searching", glob: "searching",
+      list_dir: "looking around", web_search: "searching the web",
+    };
+    const verb = map[n] || n.replace(/_/g, " ");
+    const a = data.args || {};
+    const target = a.path || a.pattern || a.query || a.command || "";
+    return target ? `${verb} ${String(target).split(/[\\/]/).pop().slice(0, 40)}` : verb;
+  }
+  if (kind === "stream_start") return "thinking…";
+  return null;
 }
 
 function handleVoiceEvent(ev) {
@@ -4008,13 +4083,29 @@ function handleVoiceEvent(ev) {
     case "tts_reset":
       resetTtsPlayback();
       break;
-    case "worker_update":
-      voice.workers[ev.id] = { name: ev.name, status: ev.status };
+    case "worker_update": {
+      const prev = voice.workers[ev.id] || {};
+      voice.workers[ev.id] = { name: ev.name, status: ev.status, activity: prev.activity || "" };
       renderVoiceWorkers();
       if (ev.status === "done" || ev.status === "error") {
         voice.announceQ.push({ name: ev.name, status: ev.status, result: ev.result || "" });
         processAnnounceQueue();
       }
+      break;
+    }
+    case "subagent_stream": {
+      // Live activity from a background worker's own thread.
+      const w = voice.workers[ev.id];
+      if (w && w.status === "running") {
+        const line = workerActivity(ev.kind, ev);
+        if (line) { w.activity = line; renderVoiceWorkers(); }
+      }
+      break;
+    }
+    case "worker_permission":
+      voice.permQ.push({ rid: ev.rid, worker: ev.worker, title: ev.title,
+                         preview: ev.preview, always: ev.always });
+      showNextPerm();
       break;
     case "voice_turn_complete":
       // The reply is fully generated. Spoken audio may still be draining from
@@ -4059,6 +4150,9 @@ function pttRelease() {
 
 $("voice-chip").addEventListener("click", () => { if (voice.active) stopVoice(); else startVoice(); });
 $("voice-close").addEventListener("click", stopVoice);
+$("voice-perm-yes").addEventListener("click", () => resolvePerm("y"));
+$("voice-perm-always").addEventListener("click", () => resolvePerm("a"));
+$("voice-perm-no").addEventListener("click", () => resolvePerm("n"));
 $("voice-ptt-toggle").addEventListener("click", () => setVoicePtt(!voice.ptt));
 $("voice-ptt-btn").addEventListener("mousedown", pttPress);
 $("voice-ptt-btn").addEventListener("mouseup", pttRelease);

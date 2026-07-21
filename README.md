@@ -384,6 +384,16 @@ tells you out loud. Ask "how's it going?" any time and it'll check.
 - **Barge-in** — start talking while it's speaking (or thinking) and it stops
   *and* abandons the reply it was generating, so it actually yields to you
   instead of talking over you a moment later.
+- **Steer and stop work by voice** — "also add a dark theme," "stop the login
+  fix," "how's the tests task going?" — it passes the change to the running
+  worker, cancels it, or reports back, without restarting anything.
+- **Approve by voice** — when a worker needs permission for something (say,
+  running a command), it *asks you out loud* ("the refactor wants to run the
+  tests — okay?") and you answer "yes" / "no" / "always" (or tap the card).
+  This is what lets hands-free work happen in *ask* mode instead of stalling —
+  you don't have to hand it full-auto to use your voice.
+- **See what it's doing** — each worker shows a live one-line status (editing
+  auth.py, running tests, …) so the work isn't a black box while it runs.
 - **Sensitivity** — one slider in **Settings → Dictation** if you want it to
   pick up quieter speech, or to ignore more background noise.
 - **Warm start** — opening a voice session pre-loads the speech models in the
@@ -391,11 +401,11 @@ tells you out loud. Ask "how's it going?" any time and it'll check.
 - Transcription is the local dictation engine above; the spoken replies use
   the local voice (Kokoro) — both offline, no API cost.
 
-The workers run under your current **permission mode**, exactly like parallel
-sub-agents: in *ask* mode they're effectively read-only (they'll research and
-report but can't change files without a prompt you can't answer by voice), so
-switch to *auto-edit* or *full-auto* before a voice session if you want them to
-actually edit code.
+The workers run under your current **permission mode**, like parallel
+sub-agents. In *ask* mode, a gated action (a file write, a command) now asks
+you **out loud** and waits for your spoken yes/no — so you can stay hands-free
+and still keep control. Prefer no interruptions? Switch to *auto-edit* or
+*full-auto* before the session and workers just proceed.
 
 ### Backups
 

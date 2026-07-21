@@ -253,6 +253,16 @@
     <div id="voice-orb" class="voice-orb" aria-hidden="true"><span class="voice-orb-core"></span></div>
     <div id="voice-status" class="voice-status">Starting…</div>
     <div id="voice-caption" class="voice-caption" aria-live="polite"></div>
+    <div id="voice-perm" class="voice-perm" hidden>
+      <div class="voice-perm-q" id="voice-perm-q"></div>
+      <div class="voice-perm-detail" id="voice-perm-detail"></div>
+      <div class="voice-perm-actions">
+        <button id="voice-perm-yes" class="btn btn-primary">Approve</button>
+        <button id="voice-perm-always" class="btn btn-ghost" hidden>Always</button>
+        <button id="voice-perm-no" class="btn btn-ghost">Deny</button>
+      </div>
+      <div class="row-sub voice-perm-hint">…or just say “yes” or “no”.</div>
+    </div>
     <div id="voice-workers" class="voice-workers" aria-live="polite"></div>
     <div class="voice-foot">
       <button id="voice-ptt-btn" class="btn btn-primary voice-ptt-btn" hidden>Hold to talk</button>

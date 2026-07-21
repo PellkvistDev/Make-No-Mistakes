@@ -27,7 +27,8 @@ from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
                     CONTROL_CHROME_TOOL, CONVERSATIONAL_SCHEMAS,
                     DISPATCH_WORKER_TOOL, GENERATE_IMAGE_TOOL, PREVIEW_PAGE_TOOL,
                     REMEMBER_TOOL, REVIEW_CHANGES_TOOL, SHOW_HTTP_CAT_TOOL,
-                    SHOW_IMAGE_TOOL, SPEAK_TOOL, SUBAGENT_TOOL, TOOL_SCHEMAS,
+                    SHOW_IMAGE_TOOL, SPEAK_TOOL, STEER_WORKER_TOOL,
+                    STOP_WORKER_TOOL, SUBAGENT_TOOL, TOOL_SCHEMAS,
                     VIEW_IMAGE_TOOL, ToolError, clean_todo_items, execute_tool,
                     set_call_token, set_workdir)
 
@@ -46,6 +47,16 @@ MAX_CONTINUATIONS = 3
 def _first_line(text: str, limit: int = 280) -> str:
     line = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
     return line[:limit]
+
+
+def _spoken_permission(title: str, limit: int = 90) -> str:
+    """A permission prompt title condensed into a phrase fit to speak aloud
+    ('Run command: npm test' -> 'run command: npm test'), so the voice prompt
+    sounds natural rather than reading a UI label."""
+    t = (title or "do something").strip().splitlines()[0]
+    if t and t[0].isupper() and not t[:3].isupper():  # keep acronyms as-is
+        t = t[0].lower() + t[1:]
+    return t[:limit]
 
 
 def _msg_text(m: dict) -> str:
@@ -86,11 +97,22 @@ class _CaptureEvents(AgentEvents):
     AgentEvents it also auto-denies any permission prompt (so a sub-agent
     can only do what the current mode allows without asking)."""
 
-    def __init__(self, forward, aid: str):
+    def __init__(self, forward, aid: str, ask=None):
         self.text = ""
         self.last_error = ""  # last error()'d message, for the report fallback
         self._forward = forward
         self._aid = aid
+        # Optional interactive permission handler: ask(title, preview,
+        # always_label) -> 'y' | 'a' | ('n', feedback). Only set for workers
+        # dispatched in conversational (voice) mode, so a worker's gated action
+        # can be approved out loud instead of auto-denied. None keeps the
+        # default sub-agent behavior (auto-deny).
+        self._ask = ask
+
+    def ask_permission(self, title: str, preview: str, always_label=None):
+        if self._ask is not None:
+            return self._ask(title, preview, always_label)
+        return super().ask_permission(title, preview, always_label)
 
     def stream_start(self) -> None:
         self._forward(self._aid, "stream_start")
@@ -187,6 +209,11 @@ class Agent:
         self._workers: dict[str, dict] = {}
         self._workers_lock = threading.Lock()
         self._worker_seq = 0
+        # Approve-by-voice: a worker's gated action blocks on one of these until
+        # the user answers out loud (or via the overlay buttons). rid -> {event,
+        # answer}. Only used in conversational mode.
+        self._worker_perms: dict[str, dict] = {}
+        self._worker_perms_lock = threading.Lock()
         self._emit_lock = threading.Lock()  # serialize sub-agent progress emits
         # Steering: a message the user sends while this agent is mid-turn.
         # It doesn't interrupt the current model call -- it's queued (one at
@@ -1060,6 +1087,11 @@ class Agent:
                                                    args.get("task", ""))
                 elif name == CHECK_WORKERS_TOOL:
                     output = self._check_workers()
+                elif name == STEER_WORKER_TOOL:
+                    output = self._steer_worker_tool(args.get("worker", ""),
+                                                     args.get("message", ""))
+                elif name == STOP_WORKER_TOOL:
+                    output = self._stop_worker_tool(args.get("worker", ""))
                 elif name == SUBAGENT_TOOL:
                     if not self.allow_subagents:
                         raise ToolError("sub-agents cannot spawn further sub-agents")
@@ -1215,7 +1247,12 @@ class Agent:
         # across concurrent requests; the rate limiter IS shared (see
         # _run_subagents) so all sub-agents' requests stay spaced out.
         client = ZaiClient(self.client.api_key, self.client.base_url, rate_limiter=limiter)
-        sink = _CaptureEvents(forward=self._emit_subagent_stream, aid=aid)
+        # In voice mode a worker's gated action is approved out loud (see
+        # _worker_ask) instead of auto-denied, so hands-free work isn't stuck in
+        # 'ask' mode. Non-conversational sub-agents keep the auto-deny default.
+        ask = (lambda title, preview, always: self._worker_ask(aid, title, preview, always)) \
+            if self.conversational else None
+        sink = _CaptureEvents(forward=self._emit_subagent_stream, aid=aid, ask=ask)
         sub = Agent(self.cfg, client, events=sink, allow_subagents=False,
                     workdir=self.workdir)
         # Same work-tree, same pre-turn baseline -- so review_changes works
@@ -1296,9 +1333,14 @@ class Agent:
         try:
             report, usage = self._run_single_subagent(
                 name, task, self._worker_limiter, wid)
+            # A worker the user stopped (cancelled) may still return a partial
+            # report -- don't flip its "stopped" status back to "done".
+            stopped = False
             with self._workers_lock:
                 w = self._workers.get(wid)
-                if w is not None:
+                if w is not None and w["status"] == "stopped":
+                    stopped = True
+                elif w is not None:
                     w["status"], w["result"] = "done", report
             # Sub-agent token usage is folded in here, on the worker thread.
             # Usage.add isn't locked; guard it with the emit lock (also held by
@@ -1306,17 +1348,129 @@ class Agent:
             with self._emit_lock:
                 if usage is not None:
                     self.session_usage.add(usage)
-            self._emit_subagent(wid, name, "done", summary=_first_line(report))
-            self.events.worker_update(wid, name, "done",
-                                      summary=_first_line(report), result=report)
+            if not stopped:
+                self._emit_subagent(wid, name, "done", summary=_first_line(report))
+                self.events.worker_update(wid, name, "done",
+                                          summary=_first_line(report), result=report)
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             with self._workers_lock:
                 w = self._workers.get(wid)
-                if w is not None:
+                if w is not None and w["status"] != "stopped":
                     w["status"], w["error"] = "error", err
             self._emit_subagent(wid, name, "error", summary=err[:280])
             self.events.worker_update(wid, name, "error", summary=err[:280], result=err)
+
+    def _resolve_worker(self, ident: str) -> str | None:
+        """Map a spoken/typed worker reference ('wk1', or a name like 'dark
+        mode') to a worker id. Prefers a running match. Returns None if nothing
+        matches."""
+        ident = str(ident or "").strip().lower()
+        if not ident:
+            return None
+        with self._workers_lock:
+            workers = list(self._workers.values())
+        # Exact id first.
+        for w in workers:
+            if w["id"].lower() == ident:
+                return w["id"]
+        # Then by name (prefer running), exact-ish then loose contains.
+        def name_hit(w):
+            nm = w["name"].lower()
+            return ident == nm or ident in nm or nm in ident
+        running = [w for w in workers if w["status"] == "running" and name_hit(w)]
+        if running:
+            return running[0]["id"]
+        any_hit = [w for w in workers if name_hit(w)]
+        return any_hit[0]["id"] if any_hit else None
+
+    def _steer_worker_tool(self, ident: str, message: str) -> str:
+        message = str(message or "").strip()
+        if not message:
+            raise ToolError("steer_worker needs a non-empty 'message'")
+        wid = self._resolve_worker(ident)
+        if wid is None:
+            raise ToolError(f"No worker matches '{ident}'. Use check_workers to see them.")
+        with self._workers_lock:
+            name = self._workers.get(wid, {}).get("name", wid)
+            status = self._workers.get(wid, {}).get("status")
+        if status != "running":
+            return f"Worker '{name}' isn't running anymore, so there's nothing to steer."
+        if self.steer_subagent(wid, message):
+            return f"Passed that along to '{name}'."
+        return (f"'{name}' already has a queued instruction it hasn't picked up yet; "
+                f"try again in a moment.")
+
+    def _stop_worker_tool(self, ident: str) -> str:
+        wid = self._resolve_worker(ident)
+        if wid is None:
+            raise ToolError(f"No worker matches '{ident}'. Use check_workers to see them.")
+        with self._workers_lock:
+            w = self._workers.get(wid, {})
+            name = w.get("name", wid)
+            status = w.get("status")
+        if status != "running":
+            return f"Worker '{name}' has already finished."
+        # Cancel its in-flight run; the worker thread marks the registry.
+        with self._active_subagents_lock:
+            sub = self._active_subagents.get(wid)
+        if sub is not None:
+            sub.request_cancel()
+        with self._workers_lock:
+            if wid in self._workers and self._workers[wid]["status"] == "running":
+                self._workers[wid]["status"] = "stopped"
+        self._emit_subagent(wid, name, "error", summary="stopped by user")
+        return f"Stopping '{name}'."
+
+    def _worker_ask(self, wid: str, title: str, preview: str, always_label):
+        """Called ON A WORKER THREAD when that worker hits a permission-gated
+        action in voice mode. Surfaces the request to the user (spoken + an
+        overlay card) and BLOCKS until they answer -- so hands-free work isn't
+        stuck in 'ask' mode. Returns 'y' | 'a' | ('n', feedback)."""
+        with self._workers_lock:
+            name = self._workers.get(wid, {}).get("name", wid)
+        rid = uuid.uuid4().hex
+        entry = {"event": threading.Event(), "answer": ("n", "")}
+        with self._worker_perms_lock:
+            self._worker_perms[rid] = entry
+        # Speak a short, plain-language version and show the full detail on-card.
+        spoken = f"The {name} task wants to {_spoken_permission(title)}. Should I let it?"
+        try:
+            self.events.worker_permission(rid, name, title, preview,
+                                          spoken=spoken, always=always_label or "")
+        except Exception:
+            pass
+        # Block this worker until answered (or a long timeout, then deny).
+        answered = entry["event"].wait(timeout=300)
+        with self._worker_perms_lock:
+            self._worker_perms.pop(rid, None)
+        if not answered:
+            return ("n", "no answer from the user; skipped for now")
+        return entry["answer"]
+
+    def resolve_worker_permission(self, rid: str, answer, feedback: str = "") -> bool:
+        """Deliver the user's answer ('y'|'a'|'n') to a blocked worker. Returns
+        False if that request is unknown/expired."""
+        with self._worker_perms_lock:
+            entry = self._worker_perms.get(rid)
+        if not entry:
+            return False
+        entry["answer"] = ("n", feedback or "") if answer == "n" else answer
+        entry["event"].set()
+        return True
+
+    def pending_worker_permission(self) -> bool:
+        with self._worker_perms_lock:
+            return bool(self._worker_perms)
+
+    def deny_pending_worker_permissions(self, feedback: str = "") -> None:
+        """Release every worker currently blocked on a permission prompt with a
+        denial -- so closing voice mode doesn't leave workers hung forever."""
+        with self._worker_perms_lock:
+            entries = list(self._worker_perms.values())
+        for entry in entries:
+            entry["answer"] = ("n", feedback or "voice mode was closed")
+            entry["event"].set()
 
     def _check_workers(self) -> str:
         """A plain-text roundup of every worker dispatched this chat, for the
@@ -1334,6 +1488,8 @@ class Agent:
                 lines.append(f"- {w['name']} ({w['id']}): still working — {w['task'][:120]}")
             elif w["status"] == "done":
                 lines.append(f"- {w['name']} ({w['id']}): DONE — {_first_line(w['result'])}")
+            elif w["status"] == "stopped":
+                lines.append(f"- {w['name']} ({w['id']}): STOPPED by the user")
             else:
                 lines.append(f"- {w['name']} ({w['id']}): FAILED — {w['error']}")
         return "\n".join(lines)

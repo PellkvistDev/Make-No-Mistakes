@@ -76,6 +76,14 @@ class AgentEvents:
         data-URL `image`, for a UI to mirror the browser. No-op without a UI."""
 
     # -- background workers (conversational / speech-to-speech mode) --------- #
+    def worker_permission(self, rid: str, worker: str, title: str, preview: str,
+                          spoken: str = "", always: str = "") -> None:
+        """A background worker hit a permission-gated action in voice mode. The
+        UI should surface it (spoken + an approve/deny card) and route the
+        answer back via resolve_worker_permission. No-op unless a UI is attached
+        (base = the worker's default auto-deny still applies via _CaptureEvents
+        only when no ask handler is wired)."""
+
     def worker_update(self, id: str, name: str, status: str,
                       summary: str = "", result: str = "") -> None:
         """A fire-and-forget background worker (dispatched by the conversational

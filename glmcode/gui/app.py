@@ -328,8 +328,13 @@ class WebEvents(AgentEvents):
         if not text.strip():
             return
         self._ensure_tts_worker()
-        self._tts_seq += 1
-        self._tts_queue.put((self._tts_seq, text))
+        # In voice mode this is called from the streaming turn thread AND from
+        # worker threads (a spoken permission prompt), so the seq assignment and
+        # the queue put must be atomic together -- otherwise a race can assign
+        # out-of-order seqs and stall the frontend's in-order playback.
+        with self._stream_lock:
+            self._tts_seq += 1
+            self._tts_queue.put((self._tts_seq, text))
 
     def _ensure_tts_worker(self) -> None:
         if self._tts_worker_started:
@@ -466,6 +471,13 @@ class WebEvents(AgentEvents):
     def worker_update(self, id, name, status, summary="", result=""):
         self.emit("worker_update", id=id, name=name, status=status,
                   summary=summary, result=result)
+
+    def worker_permission(self, rid, worker, title, preview, spoken="", always=""):
+        # Speak the question (so it's answerable hands-free) and show a card.
+        if spoken:
+            self._enqueue_tts_chunk(spoken)
+        self.emit("worker_permission", rid=rid, worker=worker, title=title,
+                  preview=preview[:2000], spoken=spoken, always=always)
 
     # permissions ------------------------------------------------------------
     def ask_permission(self, title, preview, always_label=None):
@@ -1770,6 +1782,10 @@ class Api:
             self._ensure_convo(cs)
             self._prewarm_speech()
             return {"ok": True, "voice_sid": self._voice_sid(cs.sid)}
+        # Turning voice off: release any workers blocked waiting for a spoken OK
+        # (their approve/deny card is going away), so they don't hang.
+        if cs.convo_agent is not None:
+            cs.convo_agent.deny_pending_worker_permissions("voice mode was closed")
         return {"ok": True}
 
     def _prewarm_speech(self) -> None:
@@ -1803,6 +1819,16 @@ class Api:
         except Exception:
             pass
         return {"ok": True}
+
+    def resolve_worker_permission(self, rid: str, answer: str, feedback: str = ""):
+        """Answer a background worker's permission request (approve-by-voice or
+        the overlay buttons). answer: 'y' (once), 'a' (always this kind), 'n'."""
+        cs = self._active
+        if cs is None or cs.convo_agent is None:
+            return {"ok": False}
+        ans = answer if answer in ("y", "a", "n") else "n"
+        ok = cs.convo_agent.resolve_worker_permission(rid, ans, feedback)
+        return {"ok": bool(ok)}
 
     def send_voice(self, text: str):
         """One spoken user turn to the conversational agent. Runs on its own

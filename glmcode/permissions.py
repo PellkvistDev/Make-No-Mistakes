@@ -183,7 +183,7 @@ class PermissionEngine:
         # still gated inside the worker (in "ask" mode a worker is effectively
         # read-only, like a sub-agent). Prompting the voice agent itself is
         # pointless (it can't answer a dialog mid-conversation), so allow these.
-        if name in ("dispatch_worker", "check_workers"):
+        if name in ("dispatch_worker", "check_workers", "steer_worker", "stop_worker"):
             return Decision(True)
 
         # A provably read-only shell command (git status, ls, cat, grep, ...)
