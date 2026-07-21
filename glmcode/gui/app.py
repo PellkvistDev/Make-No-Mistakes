@@ -891,13 +891,19 @@ class Api:
     # -- background ---------------------------------------------------------- #
 
     def get_background(self) -> str:
-        p = Path(self._cfg.background_path) if self._cfg.background_path else None
-        if p and p.is_file():
-            try:
+        """Data URI for a CUSTOM background only. The DEFAULT background is
+        served straight from disk by CSS (#bg loads bg-default.jpg relative to
+        the page), so it never depends on this call, boot timing, or the file
+        being base64-embeddable -- an empty string means "use the CSS default".
+        (Regression: reading/encoding DEFAULT_BG here used to be able to raise
+        or come back blank, leaving a fresh install with no background at all.)"""
+        try:
+            p = Path(self._cfg.background_path) if self._cfg.background_path else None
+            if p and p.is_file():
                 return _data_uri(p)
-            except OSError:
-                pass
-        return _data_uri(DEFAULT_BG)
+        except Exception:
+            pass
+        return ""
 
     def pick_background(self):
         picked = self._window.create_file_dialog(

@@ -3043,8 +3043,16 @@ $("bg-reset").addEventListener("click", async () => {
   if (res && res.background) setBackground(res.background);
 });
 function setBackground(uri) {
-  $("bg").style.backgroundImage = `url("${uri}")`;
-  $("bg-preview").src = uri;
+  // A custom background overrides the CSS default via inline style; an empty
+  // uri clears that override so the default (loaded from disk in style.css)
+  // shows through -- never blanks the screen.
+  if (uri) {
+    $("bg").style.backgroundImage = `url("${uri}")`;
+    $("bg-preview").src = uri;
+  } else {
+    $("bg").style.backgroundImage = "";
+    $("bg-preview").src = "bg-default.jpg";
+  }
 }
 
 $("chat-clear").addEventListener("click", async () => {
