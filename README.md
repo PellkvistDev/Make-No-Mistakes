@@ -374,11 +374,20 @@ runs autonomously on your project and *immediately keeps listening*, so you
 can pile on more requests while earlier work runs. When a worker finishes, it
 tells you out loud. Ask "how's it going?" any time and it'll check.
 
-- **Hands-free by default** — a simple voice-activity detector notices when
-  you start and stop talking. If your mic or room makes that unreliable,
-  flip to **push-to-talk** (hold Space, or the on-screen button) in the voice
-  panel — no endpointing, no echo, no false triggers.
-- **Barge-in** — start talking while it's speaking and it stops to listen.
+- **Hands-free by default** — an *adaptive* voice-activity detector calibrates
+  to your room's noise floor when the session opens and keeps tracking it, so it
+  works in a quiet room or a noisy café without hand-tuning. The recorder starts
+  on your first loud frame (so the first word isn't clipped) and keeps the clip
+  only once it hears enough real speech. If your mic or room still makes it
+  unreliable, flip to **push-to-talk** (hold Space, or the on-screen button) —
+  no endpointing, no echo, no false triggers.
+- **Barge-in** — start talking while it's speaking (or thinking) and it stops
+  *and* abandons the reply it was generating, so it actually yields to you
+  instead of talking over you a moment later.
+- **Sensitivity** — one slider in **Settings → Dictation** if you want it to
+  pick up quieter speech, or to ignore more background noise.
+- **Warm start** — opening a voice session pre-loads the speech models in the
+  background, so the first thing you say isn't stuck behind a cold model load.
 - Transcription is the local dictation engine above; the spoken replies use
   the local voice (Kokoro) — both offline, no API cost.
 

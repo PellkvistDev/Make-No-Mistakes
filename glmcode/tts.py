@@ -113,6 +113,20 @@ def _load_kokoro(status: StatusFn = None):
     return _kokoro
 
 
+def prewarm() -> bool:
+    """Load the TTS model into memory ahead of the first spoken reply (so voice
+    mode doesn't pay a cold-load stall on its first sentence). Only warms when
+    already installed/downloaded -- never kicks off the first-use install as a
+    surprise. Returns True if the model is resident. Safe on a bg thread."""
+    if not ready():
+        return False
+    try:
+        _load_kokoro()
+        return True
+    except Exception:
+        return False
+
+
 # The standard Kokoro-82M English voice set, for the UI to show BEFORE the
 # model is downloaded (loading it just to list voices isn't worth a
 # multi-hundred-MB fetch). Once loaded, list_voices() returns the real,

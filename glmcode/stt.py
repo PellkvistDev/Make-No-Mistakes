@@ -102,6 +102,24 @@ def _load_model(model: str, status: StatusFn = None):
     return m
 
 
+def prewarm(model: str = DEFAULT_MODEL) -> bool:
+    """Load the model into the cache ahead of the first transcription, so voice
+    mode's first utterance isn't stuck behind a cold model load. Only warms if
+    everything is already installed/downloaded -- never triggers the (large)
+    first-use install/download as a surprise side effect. Returns True if a
+    model is now resident. Safe to call from a background thread."""
+    if model not in MODELS and "/" not in model:
+        model = DEFAULT_MODEL
+    if not ready(model):
+        return False
+    try:
+        with _lock:
+            _load_model(model)
+        return True
+    except Exception:
+        return False
+
+
 def transcribe(audio, model: str = DEFAULT_MODEL, language: str = "",
                status: StatusFn = None) -> str:
     """Transcribe speech to text. `audio` is a file path (any format

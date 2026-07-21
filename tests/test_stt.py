@@ -90,6 +90,24 @@ def test_model_is_cached_between_calls(monkeypatch):
     assert calls["n"] == 1   # loaded once, reused
 
 
+def test_prewarm_noop_when_not_ready(monkeypatch):
+    # Never trigger the (large) first-use install/download as a side effect of
+    # pre-warming -- only warm when everything is already present.
+    monkeypatch.setattr(stt, "ready", lambda m=stt.DEFAULT_MODEL: False)
+    loaded = {"n": 0}
+    monkeypatch.setattr(stt, "_load_model", lambda *a, **k: loaded.__setitem__("n", loaded["n"] + 1))
+    assert stt.prewarm("base") is False
+    assert loaded["n"] == 0
+
+
+def test_prewarm_loads_when_ready(monkeypatch):
+    monkeypatch.setattr(stt, "ready", lambda m=stt.DEFAULT_MODEL: True)
+    loaded = {"n": 0}
+    monkeypatch.setattr(stt, "_load_model", lambda *a, **k: loaded.__setitem__("n", loaded["n"] + 1))
+    assert stt.prewarm("base") is True
+    assert loaded["n"] == 1
+
+
 def test_hf_repo_resolution():
     assert stt._hf_repo("base") == "Systran/faster-whisper-base"
     assert stt._hf_repo("distil-small.en") == "distil-whisper/distil-small.en"

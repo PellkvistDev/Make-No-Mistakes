@@ -141,6 +141,7 @@ class Config:
     stt_model: str = "base"          # faster-whisper model size for voice input
     stt_language: str = ""           # "" = auto-detect language
     tts_speed: float = 1.0           # Kokoro speech speed, 0.5-2.0
+    voice_sensitivity: float = 1.0   # mic sensitivity for voice mode, 0.5-2.0 (higher = picks up quieter speech)
     # Custom model providers: [{"name", "base_url", "api_key", "models": [..]}].
     # Any OpenAI-compatible endpoint works; chats pick a provider+model in
     # Settings (per chat -- the free z.ai default stays the default).

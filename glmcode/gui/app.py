@@ -834,6 +834,7 @@ class Api:
             "background_custom": bool(c.background_path),
             "read_aloud": c.read_aloud, "tts_voice": c.tts_voice, "tts_speed": c.tts_speed,
             "stt_model": c.stt_model, "stt_language": c.stt_language,
+            "voice_sensitivity": c.voice_sensitivity,
             "notifications": c.notifications, "reduce_effects": c.reduce_effects,
             "browser_headless": c.browser_headless,
             "browser_keep_logins": c.browser_keep_logins,
@@ -862,6 +863,11 @@ class Api:
             c.stt_model = value.strip()
         elif key == "stt_language" and isinstance(value, str):
             c.stt_language = value.strip()
+        elif key == "voice_sensitivity":
+            try:
+                c.voice_sensitivity = min(2.0, max(0.5, float(value)))
+            except (TypeError, ValueError):
+                pass
         elif key == "tts_speed":
             try:
                 c.tts_speed = min(2.0, max(0.5, float(value)))
@@ -1754,13 +1760,48 @@ class Api:
 
     def voice_mode(self, on: bool):
         """Turn speech-to-speech mode on/off for the active chat. Turning it on
-        just readies the conversational agent; the audio loop lives in the UI."""
+        readies the conversational agent and pre-warms the local speech models
+        (so the first utterance isn't stuck behind a cold load); the audio loop
+        lives in the UI."""
         cs = self._active
         if cs is None:
             return {"error": "no active chat — start a New Chat first"}
         if on:
             self._ensure_convo(cs)
+            self._prewarm_speech()
             return {"ok": True, "voice_sid": self._voice_sid(cs.sid)}
+        return {"ok": True}
+
+    def _prewarm_speech(self) -> None:
+        """Load the STT + TTS models in the background so voice mode's first
+        turn is fast. Best-effort and non-blocking; each only warms if already
+        installed (never triggers a surprise first-use download)."""
+        model = self._cfg.stt_model or "base"
+
+        def warm():
+            try:
+                from .. import stt as stt_mod
+                stt_mod.prewarm(model)
+            except Exception:
+                pass
+            try:
+                from .. import tts as tts_mod
+                tts_mod.prewarm()
+            except Exception:
+                pass
+        threading.Thread(target=warm, daemon=True).start()
+
+    def cancel_voice(self):
+        """Interrupt the conversational agent's current reply (barge-in): stop
+        it generating and drop any queued worker announcements, so when the user
+        cuts in it actually stops instead of talking over them."""
+        cs = self._active
+        if cs is None or cs.convo_agent is None:
+            return {"ok": True}
+        try:
+            cs.convo_agent.request_cancel()
+        except Exception:
+            pass
         return {"ok": True}
 
     def send_voice(self, text: str):

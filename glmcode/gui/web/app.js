@@ -2660,6 +2660,21 @@ $("stt-language").addEventListener("change", async () => {
   settings = await api().set_setting("stt_language", $("stt-language").value);
 });
 
+function sensitivityLabel(v) {
+  if (v <= 0.7) return "Less sensitive — needs louder, clearer speech";
+  if (v >= 1.6) return "Very sensitive — picks up quiet speech (and more noise)";
+  if (v >= 1.2) return "More sensitive";
+  return "Normal";
+}
+$("voice-sensitivity").addEventListener("input", () => {
+  $("voice-sensitivity-label").textContent = sensitivityLabel(parseFloat($("voice-sensitivity").value));
+});
+$("voice-sensitivity").addEventListener("change", async () => {
+  const v = parseFloat($("voice-sensitivity").value);
+  settings = await api().set_setting("voice_sensitivity", v);
+  voice.sens = v;  // take effect immediately if a voice session is open
+});
+
 /* ---------------------------------------------- model providers (BYOM) -- */
 
 let providersCache = null;
@@ -3069,6 +3084,9 @@ function syncSettingsUI() {
   const spd = settings.tts_speed || 1.0;
   $("voice-speed").value = spd;
   $("voice-speed-label").textContent = spd.toFixed(1) + "x";
+  const vs = settings.voice_sensitivity || 1.0;
+  $("voice-sensitivity").value = vs;
+  $("voice-sensitivity-label").textContent = sensitivityLabel(vs);
   applyModeChip();
   applyReadAloudChip();
 }
@@ -3659,32 +3677,44 @@ async function boot() {
    can queue work by voice without touching the keyboard. When a worker finishes
    it tells you out loud.
 
-   The hard parts of a live audio loop -- endpointing (when did you stop
-   talking), barge-in (cutting in while it speaks), and echo (not hearing its
-   own voice as your input) -- are handled with a simple energy VAD and generous
-   timing; tune the constants below for your mic/room. Push-to-talk (hold Space,
-   or the on-screen button) sidesteps all three when hands-free misbehaves. */
+   Endpointing (when did you stop talking) uses an ADAPTIVE energy VAD: it
+   calibrates to the room's noise floor at start and keeps tracking it, so it
+   works in a quiet room or a noisy one without hand-tuning. The recorder starts
+   on the very first loud frame (so the first word isn't clipped) and the clip
+   is kept only once enough real speech is seen. Barge-in (talking over its
+   reply) cancels the reply on the backend AND stops playback, so it actually
+   yields to you. A push-to-talk fallback (hold Space / the button) sidesteps
+   the whole VAD when a mic or room makes hands-free unreliable. */
 
 const voice = {
-  active: false, ptt: false, stream: null, ctx: null, analyser: null,
-  data: null, timer: 0, rec: null, chunks: [], recording: false, discard: false,
-  speaking: false, transcribing: false, voiceFrames: 0, silenceMs: 0,
-  speechMs: 0, announceQ: [], workers: {},
+  active: false, ptt: false, stream: null, ctx: null, analyser: null, data: null,
+  timer: 0, rec: null, chunks: [], recording: false, confirmed: false, discard: false,
+  speaking: false, thinking: false, transcribing: false, turnComplete: true,
+  voiceFrames: 0, voicedMs: 0, silenceMs: 0, recMs: 0,
+  noiseFloor: 0.01, sens: 1.0, announceQ: [], workers: {}, sendTries: 0,
 };
-// Energy VAD tuning (RMS 0..1 of the mic signal). Higher = needs louder input.
-const V_START = 0.020;        // onset: above this counts as speech
-const V_STOP = 0.012;         // offset: below this counts as silence (hysteresis)
-const V_BARGE = 0.050;        // must clear this to cut in over our own TTS (echo guard)
-const V_ONSET_MS = 120;       // sustained sound before we start recording
-const V_SILENCE_MS = 850;     // trailing silence that ends an utterance
-const V_MIN_SPEECH_MS = 350;  // ignore blips shorter than this
-const V_FRAME_MS = 50;        // VAD poll cadence
+const V_FRAME_MS = 50;         // VAD poll cadence
+const V_CAL_MS = 500;          // ambient sampling at start to seed the noise floor
+const V_START_MULT = 3.0;      // start threshold  = noiseFloor * this
+const V_STOP_MULT = 1.8;       // stop threshold   = noiseFloor * this (hysteresis)
+const V_BARGE_MULT = 5.0;      // to cut in over our own TTS, clear noiseFloor * this
+const V_ABS_MIN = 0.006;       // threshold floor, so a silent room still needs SOME sound
+const V_ONSET_MS = 100;        // voiced time before an utterance is "confirmed" (kept)
+const V_SILENCE_MS = 750;      // trailing silence that ends a confirmed utterance
+const V_BLIP_MS = 300;         // unconfirmed clip abandoned after this much silence
+const V_MAX_UNCONFIRMED_MS = 1500;  // give up on a clip that never becomes real speech
+const V_NF_ADAPT = 0.02;       // how fast the idle noise-floor estimate tracks the room
+
+const startThresh = () => Math.max(V_ABS_MIN, voice.noiseFloor * V_START_MULT) / voice.sens;
+const stopThresh = () => Math.max(V_ABS_MIN * 0.7, voice.noiseFloor * V_STOP_MULT) / voice.sens;
+const bargeThresh = () => Math.max(V_ABS_MIN * 2, voice.noiseFloor * V_BARGE_MULT) / voice.sens;
 
 function setVoiceStatus(text) { const el = $("voice-status"); if (el) el.textContent = text; }
 function setVoiceOrb(state) {
   const orb = $("voice-orb");
   if (orb) orb.className = "voice-orb voice-orb-" + state;
 }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function startVoice() {
   if (voice.active) return;
@@ -3702,8 +3732,10 @@ async function startVoice() {
     return;
   }
   voice.active = true;
+  voice.speaking = voice.thinking = voice.recording = voice.transcribing = false;
   voice.announceQ = [];
   voice.workers = {};
+  voice.sens = (settings && settings.voice_sensitivity) || 1.0;
   renderVoiceWorkers();
   $("voice-caption").textContent = "";
   $("voice-overlay").hidden = false;
@@ -3718,6 +3750,11 @@ async function startVoice() {
   voice.data = new Uint8Array(voice.analyser.fftSize);
   src.connect(voice.analyser);
   onTtsIdle = onVoiceTtsIdle;
+  // Calibrate to the room: sample ambient energy briefly and seed the noise
+  // floor from it, so the very first utterance already has sane thresholds.
+  if (!voice.ptt) { setVoiceStatus("Calibrating to the room…"); setVoiceOrb("thinking"); }
+  await calibrateNoiseFloor();
+  if (!voice.active) return;  // closed during calibration
   if (voice.ptt) {
     setVoiceStatus("Push-to-talk — hold Space or the button");
     setVoiceOrb("idle");
@@ -3728,11 +3765,26 @@ async function startVoice() {
   voice.timer = setInterval(vadTick, V_FRAME_MS);
 }
 
+async function calibrateNoiseFloor() {
+  const samples = [];
+  const n = Math.max(4, Math.round(V_CAL_MS / V_FRAME_MS));
+  for (let i = 0; i < n && voice.active; i++) {
+    samples.push(micEnergy());
+    await sleep(V_FRAME_MS);
+  }
+  if (!samples.length) return;
+  samples.sort((a, b) => a - b);
+  const median = samples[Math.floor(samples.length / 2)];
+  // A little above the median ambient reading, clamped to a sane band.
+  voice.noiseFloor = Math.min(0.05, Math.max(0.004, median * 1.3 || 0.01));
+}
+
 function stopVoice() {
   if (!voice.active && !voice.stream) return;
   voice.active = false;
   onTtsIdle = null;
-  bargeInTts();
+  resetTtsPlayback();
+  voice.speaking = voice.thinking = false;
   if (voice.timer) { clearInterval(voice.timer); voice.timer = 0; }
   try { if (voice.rec && voice.recording) voice.rec.stop(); } catch (e) { /* ignore */ }
   voice.recording = false;
@@ -3754,33 +3806,46 @@ function micEnergy() {
   return Math.sqrt(sum / voice.data.length);
 }
 
-// Hands-free endpointing state machine. Skipped entirely in push-to-talk mode
-// (there, the button/Space drives start/stop directly).
+// Adaptive endpointing state machine. Skipped in push-to-talk mode (there the
+// button/Space drives start/stop directly).
 function vadTick() {
   if (!voice.active || voice.ptt) return;
   const e = micEnergy();
   const orb = $("voice-orb");
-  if (orb) orb.style.setProperty("--amp", Math.min(1, e / 0.1).toFixed(3));
-  if (voice.recording) {
-    voice.speechMs += V_FRAME_MS;
-    if (e > V_STOP) voice.silenceMs = 0;
-    else voice.silenceMs += V_FRAME_MS;
-    if (voice.silenceMs >= V_SILENCE_MS) endUtterance();
-    return;
-  }
+  if (orb) orb.style.setProperty("--amp", Math.min(1, e / (voice.noiseFloor * 12 + 0.04)).toFixed(3));
+  if (voice.recording) { recordingTick(e); return; }
   if (voice.transcribing) return;  // busy sending the last utterance
-  // Not recording: watch for a speech onset. While our own reply is playing,
-  // require a much louder, sustained input (barge-in) so we don't record the
-  // TTS coming out of the speakers.
-  const bar = voice.speaking ? V_BARGE : V_START;
-  if (e > bar) {
-    voice.voiceFrames += 1;
-    if (voice.voiceFrames * V_FRAME_MS >= V_ONSET_MS) {
-      if (voice.speaking) bargeInTts();
-      startUtterance();
-    }
+  // Idle: while it's speaking, only a much louder input (barge-in) starts a
+  // recording, so its own voice out of the speakers doesn't trip us. Otherwise
+  // the recorder starts on the first loud frame -- we capture the onset and
+  // decide later whether to keep it.
+  const gate = voice.speaking ? bargeThresh() : startThresh();
+  if (e > gate) {
+    startUtterance();
   } else {
-    voice.voiceFrames = 0;
+    // Track the room's noise floor from quiet frames (slow, so speech pauses
+    // don't drag it up).
+    voice.noiseFloor = (1 - V_NF_ADAPT) * voice.noiseFloor + V_NF_ADAPT * e;
+    voice.noiseFloor = Math.min(0.06, Math.max(0.003, voice.noiseFloor));
+  }
+}
+
+function recordingTick(e) {
+  voice.recMs += V_FRAME_MS;
+  if (e > stopThresh()) { voice.voicedMs += V_FRAME_MS; voice.silenceMs = 0; }
+  else { voice.silenceMs += V_FRAME_MS; }
+  // Enough real voiced audio -> this is a genuine utterance. If it arrived
+  // while the agent was talking or thinking, that's a barge-in: cut its reply.
+  if (!voice.confirmed && voice.voicedMs >= V_ONSET_MS) {
+    voice.confirmed = true;
+    if (voice.speaking || voice.thinking) interruptReply();
+    setVoiceOrb("hearing");
+    setVoiceStatus("Listening…");
+  }
+  if (voice.confirmed) {
+    if (voice.silenceMs >= V_SILENCE_MS) endUtterance();
+  } else if (voice.silenceMs >= V_BLIP_MS || voice.recMs >= V_MAX_UNCONFIRMED_MS) {
+    endUtterance();  // never became real speech -- drop it
   }
 }
 
@@ -3796,30 +3861,31 @@ function startUtterance() {
                      : new MediaRecorder(voice.stream);
   } catch (e) { return; }
   voice.chunks = [];
-  voice.discard = false;
   voice.recording = true;
-  voice.speechMs = 0;
+  voice.confirmed = false;
+  voice.voicedMs = 0;
   voice.silenceMs = 0;
+  voice.recMs = 0;
   voice.rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) voice.chunks.push(ev.data); };
   voice.rec.onstop = finishUtterance;
-  voice.rec.start();
-  setVoiceStatus("Listening…");
-  setVoiceOrb("hearing");
+  // Small timeslices so short utterances still flush at least one data chunk.
+  voice.rec.start(200);
+  if (!voice.speaking) setVoiceOrb("hearing");
 }
 
 function endUtterance() {
   if (!voice.recording) return;
   voice.recording = false;
-  // Too short to be real speech (a cough, a door) -- throw it away.
-  if (voice.speechMs < V_MIN_SPEECH_MS) voice.discard = true;
+  // Keep only confirmed clips with enough voiced audio; blips are dropped.
+  voice.discard = !voice.confirmed;
   try { voice.rec.stop(); } catch (e) { /* onstop still fires */ }
 }
 
 async function finishUtterance() {
   voice.voiceFrames = 0;
+  if (!voice.active) return;  // session closed while recording
   if (voice.discard || !voice.chunks.length) {
-    setVoiceOrb(voice.speaking ? "speaking" : "listening");
-    setVoiceStatus(voice.speaking ? "Speaking…" : "Listening…");
+    idleOrListen();
     return;
   }
   voice.transcribing = true;
@@ -3840,37 +3906,54 @@ async function finishUtterance() {
     else if (res && res.error) toast(res.error, "warn", 4000);
   } catch (e) { /* ignore */ }
   voice.transcribing = false;
-  if (!text) {
-    setVoiceOrb(voice.speaking ? "speaking" : "listening");
-    setVoiceStatus(voice.speaking ? "Speaking…" : "Listening…");
-    return;
-  }
+  if (!text || !voice.active) { idleOrListen(); return; }
   $("voice-caption").innerHTML = `<div class="voice-you">${esc(text)}</div>`;
-  await sendVoiceTurn(text);
+  voice.sendTries = 0;
+  sendVoiceTurn(text);
 }
 
-async function sendVoiceTurn(text) {
+function idleOrListen() {
+  if (!voice.active) return;
+  if (voice.speaking) { setVoiceOrb("speaking"); setVoiceStatus("Speaking…"); }
+  else if (voice.thinking) { setVoiceOrb("thinking"); setVoiceStatus("Thinking…"); }
+  else if (voice.ptt) { setVoiceOrb("idle"); setVoiceStatus("Your turn — hold to talk"); }
+  else { setVoiceOrb("listening"); setVoiceStatus("Listening…"); }
+}
+
+function sendVoiceTurn(text) {
+  voice.thinking = true;
+  voice.turnComplete = false;
   setVoiceOrb("thinking");
   setVoiceStatus("Thinking…");
-  try {
-    const res = await api().send_voice(text);
-    if (res && res.error === "busy") {
-      // It's still replying to the previous thing; hold this one briefly.
-      setTimeout(() => sendVoiceTurn(text), 400);
+  api().send_voice(text).then((res) => {
+    if (res && res.error === "busy" && voice.sendTries < 12) {
+      // Still wrapping up the previous reply; hold this one briefly.
+      voice.sendTries++;
+      setTimeout(() => { if (voice.active) sendVoiceTurn(text); }, 300);
     }
-  } catch (e) { /* ignore */ }
+  }).catch(() => {});
 }
 
-function bargeInTts() {
+// Barge-in: the user cut in. Stop playback AND tell the backend to abandon the
+// reply it's generating, so it doesn't resume talking a moment later.
+function interruptReply() {
   resetTtsPlayback();
   voice.speaking = false;
+  voice.thinking = false;
+  voice.turnComplete = true;  // reply abandoned; don't leave a dangling gap
+  try { api().cancel_voice(); } catch (e) { /* ignore */ }
 }
 
+// The TTS queue drained. But sentence chunks synthesize one at a time, so an
+// empty queue MID-reply is just a gap before the next sentence -- not the end.
+// Only truly hand the mic back once the reply turn is also complete; otherwise
+// stay in "speaking" so we don't reopen the mic (and catch our own echo).
 function onVoiceTtsIdle() {
-  voice.speaking = false;
   if (!voice.active) return;
-  setVoiceOrb(voice.ptt ? "idle" : "listening");
-  setVoiceStatus(voice.ptt ? "Your turn — hold to talk" : "Your turn — just talk");
+  if (!voice.turnComplete) return;  // between sentences -- keep waiting
+  voice.speaking = false;
+  voice.thinking = false;
+  idleOrListen();
   processAnnounceQueue();
 }
 
@@ -3902,6 +3985,7 @@ function handleVoiceEvent(ev) {
     case "stream_start":
       $("voice-caption").querySelector(".voice-it")?.remove();
       voice._replyBuf = "";
+      voice.turnComplete = false;  // a reply is now being generated + spoken
       break;
     case "content": {
       voice._replyBuf = (voice._replyBuf || "") + (ev.text || "");
@@ -3916,6 +4000,7 @@ function handleVoiceEvent(ev) {
     }
     case "play_audio":
       voice.speaking = true;
+      voice.thinking = false;
       setVoiceOrb("speaking");
       setVoiceStatus("Speaking…");
       handlePlayAudio(ev);
@@ -3932,9 +4017,12 @@ function handleVoiceEvent(ev) {
       }
       break;
     case "voice_turn_complete":
-      // If nothing was spoken (e.g. it only dispatched a worker silently),
-      // make sure we return to listening.
-      if (!voice.speaking && voice.active) onVoiceTtsIdle();
+      // The reply is fully generated. Spoken audio may still be draining from
+      // the queue; if so, its drain will hand the mic back. If nothing is
+      // playing (a silent worker dispatch, or audio already finished), resume
+      // now.
+      voice.turnComplete = true;
+      if (!ttsPlaying && voice.active) onVoiceTtsIdle();
       break;
     case "error":
       toast("Voice: " + (ev.message || "error"), "warn", 5000);
@@ -3956,10 +4044,11 @@ function setVoicePtt(on) {
 
 function pttPress() {
   if (!voice.active || !voice.ptt || voice.recording || voice.transcribing) return;
-  if (voice.speaking) bargeInTts();
-  // In PTT we drive the recorder directly, bypassing the energy gate.
-  voice.speechMs = V_MIN_SPEECH_MS;  // always keep PTT audio
+  if (voice.speaking || voice.thinking) interruptReply();
+  // In PTT we drive the recorder directly, bypassing the energy gate -- keep
+  // whatever was captured (confirmed) regardless of measured energy.
   startUtterance();
+  voice.confirmed = true;
   $("voice-ptt-btn").classList.add("held");
 }
 function pttRelease() {
