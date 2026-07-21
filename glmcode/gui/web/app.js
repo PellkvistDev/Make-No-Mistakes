@@ -175,8 +175,11 @@ document.addEventListener("click", (e) => {
   more.textContent = expanded ? "Show less" : `Show all ${more.dataset.lines} lines`;
 });
 
-/* Minimal markdown renderer (safe: escapes first, then adds structure). */
-function md(src) {
+/* Minimal markdown renderer (safe: escapes first, then adds structure).
+   `fast` skips syntax highlighting -- used only for the transient streaming
+   tail (an open code fence there would otherwise be re-highlighted from
+   scratch every frame); it gets fully highlighted the instant it commits. */
+function md(src, fast) {
   const codeBlocks = [];
   src = String(src ?? "");
   // fenced code blocks out first
@@ -211,7 +214,7 @@ function md(src) {
       : "";
     codeBlocks.push(
       `<div class="${cls}"><button class="code-copy" title="Copy code" aria-label="Copy code">Copy</button>` +
-      `<pre><code data-lang="${esc(lang)}">${highlight(body, lang)}</code></pre>${more}</div>`);
+      `<pre><code data-lang="${esc(lang)}">${fast ? esc(body) : highlight(body, lang)}</code></pre>${more}</div>`);
     return `\u0000${codeBlocks.length - 1}\u0000`;
   });
   src = esc(src);
@@ -827,6 +830,56 @@ function flushThinkPending(t) {
   }
 }
 
+// The largest index > `from` that follows a blank line ("\n\n") AND sits at
+// an even code-fence depth, so a committed chunk is always self-contained
+// markdown (never cut inside a ``` block). content[0:from] is invariantly at
+// even fence depth, so only fences in the NEW region need weighing.
+function stableBoundary(content, from) {
+  const region = content.slice(from);
+  let idx = region.lastIndexOf("\n\n");
+  while (idx >= 0) {
+    const fences = (region.slice(0, idx).match(/```/g) || []).length;
+    if (fences % 2 === 0) return from + idx + 2;
+    idx = region.lastIndexOf("\n\n", idx - 1);
+  }
+  return from;
+}
+
+// Incremental markdown for a streaming bubble. The old path re-ran md() (full
+// markdown parse + syntax highlighting) over the ENTIRE accumulated message on
+// every ~80ms flush -- O(n) per frame, so O(n^2) over a reply, all on the
+// WebView2 UI thread that also services every blocking evaluate_js from
+// Python. Now: complete blocks (up to the last safe blank-line boundary) are
+// rendered ONCE into stable DOM and never touched again; only the trailing
+// in-progress block is re-rendered each frame -> O(tail) per frame.
+function renderStreamingMarkdown(t) {
+  const el = t.contentEl;
+  if (!el) return;
+  if (t._mdContentEl !== el) {          // a fresh bubble -> reset incremental state
+    t._mdContentEl = el;
+    t.mdCommitted = 0;
+    el.innerHTML = "";
+    t.tailEl = document.createElement("div");
+    t.tailEl.className = "md-tail";     // display:contents -> layout-transparent
+    el.appendChild(t.tailEl);
+  }
+  const safe = stableBoundary(t.content, t.mdCommitted);
+  if (safe > t.mdCommitted) {
+    const tmpl = document.createElement("template");
+    tmpl.innerHTML = md(t.content.slice(t.mdCommitted, safe));
+    el.insertBefore(tmpl.content, t.tailEl);
+    t.mdCommitted = safe;
+  }
+  const tail = t.content.slice(t.mdCommitted);
+  // Skip syntax highlighting only while the tail is a LONG, still-OPEN code
+  // fence -- the one case that would otherwise re-highlight a growing block
+  // from scratch every frame. Any closed fence (including the message's final
+  // one, once the ``` arrives) highlights normally, so the finished render is
+  // always fully highlighted with no separate finalize pass.
+  const openFence = (tail.match(/```/g) || []).length % 2 === 1;
+  t.tailEl.innerHTML = md(tail, openFence && tail.length > 400);
+}
+
 function queueRender() {
   if (renderQueued) return;
   renderQueued = true;
@@ -834,7 +887,7 @@ function queueRender() {
     renderQueued = false;
     if (!current) return;
     if (current.contentEl && current.mdDirty) {
-      current.contentEl.innerHTML = md(current.content);
+      renderStreamingMarkdown(current);
       current.mdDirty = false;
     }
     flushThinkPending(current);
@@ -961,7 +1014,7 @@ function handle(ev) {
             `<span class="think-dot"></span>Thought process`;
         }
         if (current.contentEl) {
-          current.contentEl.innerHTML = md(current.content);
+          renderStreamingMarkdown(current);  // commit any pending block + final tail
           if (current.contentEl.parentElement)
             current.contentEl.parentElement.dataset.raw = current.content;
         } else if (current.content === "" && current.wrap.children.length <= 1) {
@@ -1573,7 +1626,7 @@ function renderSubagentEvent(aid, ev) {
 
 function renderSubagentMdIfVisible(t) {
   if (t && t.contentEl && t.mdDirty && !t.wrap.hidden) {
-    t.contentEl.innerHTML = md(t.content);
+    renderStreamingMarkdown(t);
     t.mdDirty = false;
   }
 }

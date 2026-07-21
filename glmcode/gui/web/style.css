@@ -800,6 +800,9 @@ body.browser-full #subagent-panel-composer { grid-column: 2; grid-row: 4; }
 }
 
 /* markdown inside assistant bubbles */
+/* Streaming tail wrapper: layout-transparent, so incrementally-committed
+   blocks and the in-progress tail lay out exactly as one flat .md would. */
+.md-tail { display: contents; }
 .md p { margin: 0 0 10px; }
 .md p:last-child { margin-bottom: 0; }
 .md h1, .md h2, .md h3, .md h4 { margin: 14px 0 8px; letter-spacing: -0.01em; line-height: 1.3; }
