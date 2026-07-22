@@ -651,28 +651,30 @@ class Agent:
         return self._asset_marker("image", saved, prompt, "Generated and shown to the user.")
 
     def _speak_tool(self, text: str, path: str = "", voice: str = "", speed: float | None = None) -> str:
-        """Generate speech locally with Kokoro and play it for the user.
-        Defaults to the user's configured Settings voice/speed (the same
-        ones the read-aloud toggle uses) unless the model explicitly asks
-        for something different."""
-        from .tts import DEFAULT_VOICE, list_voices, save_wav
+        """Generate speech locally and play it for the user, using the
+        configured TTS engine (Kokoro or Piper). Defaults to the user's
+        Settings voice/speed (the same ones the read-aloud toggle uses) unless
+        the model explicitly asks for something different."""
+        from . import tts_engine
+        engine = (getattr(self.cfg, "tts_engine", "kokoro") or "kokoro")
+        default_voice = tts_engine.default_voice(engine)
+        cfg_voice = (self.cfg.piper_voice if engine == "piper" else self.cfg.tts_voice)
         text = (text or "").strip()
         if not text:
             raise ToolError("speak needs a 'text'")
         requested_voice = (voice or "").strip()
         if requested_voice:
-            # An invalid id would otherwise be silently swapped for
-            # DEFAULT_VOICE inside synthesize() -- correct but confusing,
-            # since the model never finds out its request didn't apply.
-            # Only validate an EXPLICIT request; the user's own configured
-            # voice (the no-argument default below) is trusted as-is.
-            valid = list_voices()
+            # An invalid id would otherwise be silently swapped for the default
+            # inside synthesize() -- correct but confusing, since the model never
+            # finds out its request didn't apply. Only validate an EXPLICIT
+            # request; the user's own configured voice is trusted as-is.
+            valid = tts_engine.list_voices(engine)
             if requested_voice not in valid:
                 raise ToolError(
-                    f"'{requested_voice}' is not a valid voice id. Valid ids: "
+                    f"'{requested_voice}' is not a valid {engine} voice id. Valid ids: "
                     f"{', '.join(valid)}"
                 )
-        voice = requested_voice or self.cfg.tts_voice or DEFAULT_VOICE
+        voice = requested_voice or cfg_voice or default_voice
         speed = speed if speed is not None else (self.cfg.tts_speed or 1.0)
 
         if path and path.strip():
@@ -685,7 +687,8 @@ class Agent:
 
         with self.events.status(f"generating speech: {text[:60]}..."):
             try:
-                saved = save_wav(text, out_path, voice=voice, speed=speed, status=self.events.info)
+                saved = tts_engine.save_wav(text, out_path, voice=voice, speed=speed,
+                                            engine=engine, status=self.events.info)
             except Exception as e:
                 raise ToolError(f"speech generation failed: {e}")
 

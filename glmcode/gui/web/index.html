@@ -396,11 +396,22 @@
 
     <section>
       <h3>Voice</h3>
-      <p class="row-sub">Toggle read-aloud from the speaker icon in the title bar. Runs locally
-         via Kokoro TTS — no API cost.</p>
+      <p class="row-sub">Toggle read-aloud from the speaker icon in the title bar. Runs locally —
+         no API cost.</p>
+      <div class="row">
+        <div class="row-text"><label for="voice-engine">Engine</label>
+          <span class="row-sub">Kokoro is fast and English-only. Piper has natural voices in many
+            languages (including Swedish).</span></div>
+        <div class="row-actions">
+          <select id="voice-engine" class="voice-select">
+            <option value="kokoro">Kokoro</option>
+            <option value="piper">Piper (multilingual)</option>
+          </select>
+        </div>
+      </div>
       <div class="row voice-row">
         <div class="row-text"><label for="voice-select">Voice</label>
-          <span class="row-sub" id="voice-first-use-note" hidden>First use downloads ~350MB, one-time</span></div>
+          <span class="row-sub" id="voice-first-use-note" hidden>First use downloads the model, one-time</span></div>
         <div class="row-actions">
           <select id="voice-select" class="voice-select"></select>
           <button id="voice-preview-btn" class="icon-btn" aria-label="Preview voice" title="Preview voice">

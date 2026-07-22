@@ -137,7 +137,9 @@ class Config:
     browser_keep_logins: bool = False  # control_chrome: persistent agent profile (logins survive restarts)
     browser_provider: str = ""       # control_chrome: dedicated Browser Agent provider ("" = same as chat)
     browser_model: str = ""          # control_chrome: dedicated Browser Agent model ("" = same as chat)
+    tts_engine: str = "kokoro"       # text-to-speech engine: "kokoro" or "piper"
     tts_voice: str = "af_heart"      # Kokoro voice name
+    piper_voice: str = "en_US-amy-medium"  # Piper voice id (used when tts_engine == "piper")
     stt_model: str = "base"          # faster-whisper model size for voice input
     stt_language: str = ""           # "" = auto-detect language
     tts_speed: float = 1.0           # Kokoro speech speed, 0.5-2.0

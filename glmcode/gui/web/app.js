@@ -2567,9 +2567,10 @@ $("read-aloud-chip").addEventListener("click", async () => {
   if (next) {
     const status = await api().tts_status();
     if (!status.ready) {
+      const eng = currentTtsEngine() === "piper" ? "Piper" : "Kokoro";
       const proceed = confirm(
-        "Reading replies aloud uses local text-to-speech (Kokoro). The first time, this " +
-        "downloads about 350MB (one-time) and installs in the background -- everything " +
+        `Reading replies aloud uses local text-to-speech (${eng}). The first time, this ` +
+        "downloads the model (one-time) and installs in the background -- everything " +
         "after that runs fully offline. Continue?"
       );
       if (!proceed) return;
@@ -2582,23 +2583,40 @@ $("read-aloud-chip").addEventListener("click", async () => {
   toast("Read aloud: " + (next ? "on" : "off"), "info", 2200);
 });
 
+function currentTtsEngine() { return (settings && settings.tts_engine) || "kokoro"; }
+function currentTtsVoice() {
+  return currentTtsEngine() === "piper"
+    ? (settings.piper_voice || "en_US-amy-medium")
+    : (settings.tts_voice || "af_heart");
+}
 async function populateVoiceSelect() {
+  const engine = currentTtsEngine();
+  $("voice-engine").value = engine;
   const sel = $("voice-select");
-  const { voices } = await api().tts_voices();
+  const res = await api().tts_voices(engine);
+  const voices = (res && res.voices) || [];
   sel.innerHTML = voices.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join("");
-  if (settings.tts_voice && voices.includes(settings.tts_voice)) sel.value = settings.tts_voice;
+  const want = currentTtsVoice();
+  if (voices.includes(want)) sel.value = want;
   const status = await api().tts_status();
   $("voice-first-use-note").hidden = !!status.ready;
 }
+$("voice-engine").addEventListener("change", async () => {
+  settings = await api().set_setting("tts_engine", $("voice-engine").value);
+  await populateVoiceSelect();
+});
 $("voice-select").addEventListener("change", async () => {
-  settings = await api().set_setting("tts_voice", $("voice-select").value);
+  const key = currentTtsEngine() === "piper" ? "piper_voice" : "tts_voice";
+  settings = await api().set_setting(key, $("voice-select").value);
+  const status = await api().tts_status();
+  $("voice-first-use-note").hidden = !!status.ready;
 });
 $("voice-preview-btn").addEventListener("click", async () => {
   const btn = $("voice-preview-btn");
   if (btn.classList.contains("loading")) return;
   btn.classList.add("loading");
   try {
-    const res = await api().preview_voice($("voice-select").value);
+    const res = await api().preview_voice($("voice-select").value, currentTtsEngine());
     if (res.error) { toast("Preview failed: " + res.error, "error", 6000); return; }
     new Audio(res.src).play().catch(() => {});
   } finally {

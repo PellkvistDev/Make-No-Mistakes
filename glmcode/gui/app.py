@@ -346,14 +346,14 @@ class WebEvents(AgentEvents):
         # One worker, strictly serial: chunks are emitted in the order they
         # were enqueued, and a local model pipeline isn't meant for
         # concurrent synthesis calls anyway (see tts._lock).
-        from .. import tts as tts_mod
+        from .. import tts_engine
         while True:
             seq, text = self._tts_queue.get()
-            voice = (self._cfg.tts_voice if self._cfg else None) or tts_mod.DEFAULT_VOICE
+            engine, voice = _tts_engine_voice(self._cfg)
             speed = (self._cfg.tts_speed if self._cfg else None) or 1.0
             try:
-                audio, sr = tts_mod.synthesize(text, voice=voice, speed=speed)
-                wav = tts_mod.audio_to_wav_bytes(audio, sr)
+                audio, sr = tts_engine.synthesize(text, voice=voice, speed=speed, engine=engine)
+                wav = tts_engine.audio_to_wav_bytes(audio, sr)
                 src = "data:audio/wav;base64," + base64.b64encode(wav).decode("ascii")
                 self.emit("play_audio", seq=seq, src=src)
             except Exception as e:
@@ -504,6 +504,16 @@ class WebEvents(AgentEvents):
 
 
 # --------------------------------------------------------------------- #
+
+def _tts_engine_voice(cfg) -> tuple[str, str]:
+    """The active TTS engine and its voice from config. Each engine keeps its
+    own voice (tts_voice for Kokoro, piper_voice for Piper), so switching
+    engines never lands on a voice the other one doesn't have."""
+    engine = (getattr(cfg, "tts_engine", "kokoro") if cfg else "kokoro") or "kokoro"
+    if engine == "piper":
+        return engine, (getattr(cfg, "piper_voice", "") if cfg else "") or "en_US-amy-medium"
+    return "kokoro", (getattr(cfg, "tts_voice", "") if cfg else "") or "af_heart"
+
 
 def _data_uri(path: Path, max_bytes: int = 12_000_000) -> str:
     data = path.read_bytes()[:max_bytes]
@@ -844,7 +854,8 @@ class Api:
             "show_reasoning": c.show_reasoning, "temperature": c.temperature,
             "cwd": str(Path.cwd()) if self.session_id else "",
             "background_custom": bool(c.background_path),
-            "read_aloud": c.read_aloud, "tts_voice": c.tts_voice, "tts_speed": c.tts_speed,
+            "read_aloud": c.read_aloud, "tts_engine": c.tts_engine,
+            "tts_voice": c.tts_voice, "piper_voice": c.piper_voice, "tts_speed": c.tts_speed,
             "stt_model": c.stt_model, "stt_language": c.stt_language,
             "voice_sensitivity": c.voice_sensitivity,
             "voice_earcons": c.voice_earcons, "voice_ptt_key": c.voice_ptt_key,
@@ -875,8 +886,12 @@ class Api:
             setattr(c, key, value.strip())
             if key == "model" and self._agent:
                 self._agent.rebuild_system_prompt()
+        elif key == "tts_engine" and value in ("kokoro", "piper"):
+            c.tts_engine = value
         elif key == "tts_voice" and isinstance(value, str) and value.strip():
             c.tts_voice = value.strip()
+        elif key == "piper_voice" and isinstance(value, str) and value.strip():
+            c.piper_voice = value.strip()
         elif key == "stt_model" and isinstance(value, str) and value.strip():
             c.stt_model = value.strip()
         elif key == "stt_language" and isinstance(value, str):
@@ -929,12 +944,15 @@ class Api:
     # -- text-to-speech -------------------------------------------------------- #
 
     def tts_status(self):
-        from ..tts import ready
-        return {"ready": ready()}
+        from .. import tts_engine
+        engine, voice = _tts_engine_voice(self._cfg)
+        return {"ready": tts_engine.ready(engine, voice)}
 
-    def tts_voices(self):
-        from .. import tts as tts_mod
-        return {"voices": tts_mod.list_voices()}
+    def tts_voices(self, engine: str = ""):
+        from .. import tts_engine
+        engine = engine or (self._cfg.tts_engine if self._cfg else "kokoro") or "kokoro"
+        return {"voices": tts_engine.list_voices(engine), "engine": engine,
+                "default": tts_engine.default_voice(engine)}
 
     def stt_status(self, model: str = ""):
         """Whether dictation is ready to go for the given model (packages
@@ -943,19 +961,20 @@ class Api:
         from .. import stt as stt_mod
         return {"ready": stt_mod.ready(model or stt_mod.DEFAULT_MODEL)}
 
-    def preview_voice(self, voice: str):
+    def preview_voice(self, voice: str, engine: str = ""):
         """Synthesize (once, then cached on disk) and return a short sample
         of the given voice so Settings can offer an audition button. Can
         take a while on the very first call ever (full first-use install +
         download), same as any other first TTS use."""
-        from .. import tts as tts_mod
-        voice = (voice or "").strip() or tts_mod.DEFAULT_VOICE
-        cache_dir = CONFIG_DIR / "models" / "kokoro" / "previews"
+        from .. import tts_engine
+        engine = engine or (self._cfg.tts_engine if self._cfg else "kokoro") or "kokoro"
+        voice = (voice or "").strip() or tts_engine.default_voice(engine)
+        cache_dir = CONFIG_DIR / "models" / ("piper" if engine == "piper" else "kokoro") / "previews"
         cache_path = cache_dir / f"{voice}.wav"
         if not cache_path.is_file():
             try:
-                tts_mod.save_wav(f"Hi, this is the {voice} voice.", cache_path,
-                                 voice=voice, status=self._events.info)
+                tts_engine.save_wav(f"Hi, this is the {voice} voice.", cache_path,
+                                    voice=voice, engine=engine, status=self._events.info)
             except Exception as e:
                 return {"error": str(e)}
         try:
@@ -1832,8 +1851,9 @@ class Api:
             except Exception:
                 pass
             try:
-                from .. import tts as tts_mod
-                tts_mod.prewarm()
+                from .. import tts_engine
+                engine, voice = _tts_engine_voice(self._cfg)
+                tts_engine.prewarm(engine, voice)
             except Exception:
                 pass
         threading.Thread(target=warm, daemon=True).start()

@@ -343,10 +343,17 @@ running **locally** — no API key, no per-use cost:
   speech on request (not for regular replies — that's the toggle above).
   Saved as a WAV (default: `generated/`) and played automatically.
 
-Pick a voice and preview it in **Settings → Voice** (also lets you adjust
-speed). The **first** use of either feature installs a small package
-(`kokoro-onnx`) and downloads the Kokoro model (~300MB total, one-time,
-needs network access); everything after that runs fully offline.
+Pick an **engine**, a voice, and speed in **Settings → Voice**. Two local
+engines, both free and offline:
+- **Kokoro** (default) — fast, natural English voices.
+- **Piper** — natural voices in many languages, **including Swedish** — so
+  spoken replies in your own language actually sound right. Each Piper voice
+  downloads its own small model on first use.
+
+The **first** use of an engine/voice installs its package and downloads the
+model (one-time, needs network access); everything after that runs fully
+offline. Each engine remembers its own voice, so switching between them never
+lands on a voice the other doesn't have.
 
 ### Dictation
 
