@@ -2234,6 +2234,17 @@ CONVERSATIONAL_SCHEMAS = [
     ),
 ]
 
+# Read-only investigation tools the conversational (voice) agent also gets, so
+# it can actually look at the code to answer questions and understand what to
+# delegate -- without being able to change anything (that's what workers are
+# for). All of these are in READONLY_TOOLS, so they run without a permission
+# prompt, which matters for a hands-free delegator.
+_CONVO_READONLY_NAMES = ("read_file", "list_dir", "glob", "grep",
+                         "find_references", "review_changes")
+CONVERSATIONAL_READONLY_SCHEMAS = [
+    s for s in TOOL_SCHEMAS if s["function"]["name"] in _CONVO_READONLY_NAMES
+]
+
 # Handled specially by the agent (needs the client/events), not via TOOL_FUNCTIONS.
 DISPATCH_WORKER_TOOL = "dispatch_worker"
 CHECK_WORKERS_TOOL = "check_workers"

@@ -18,13 +18,15 @@ from .config import Config
 from .events import AgentEvents
 from .permissions import PermissionEngine
 from .prompts import (BROWSER_AGENT_SYSTEM, BROWSER_RESUME_NOTE, COMPACT_PROMPT,
-                      CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM, STEER_NUDGE_TEMPLATE,
-                      STEP_LIMIT_NUDGE, SUBAGENT_PREAMBLE, VERIFY_NUDGE,
-                      VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT, WRAP_UP_NUDGE,
-                      build_system_prompt)
+                      CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM,
+                      STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE, SUBAGENT_PREAMBLE,
+                      VERIFY_NUDGE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
+                      WRAP_UP_NUDGE, build_system_prompt,
+                      conversational_project_context)
 from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
                     CHECK_WORKERS_TOOL, COMPACT_CONTEXT_TOOL,
-                    CONTROL_CHROME_TOOL, CONVERSATIONAL_SCHEMAS,
+                    CONTROL_CHROME_TOOL, CONVERSATIONAL_READONLY_SCHEMAS,
+                    CONVERSATIONAL_SCHEMAS,
                     DISPATCH_WORKER_TOOL, GENERATE_IMAGE_TOOL, PREVIEW_PAGE_TOOL,
                     REMEMBER_TOOL, REVERT_WORKER_TOOL, REVIEW_CHANGES_TOOL,
                     SHOW_HTTP_CAT_TOOL, SHOW_IMAGE_TOOL, SPEAK_TOOL,
@@ -191,7 +193,10 @@ class Agent:
         # tiny, dedicated tool set and a spoken-style system prompt.
         self.conversational = conversational
         if conversational:
-            self.tool_schemas = list(CONVERSATIONAL_SCHEMAS)
+            # Delegation tools + a read-only investigation set, so it can look
+            # at the code to answer questions and decide what to delegate, but
+            # never edit or run anything itself (that's the workers' job).
+            self.tool_schemas = list(CONVERSATIONAL_SCHEMAS) + list(CONVERSATIONAL_READONLY_SCHEMAS)
         elif allow_subagents:
             self.tool_schemas = TOOL_SCHEMAS
         else:
@@ -284,7 +289,10 @@ class Agent:
         # usage note (see _refresh_context_note) doesn't need to re-run
         # build_system_prompt's git subprocess calls on every model call.
         if self.conversational:
-            self._base_system_prompt = CONVERSATIONAL_SYSTEM + self._conversational_language_note()
+            self._base_system_prompt = (
+                CONVERSATIONAL_SYSTEM
+                + conversational_project_context(self.workdir)
+                + self._conversational_language_note())
         else:
             self._base_system_prompt = build_system_prompt(self.workdir, self.cfg.model)
         if self.transcript:

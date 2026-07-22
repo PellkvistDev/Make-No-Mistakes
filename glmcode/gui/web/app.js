@@ -3766,6 +3766,7 @@ const voice = {
   perm: null, permQ: [], muted: false, pttKey: "Space", endpointMs: 750,
   waveRaf: 0, lastReply: [], replyChunks: [], curTurnEl: null, replyEl: null,
   gated: false, gateOpen: true,  // wake-gated turns: each request needs the wake word
+  thinkTimer: 0,
 };
 // True when we're in a session but "soft-muted" -- listening only for the wake
 // word before we'll accept another request (vs the open state where we take
@@ -3884,6 +3885,7 @@ function stopVoice() {
   voice.active = false;
   onTtsIdle = null;
   resetTtsPlayback();
+  stopThinkCue();
   voice.speaking = voice.thinking = false;
   if (voice.waveRaf) { cancelAnimationFrame(voice.waveRaf); voice.waveRaf = 0; }
   if (voice.timer) { clearInterval(voice.timer); voice.timer = 0; }
@@ -4119,6 +4121,7 @@ function sendVoiceTurn(text) {
   voice.turnComplete = false;
   setVoiceOrb("thinking");
   setVoiceStatus("Thinking…");
+  startThinkCue();
   api().send_voice(text).then((res) => {
     if (res && res.error === "busy" && voice.sendTries < 12) {
       // Still wrapping up the previous reply; hold this one briefly.
@@ -4132,6 +4135,7 @@ function sendVoiceTurn(text) {
 // reply it's generating, so it doesn't resume talking a moment later.
 function interruptReply() {
   resetTtsPlayback();
+  stopThinkCue();
   voice.speaking = false;
   voice.thinking = false;
   voice.turnComplete = true;  // reply abandoned; don't leave a dangling gap
@@ -4147,6 +4151,7 @@ function onVoiceTtsIdle() {
   if (!voice.turnComplete) return;  // between sentences -- keep waiting
   voice.speaking = false;
   voice.thinking = false;
+  stopThinkCue();
   idleOrListen();
   processAnnounceQueue();
 }
@@ -4252,6 +4257,7 @@ function handleVoiceEvent(ev) {
     case "play_audio":
       voice.speaking = true;
       voice.thinking = false;
+      stopThinkCue();
       if (ev.src) voice.replyChunks.push(ev.src);  // for "say that again"
       setVoiceOrb("speaking");
       setVoiceStatus("Speaking…");
@@ -4260,6 +4266,19 @@ function handleVoiceEvent(ev) {
     case "tts_reset":
       resetTtsPlayback();
       break;
+    case "tool_call": {
+      // The delegator peeking at the code to answer you -- show what it's on.
+      const LOOK = { read_file: "Reading", grep: "Searching", glob: "Searching",
+                     list_dir: "Looking in", find_references: "Searching",
+                     review_changes: "Checking changes" };
+      if (LOOK[ev.name]) {
+        const a = ev.args || {};
+        const t = a.path || a.pattern || a.query || a.dir || "";
+        setVoiceStatus(t ? `${LOOK[ev.name]} ${String(t).split(/[\\/]/).pop().slice(0, 40)}…`
+                         : `${LOOK[ev.name]}…`);
+      }
+      break;
+    }
     case "worker_update": {
       const prev = voice.workers[ev.id] || {};
       voice.workers[ev.id] = { name: ev.name, status: ev.status, activity: prev.activity || "" };
@@ -4349,6 +4368,28 @@ function earcon(kind) {
     o.start(now); o.stop(now + dur + 0.02);
   } catch (e) { /* ignore */ }
 }
+
+// -- thinking cue: soft periodic ticks while it works, so the gap between you
+// finishing and it speaking doesn't feel like dead air. Stops the instant the
+// reply's first audio plays. --------------------------------------------------
+function startThinkCue() {
+  if (!settings || !settings.voice_earcons || !voice.ctx) return;
+  stopThinkCue();
+  voice.thinkTimer = setInterval(() => {
+    if (!voice.active || voice.speaking) { stopThinkCue(); return; }
+    try {
+      const ctx = voice.ctx, now = ctx.currentTime;
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.type = "sine"; o.frequency.value = 340;
+      g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.035, now + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+      o.start(now); o.stop(now + 0.18);
+    } catch (e) { /* ignore */ }
+  }, 620);
+}
+function stopThinkCue() { if (voice.thinkTimer) { clearInterval(voice.thinkTimer); voice.thinkTimer = 0; } }
 
 // -- live waveform ---------------------------------------------------------- //
 function startWaveform() {

@@ -42,13 +42,24 @@ def _wait_worker(agent, wid, timeout=5.0):
     return "timeout"
 
 
-def test_conversational_agent_has_only_delegation_tools(monkeypatch, events):
+def test_conversational_agent_tools(monkeypatch, events):
     convo = _convo(monkeypatch, events)
     names = {s["function"]["name"] for s in convo.tool_schemas}
-    assert names == {"dispatch_worker", "check_workers", "steer_worker", "stop_worker",
-                     "worker_changes", "revert_worker"}
-    # None of the real file/command tools are exposed to the voice agent.
+    # Delegation tools...
+    assert {"dispatch_worker", "check_workers", "steer_worker", "stop_worker",
+            "worker_changes", "revert_worker"} <= names
+    # ...plus read-only investigation tools so it can look at the code...
+    assert {"read_file", "grep", "list_dir", "find_references", "review_changes"} <= names
+    # ...but NEVER anything that edits or runs.
     assert "edit_file" not in names and "run_powershell" not in names
+    assert "write_file" not in names and "run_tests" not in names
+
+
+def test_conversational_prompt_has_project_grounding(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    sysmsg = convo.messages[0]["content"]
+    assert "The project you're working on" in sysmsg
+    assert "Working directory:" in sysmsg
 
 
 def test_conversational_uses_spoken_system_prompt(monkeypatch, events):

@@ -392,9 +392,19 @@ tells you out loud. Ask "how's it going?" any time and it'll check.
   tests — okay?") and you answer "yes" / "no" / "always" (or tap the card).
   This is what lets hands-free work happen in *ask* mode instead of stalling —
   you don't have to hand it full-auto to use your voice.
+- **It knows your code** — the assistant you talk to can read files, search the
+  project, and check what's changed, and it's given a map of the tree and its
+  git state. So you can actually *think through* a problem with it out loud
+  ("why is the login flow failing?") — it looks, reasons about your code, and
+  then hands the fix to a worker. It never edits or runs anything itself; that
+  stays with the workers, so it never goes quiet on you.
+- **It feels quick** — it opens each reply with a short "okay" so you hear it
+  respond immediately, and a soft cue fills the brief gap while it thinks, so
+  the pause never feels like dead air.
 - **See what it's doing** — each worker shows a live one-line status (editing
-  auth.py, running tests, …) so the work isn't a black box while it runs. The
-  overlay keeps a scrolling transcript of the conversation and a live waveform.
+  auth.py, running tests, …), and the assistant shows what it's looking at when
+  it reads your code. The overlay keeps a scrolling transcript and a live
+  waveform.
 - **"Say that again"** — replays the last spoken reply (say it, or tap the
   button) if you missed it.
 - **Sound cues, mute, and tuning** — little tones when it hears you and when
