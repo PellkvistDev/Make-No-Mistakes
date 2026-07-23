@@ -2902,7 +2902,8 @@ async function selectModel(entry) {
 }
 
 function openSettingsToApis() {
-  $("settings-btn").click();
+  openSettings();
+  showSettingsTab("models");
   setTimeout(() => {
     const el = $("api-list");
     if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -3176,6 +3177,25 @@ function shortPath(p) {
   return parts.length > 2 ? "…\\" + parts.slice(-2).join("\\") : p;
 }
 
+let settingsTab = "general";
+function showSettingsTab(name) {
+  settingsTab = name;
+  document.querySelectorAll("#settings-backdrop section[data-tab]").forEach((s) => {
+    s.hidden = s.dataset.tab !== name;
+  });
+  document.querySelectorAll(".settings-tab-btn").forEach((b) => {
+    b.classList.toggle("on", b.dataset.tab === name);
+  });
+  // Re-apply toggle/segment state now the tab's controls are visible -- some
+  // WebView2 builds don't "stick" styling applied while a subtree was hidden.
+  syncSettingsUI();
+  const sheet = document.querySelector("#settings-backdrop .sheet");
+  if (sheet) sheet.scrollTop = 0;
+}
+document.querySelectorAll(".settings-tab-btn").forEach((b) => {
+  b.addEventListener("click", () => showSettingsTab(b.dataset.tab));
+});
+
 async function openSettings() {
   // Re-sync the toggles/segments to the CURRENT settings every time the sheet
   // opens. It's cheap and idempotent, and it makes the sheet correct no matter
@@ -3184,6 +3204,7 @@ async function openSettings() {
   // which left the first open showing nothing selected until a change re-ran it.
   syncSettingsUI();
   $("settings-backdrop").hidden = false;
+  showSettingsTab(settingsTab);
   populateVoiceSelect();
   populateSttSelect();
   populateBackups();

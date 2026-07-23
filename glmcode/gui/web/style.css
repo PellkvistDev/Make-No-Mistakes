@@ -1341,6 +1341,16 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 
 /* settings specifics */
 .settings section { margin-bottom: 20px; }
+
+/* Settings tabs -- group the many sections so the sheet isn't one long scroll. */
+.settings-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin: 2px 0 16px; }
+.settings-tab-btn {
+  padding: 7px 13px; border-radius: 999px; border: 1px solid transparent;
+  background: transparent; color: var(--muted); font-size: 13.5px; font-family: inherit;
+  cursor: pointer; transition: background 0.12s ease, color 0.12s ease;
+}
+.settings-tab-btn:hover { background: var(--glass-hi); color: var(--text); }
+.settings-tab-btn.on { background: var(--glass-hi); color: var(--text); font-weight: 600; }
 .settings h3 {
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
   color: var(--text-faint); margin-bottom: 10px; font-weight: 700;

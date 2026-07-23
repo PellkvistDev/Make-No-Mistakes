@@ -338,7 +338,15 @@
       </button>
     </div>
 
-    <section>
+    <div class="settings-tabs" role="tablist">
+      <button class="settings-tab-btn on" data-tab="general" role="tab">General</button>
+      <button class="settings-tab-btn" data-tab="voice" role="tab">Voice</button>
+      <button class="settings-tab-btn" data-tab="models" role="tab">Models &amp; tools</button>
+      <button class="settings-tab-btn" data-tab="browser" role="tab">Browser</button>
+      <button class="settings-tab-btn" data-tab="chat" role="tab">Chat</button>
+    </div>
+
+    <section data-tab="general">
       <h3>Appearance</h3>
       <div class="row">
         <div class="row-text"><label>Background image</label>
@@ -354,6 +362,11 @@
           that repaint constantly — the biggest cause of general sluggishness. Turn OFF for the
           full frosted-glass look if your machine handles it smoothly.</span></div>
         <button id="opt-reduce-fx" class="switch" role="switch" aria-checked="false"><span></span></button></div>
+    </section>
+
+    <section data-tab="browser">
+      <h3>Browser</h3>
+      <p class="row-sub">Settings for the agent's <code>control_chrome</code> browser.</p>
       <div class="row"><div class="row-text"><label for="opt-browser-headless">Hide the browser window</label>
         <span class="row-sub">Run <code>control_chrome</code> headless — the browser works
           invisibly. Watch it live in the Browser panel instead. Off by default so you can
@@ -374,7 +387,7 @@
         <button id="browser-clear-data" class="btn btn-danger-ghost">Clear</button></div>
     </section>
 
-    <section>
+    <section data-tab="models">
       <h3>Permissions</h3>
       <div class="seg" id="seg-mode" role="radiogroup" aria-label="Permission mode">
         <button data-v="ask" role="radio">Ask</button>
@@ -386,7 +399,7 @@
          commands still ask. Full auto: everything runs without asking.</p>
     </section>
 
-    <section>
+    <section data-tab="models">
       <h3>Vision</h3>
       <div class="seg" id="seg-vision" role="radiogroup" aria-label="Image handling">
         <button data-v="describe" role="radio">Describe</button>
@@ -399,7 +412,7 @@
          free default falls back to GLM vision automatically.</p>
     </section>
 
-    <section>
+    <section data-tab="voice">
       <h3>Voice</h3>
       <p class="row-sub">Toggle read-aloud from the speaker icon in the title bar. Runs locally —
          no API cost.</p>
@@ -431,7 +444,7 @@
       </div>
     </section>
 
-    <section>
+    <section data-tab="voice">
       <h3>Dictation</h3>
       <p class="row-sub">Click the mic in the composer to record, click again to transcribe into
          the box. Runs locally via faster-whisper — no API cost.</p>
@@ -493,7 +506,7 @@
       </div>
     </section>
 
-    <section>
+    <section data-tab="general">
       <h3>Notifications</h3>
       <div class="row"><div class="row-text"><label for="opt-notify">Desktop notifications</label>
         <span class="row-sub">When the app is in the background: notify when a chat needs
@@ -501,7 +514,7 @@
         <button id="opt-notify" class="switch" role="switch" aria-checked="true"><span></span></button></div>
     </section>
 
-    <section>
+    <section data-tab="models">
       <h3>APIs</h3>
       <p class="row-sub">The API this chat talks to — click one to select it. New chats
          always start on the free z.ai default. Any OpenAI-compatible endpoint works
@@ -559,7 +572,7 @@
         <button id="opt-reasoning" class="switch" role="switch" aria-checked="true"><span></span></button></div>
     </section>
 
-    <section>
+    <section data-tab="chat">
       <h3>Current chat</h3>
       <div class="row">
         <div class="row-text"><label>Project folder</label>
@@ -577,7 +590,7 @@
          your old conversation stays in the history sidebar.</p>
     </section>
 
-    <section id="backups-section">
+    <section id="backups-section" data-tab="chat">
       <h3>Backups</h3>
       <div class="row">
         <div class="row-text"><label for="backup-toggle">Auto-backup this project</label>
@@ -600,7 +613,7 @@
          message ran. Chat history isn't affected — only files on disk.</p>
     </section>
 
-    <section>
+    <section data-tab="chat">
       <h3>Whiteboard</h3>
       <div class="row">
         <div class="row-text"><label>Scratch folder</label>
