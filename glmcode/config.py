@@ -186,6 +186,10 @@ class Config:
     github_auto_pull: bool = True
     github_auto_push: bool = False   # off by default: push happens on the Sync button, not every turn
 
+    # Where the installable phone app (the mobile/ PWA) is published. Defaults to
+    # this project's GitHub Pages site; editable for forks that publish elsewhere.
+    phone_app_url: str = "https://pellkvistdev.github.io/Make-No-Mistakes/"
+
     extra: dict = field(default_factory=dict)
 
     def resolve_api_key(self) -> str:

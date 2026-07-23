@@ -1394,6 +1394,23 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 .text-input::placeholder { color: var(--text-faint); }
 
 .sheet-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 14px; }
+
+/* Phone-app QR sheet */
+.qr-box {
+  background: #ffffff; border-radius: 14px; padding: 14px;
+  width: max-content; max-width: 100%; margin: 6px auto 12px;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 6px 22px rgba(0,0,0,0.28); animation: rise 0.2s ease;
+}
+.qr-box svg { display: block; width: 216px; height: 216px; }
+.qr-url {
+  display: block; text-align: center; font-size: 12.5px; word-break: break-all;
+  color: var(--accent, #7aa2ff); text-decoration: none; margin-bottom: 4px;
+}
+.qr-url:hover { text-decoration: underline; }
+.qr-edit { margin-top: 12px; }
+.qr-edit summary { font-size: 12.5px; color: var(--muted, #8a93a3); cursor: pointer; }
+.qr-edit .provider-form { margin-top: 10px; }
 .btn {
   font-family: var(--font); font-size: 13px; font-weight: 600;
   border-radius: var(--r-sm); padding: 9px 18px;

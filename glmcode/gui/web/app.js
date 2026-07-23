@@ -3707,6 +3707,40 @@ $("gh-phone-setup").addEventListener("click", async () => {
   refreshGithubRepo();
 });
 
+// --- Get the phone app (QR + URL) ---
+async function openPhoneApp() {
+  const box = $("phoneapp-qr"), urlEl = $("phoneapp-url"), err = $("phoneapp-error");
+  box.innerHTML = ""; err.hidden = true;
+  urlEl.textContent = "loading…"; urlEl.removeAttribute("href");
+  $("phoneapp-backdrop").hidden = false;
+  let res;
+  try { res = await api().get_phone_app(); }
+  catch (e) { res = { error: "Couldn't reach the app." }; }
+  urlEl.textContent = res.url || "";
+  if (res.url) { urlEl.href = res.url; $("phoneapp-url-input").value = res.url; }
+  // The SVG is generated locally by our own code (segno), not user/model input.
+  if (res.svg) box.innerHTML = res.svg;
+  else { err.textContent = res.error || "Couldn't build the QR code."; err.hidden = false; }
+}
+$("gh-get-app").addEventListener("click", openPhoneApp);
+$("phoneapp-close").addEventListener("click", () => { $("phoneapp-backdrop").hidden = true; });
+$("phoneapp-backdrop").addEventListener("click", (e) => {
+  if (e.target === $("phoneapp-backdrop")) $("phoneapp-backdrop").hidden = true;
+});
+$("phoneapp-open").addEventListener("click", () => {
+  const u = $("phoneapp-url").textContent.trim(); if (u.startsWith("http")) api().open_external(u);
+});
+$("phoneapp-copy").addEventListener("click", async () => {
+  const u = $("phoneapp-url").textContent.trim(); if (!u.startsWith("http")) return;
+  try { await copyText(u); toast("Link copied.", "info", 2000); }
+  catch { toast("Couldn't copy to clipboard.", "error", 3000); }
+});
+$("phoneapp-url-save").addEventListener("click", async () => {
+  const v = $("phoneapp-url-input").value.trim();
+  try { await api().set_setting("phone_app_url", v); } catch (e) {}
+  openPhoneApp();
+});
+
 $("gh-pr-load").addEventListener("click", async () => {
   const res = await ghAction($("gh-pr-load"), () => api().github_open_pulls(), false);
   if (!res) return;

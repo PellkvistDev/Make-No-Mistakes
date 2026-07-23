@@ -4,3 +4,4 @@ prompt_toolkit>=3.0
 pywebview>=5.0
 pillow>=10.0
 duckduckgo-search>=6.0
+segno>=1.5

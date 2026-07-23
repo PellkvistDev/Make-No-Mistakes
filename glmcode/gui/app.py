@@ -30,6 +30,7 @@ from ..config import (BUILTIN_PROVIDER_NAME, CONFIG_DIR, PERMISSION_MODES, Confi
                       all_providers, find_provider, load_config, save_config)
 from ..events import AgentEvents
 from .. import githubsync
+from .. import qrcode_util
 from ..notify import APP_NAME, notify
 from ..prompts import EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT
 from ..sessions import SessionStore, new_id, to_display
@@ -914,6 +915,7 @@ class Api:
             "path_rules": [dict(r) for r in c.path_rules],
             "github_clone_root": c.github_clone_root,
             "github_auto_pull": c.github_auto_pull, "github_auto_push": c.github_auto_push,
+            "phone_app_url": c.phone_app_url,
         }
 
     def set_setting(self, key: str, value):
@@ -999,6 +1001,8 @@ class Api:
                 pass
         elif key == "github_clone_root":
             c.github_clone_root = str(value or "").strip()
+        elif key == "phone_app_url":
+            c.phone_app_url = str(value or "").strip()
         elif key in ("github_auto_pull", "github_auto_push"):
             setattr(c, key, bool(value))
         elif key == "path_rules":
@@ -1816,6 +1820,19 @@ class Api:
             return {"error": f"Couldn't write the workflow: {e}"}
         return {"ok": True, "path": ".github/workflows/agent.yml",
                 "secrets_url": f"https://github.com/{owner}/{repo}/settings/secrets/actions/new"}
+
+    def get_phone_app(self):
+        """Return the installable phone-app URL plus a scannable QR code (inline
+        SVG) so you can open it on your phone. The URL is configurable; the QR is
+        generated locally (no network, nothing leaves the machine)."""
+        url = (self._cfg.phone_app_url or "").strip()
+        if not url:
+            return {"url": "", "error": "No phone-app URL set yet."}
+        try:
+            svg = qrcode_util.qr_svg(url)
+        except Exception as e:
+            return {"url": url, "error": str(e)}
+        return {"url": url, "svg": svg}
 
     def _maybe_autopull(self, workdir: Path) -> None:
         """Background best-effort pull when opening a connected session. Skips a
