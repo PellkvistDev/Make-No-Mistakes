@@ -373,6 +373,11 @@ class WebEvents(AgentEvents):
     def info(self, msg):
         self.emit("notice", level="info", text=msg)
 
+    def toast(self, msg, level="info"):
+        """A transient side popup that is NOT saved into the chat (unlike a
+        notice). For ephemeral progress like a one-time model download."""
+        self.emit("toast", level=level, text=msg)
+
     def warn(self, msg):
         self.emit("notice", level="warn", text=msg)
 
@@ -1003,11 +1008,21 @@ class Api:
         folder = CONFIG_DIR / "stt-tmp"
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / (uuid.uuid4().hex + ext)
+        def _status(msg):
+            # The routine per-clip "Transcribing…" is already shown in the UI
+            # (mic button / voice overlay), so don't save it into the chat.
+            # Only the one-time install/download is worth surfacing -- and as a
+            # transient toast, never a saved notice.
+            m = str(msg or "")
+            if "Transcrib" in m:
+                return
+            self._events.toast(m, "info")
+
         try:
             path.write_bytes(raw)
             text = stt_mod.transcribe(
                 path, model=(self._cfg.stt_model or stt_mod.DEFAULT_MODEL),
-                language=self._cfg.stt_language, status=self._events.info)
+                language=self._cfg.stt_language, status=_status)
             return {"text": text}
         except Exception as e:
             return {"error": f"Transcription failed: {e}"}
@@ -1856,6 +1871,10 @@ class Api:
                 tts_engine.prewarm(engine, voice)
             except Exception:
                 pass
+            try:
+                self._ack_audio(self._ACK_PHRASES[0])  # cache one, so the first "Yes?" is instant
+            except Exception:
+                pass
         threading.Thread(target=warm, daemon=True).start()
 
     def cancel_voice(self):
@@ -1870,6 +1889,46 @@ class Api:
         except Exception:
             pass
         return {"ok": True}
+
+    _ACK_PHRASES = ("Mm-hm?", "Yes?", "Go ahead.", "I'm listening.", "Yeah?")
+
+    def voice_ack(self):
+        """Speak a short acknowledgement ("Yes?") when the wake word opens the
+        mic, so the user hears that it's listening. Synthesized off-thread and
+        played via a dedicated voice_ack event; cached per engine/voice/phrase
+        so it's instant after the first time."""
+        cs = self._active
+        if cs is None or cs.convo_events is None:
+            return {"ok": False}
+        import random
+        phrase = random.choice(self._ACK_PHRASES)
+        ev = cs.convo_events
+
+        def make():
+            try:
+                src = self._ack_audio(phrase)
+            except Exception:
+                src = ""
+            if src:
+                ev.emit("voice_ack", src=src)
+        threading.Thread(target=make, daemon=True).start()
+        return {"ok": True}
+
+    def _ack_audio(self, phrase: str) -> str:
+        engine, voice = _tts_engine_voice(self._cfg)
+        key = (engine, voice, phrase)
+        cache = getattr(self, "_ack_cache", None)
+        if cache is None:
+            cache = self._ack_cache = {}
+        if key in cache:
+            return cache[key]
+        from .. import tts_engine
+        speed = (self._cfg.tts_speed if self._cfg else None) or 1.0
+        audio, sr = tts_engine.synthesize(phrase, voice=voice, speed=speed, engine=engine)
+        src = "data:audio/wav;base64," + base64.b64encode(
+            tts_engine.audio_to_wav_bytes(audio, sr)).decode("ascii")
+        cache[key] = src
+        return src
 
     def resolve_worker_permission(self, rid: str, answer: str, feedback: str = ""):
         """Answer a background worker's permission request (approve-by-voice or

@@ -128,6 +128,29 @@ def _api(monkeypatch, tmp_path):
 _WEBM = "data:audio/webm;base64," + base64.b64encode(b"x" * 2048).decode()
 
 
+def test_transcribing_status_is_not_saved_to_chat(monkeypatch, tmp_path):
+    # The routine "Transcribing…" must NOT become a saved chat notice; only the
+    # one-time install/download should surface, and only as a transient toast.
+    api = _api(monkeypatch, tmp_path)
+    events = types.SimpleNamespace(
+        info=lambda *a, **k: events.notices.append(a[0] if a else ""),
+        toast=lambda msg, level="info": events.toasts.append(msg),
+    )
+    events.notices, events.toasts = [], []
+    api._events_global = events
+
+    def fake_transcribe(path, model="", language="", status=None):
+        status("Transcribing…")                    # per-clip, should be dropped
+        status("Downloading the 'base' speech model (first time only)...")  # one-time -> toast
+        return "hello"
+
+    monkeypatch.setattr("glmcode.stt.transcribe", fake_transcribe)
+    assert api.transcribe_audio(_WEBM) == {"text": "hello"}
+    assert events.notices == []                    # nothing saved into the chat
+    assert any("Downloading" in t for t in events.toasts)
+    assert not any("Transcrib" in t for t in events.toasts)
+
+
 def test_transcribe_audio_returns_text_and_cleans_up(monkeypatch, tmp_path):
     api = _api(monkeypatch, tmp_path)
     seen = {}

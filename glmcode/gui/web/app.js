@@ -1079,6 +1079,9 @@ function handle(ev) {
       scrollDown();
       break;
     }
+    case "toast":  // transient side popup, never saved into the chat
+      toast(ev.text, ev.level || "info", ev.level === "error" ? 8000 : 3500);
+      break;
     case "status": {
       $("status-chip").hidden = !ev.active;
       $("status-label").textContent = ev.label || "";
@@ -3784,7 +3787,7 @@ const voice = {
   perm: null, permQ: [], muted: false, pttKey: "Space", endpointMs: 750,
   waveRaf: 0, lastReply: [], replyChunks: [], curTurnEl: null, replyEl: null,
   gated: false, gateOpen: true,  // wake-gated turns: each request needs the wake word
-  thinkTimer: 0,
+  thinkTimer: 0, acking: false, ackAudio: null,
 };
 // True when we're in a session but "soft-muted" -- listening only for the wake
 // word before we'll accept another request (vs the open state where we take
@@ -3906,6 +3909,7 @@ function stopVoice() {
   onTtsIdle = null;
   resetTtsPlayback();
   stopThinkCue();
+  stopAck();
   voice.speaking = voice.thinking = false;
   if (voice.waveRaf) { cancelAnimationFrame(voice.waveRaf); voice.waveRaf = 0; }
   if (voice.timer) { clearInterval(voice.timer); voice.timer = 0; }
@@ -3950,7 +3954,7 @@ function vadTick() {
   // record bursts, but only to check them for the wake word -- so we listen
   // through our own speech too (echo cancellation + the phrase check keep the
   // TTS from self-triggering).
-  const gate = (voice.speaking && !wakeGating()) ? bargeThresh() : startThresh();
+  const gate = ((voice.speaking || voice.acking) && !wakeGating()) ? bargeThresh() : startThresh();
   if (e > gate) {
     startUtterance();
   } else {
@@ -3978,6 +3982,7 @@ function recordingTick(e) {
   // while the agent was talking or thinking, that's a barge-in: cut its reply.
   if (!voice.confirmed && voice.voicedMs >= V_ONSET_MS) {
     voice.confirmed = true;
+    stopAck();  // you're talking now -- cut the "Yes?" short
     if (wakeGating()) {
       // Soft-muted: don't cut the reply or claim we're taking a request -- we
       // don't know yet whether this burst is the wake word. Decide after STT.
@@ -4073,9 +4078,8 @@ async function finishUtterance() {
     if (!m) { idleOrListen(); return; }        // not for us -- keep listening for the wake word
     if (voice.speaking || voice.thinking) interruptReply();  // summoned mid-reply: stop and listen
     voice.gateOpen = true;
-    earcon("wake");
-    if (m.command) { submitVoiceRequest(m.command); }  // said "wake + request" in one breath
-    else { setVoiceOrb("listening"); setVoiceStatus("Yes? Go ahead…"); }
+    if (m.command) { earcon("wake"); submitVoiceRequest(m.command); }  // "wake + request" in one breath
+    else { acknowledgeWake(); setVoiceOrb("listening"); setVoiceStatus("Yes? Go ahead…"); }
     return;
   }
   // "Say that again" / "repeat" -> replay the last reply instead of a new turn.
@@ -4298,6 +4302,22 @@ function handleVoiceEvent(ev) {
     case "tts_reset":
       resetTtsPlayback();
       break;
+    case "voice_ack": {
+      // Short spoken "Yes?" after the wake word. Gate the mic (acking) while it
+      // plays so it isn't recorded as your request, but a loud barge-in still
+      // gets through.
+      if (!voice.active) break;
+      try {
+        voice.acking = true;
+        const a = new Audio(ev.src);
+        voice.ackAudio = a;
+        const done = () => { voice.acking = false; voice.ackAudio = null; };
+        a.addEventListener("ended", done);
+        a.addEventListener("error", done);
+        a.play().catch(done);
+      } catch (e) { voice.acking = false; }
+      break;
+    }
     case "tool_call": {
       // The delegator peeking at the code to answer you -- show what it's on.
       const LOOK = { read_file: "Reading", grep: "Searching", glob: "Searching",
@@ -4602,7 +4622,20 @@ async function wakeFinish() {
     // "hey assistant, add dark mode" -> open the session AND run that request
     // (in gated mode submitVoiceRequest re-mutes afterward).
     if (m.command && voice.active) submitVoiceRequest(m.command);
+    else if (voice.active) acknowledgeWake();  // just the wake word -> say we're listening
   }
+}
+
+// Confirm the wake word was heard: an instant tone plus a short spoken "Yes?"
+// so you know it's actually listening for your request.
+function acknowledgeWake() {
+  earcon("wake");
+  try { api().voice_ack(); } catch (e) { /* ignore */ }
+}
+function stopAck() {
+  if (voice.ackAudio) { try { voice.ackAudio.pause(); } catch (e) { /* ignore */ } }
+  voice.ackAudio = null;
+  voice.acking = false;
 }
 
 // True (with any trailing command) if the transcript contains the wake phrase.
