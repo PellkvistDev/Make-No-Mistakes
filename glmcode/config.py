@@ -170,6 +170,14 @@ class Config:
     # writes (see permissions.path_rule_action): trusted paths auto-approve even
     # in "ask" mode, protected paths prompt/block even in "yolo".
     path_rules: list = field(default_factory=list)
+    # GitHub integration: where cloned repos land ("" = the default sibling of
+    # the app + whiteboard folders, resolved in the GUI), and whether a
+    # connected session auto-pulls on open / auto-pushes after a change. The
+    # token itself is NEVER stored here -- it lives in the OS keyring / encrypted
+    # store (see secretstore.py).
+    github_clone_root: str = ""
+    github_auto_pull: bool = True
+    github_auto_push: bool = True
 
     extra: dict = field(default_factory=dict)
 

@@ -185,6 +185,13 @@
       Compact
     </button>
     <span id="model-foot" class="composer-foot-text">glm-4.7-flash via z.ai — always $0.00</span>
+    <div id="gh-foot" class="gh-foot" hidden>
+      <svg class="gh-foot-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
+      <span id="gh-foot-name" class="gh-foot-name mono"></span>
+      <span id="gh-foot-counts" class="gh-foot-counts"></span>
+      <button id="gh-foot-pull" class="gh-foot-btn" title="Pull the latest from GitHub">Pull</button>
+      <button id="gh-foot-sync" class="gh-foot-btn primary" title="Commit &amp; push your changes">Sync</button>
+    </div>
   </div>
 </footer>
 
@@ -297,12 +304,17 @@
     <div class="sheet-head">
       <h2 id="newchat-title">New chat</h2>
     </div>
-    <p class="row-sub">Pick a project folder, or use the whiteboard for quick, throwaway work.</p>
+    <p class="row-sub">Pick a project folder, clone a GitHub repository, or use the whiteboard for quick, throwaway work.</p>
     <div class="row newchat-backup-row">
       <div class="row-text"><label for="newchat-backup">Auto-backup this project</label>
         <span class="row-sub">Snapshots your files before each message, so you can revert if something goes wrong</span></div>
       <button id="newchat-backup" class="switch" role="switch" aria-checked="true"><span></span></button>
     </div>
+    <div id="newchat-gh" class="newchat-gh">
+      <input id="newchat-gh-url" class="text-input" placeholder="Clone a GitHub repo — owner/repo or URL">
+      <button id="newchat-gh-go" class="btn btn-primary">Clone</button>
+    </div>
+    <p class="row-sub" id="newchat-gh-hint" hidden>Connect a GitHub token in Settings → GitHub to clone private repositories.</p>
     <div class="sheet-actions">
       <button id="newchat-whiteboard" class="btn btn-ghost">Open whiteboard</button>
       <button id="newchat-folder" class="btn btn-primary">Open a folder…</button>
@@ -345,6 +357,7 @@
       <button class="settings-tab-btn" data-tab="voice" role="tab">Voice</button>
       <button class="settings-tab-btn" data-tab="models" role="tab">Models &amp; tools</button>
       <button class="settings-tab-btn" data-tab="browser" role="tab">Browser</button>
+      <button class="settings-tab-btn" data-tab="github" role="tab">GitHub</button>
       <button class="settings-tab-btn" data-tab="chat" role="tab">Chat</button>
     </div>
 
@@ -608,6 +621,87 @@
           verify (run tests / the affected code). Turn off if you'd rather it just edits without
           running commands.</span></div>
         <button id="opt-verify" class="switch" role="switch" aria-checked="false"><span></span></button></div>
+    </section>
+
+    <section data-tab="github">
+      <h3>GitHub account</h3>
+      <p class="row-sub">Connect once with a <strong>fine-grained personal access token</strong>
+        (Settings → Developer settings → Tokens on GitHub) scoped to the repos you want, with
+        <em>Contents: read &amp; write</em>. Your token is stored in your operating system's
+        secure credential store — never in this app's config file, never in a repo, never in a
+        URL. <a id="gh-token-help" href="#">How to create a token →</a></p>
+      <div id="gh-disconnected">
+        <div class="provider-form">
+          <input id="gh-token" class="text-input" type="password" placeholder="Paste your GitHub token">
+          <div class="sheet-actions"><button id="gh-token-save" class="btn btn-primary">Connect GitHub</button></div>
+        </div>
+      </div>
+      <div id="gh-connected" hidden>
+        <div class="row"><div class="row-text"><label>Signed in</label>
+          <span class="row-sub" id="gh-login">—</span></div>
+          <div class="row-actions"><button id="gh-token-forget" class="btn btn-danger-ghost">Disconnect</button></div>
+        </div>
+        <p class="row-sub" id="gh-storage-note" hidden></p>
+      </div>
+      <div class="row"><div class="row-text"><label for="gh-clone-root">Clone folder</label>
+        <span class="row-sub" id="gh-clone-root-note">Where connected repositories are cloned</span></div>
+      </div>
+      <div class="provider-form"><input id="gh-clone-root" class="text-input" placeholder="Default: a 'repos' folder next to the app"></div>
+      <div class="row"><div class="row-text"><label for="gh-auto-pull">Pull on open</label>
+        <span class="row-sub">When you open a connected chat, fetch the latest first (skipped if you have uncommitted changes)</span></div>
+        <button id="gh-auto-pull" class="switch" role="switch" aria-checked="true"><span></span></button></div>
+      <div class="row"><div class="row-text"><label for="gh-auto-push">Push after changes</label>
+        <span class="row-sub">After a turn that edits files, commit &amp; push to GitHub automatically</span></div>
+        <button id="gh-auto-push" class="switch" role="switch" aria-checked="true"><span></span></button></div>
+    </section>
+
+    <section data-tab="github">
+      <h3>This chat</h3>
+      <p class="row-sub" id="gh-unavailable" hidden>git isn't installed or on your PATH, so GitHub sync is unavailable.</p>
+      <!-- Connected: status + actions -->
+      <div id="gh-repo-connected" hidden>
+        <div class="row"><div class="row-text"><label>Repository</label>
+          <span class="row-sub mono" id="gh-repo-name">—</span></div>
+          <div class="row-actions"><button id="gh-open-remote" class="btn btn-ghost">Open on GitHub</button></div>
+        </div>
+        <div class="row"><div class="row-text"><label>Status</label>
+          <span class="row-sub" id="gh-repo-status">—</span></div>
+          <div class="row-actions">
+            <button id="gh-pull" class="btn btn-ghost">Pull</button>
+            <button id="gh-sync" class="btn btn-primary">Sync</button>
+          </div>
+        </div>
+        <div class="row"><div class="row-text"><label>Disconnect</label>
+          <span class="row-sub">Stops syncing this folder. Your files stay; nothing is deleted.</span></div>
+          <div class="row-actions"><button id="gh-repo-disconnect" class="btn btn-danger-ghost">Disconnect repo</button></div>
+        </div>
+      </div>
+      <!-- Not connected: clone a new one, or connect this folder -->
+      <div id="gh-repo-disconnected">
+        <p class="row-sub">Start a new chat from a GitHub repository — it's cloned into your clone
+          folder and opened as its own project.</p>
+        <div class="provider-form">
+          <input id="gh-clone-url" class="text-input" placeholder="owner/repo  or  https://github.com/owner/repo">
+          <div class="sheet-actions">
+            <button id="gh-clone-pick" class="btn btn-ghost">Pick from my repos…</button>
+            <button id="gh-clone-go" class="btn btn-primary">Clone &amp; open</button>
+          </div>
+        </div>
+        <div id="gh-repo-list" class="provider-list" hidden></div>
+        <p class="row-sub" style="margin-top:14px">…or push <strong>this chat's folder</strong> up to GitHub:</p>
+        <div class="provider-form">
+          <input id="gh-connect-url" class="text-input" placeholder="Existing empty repo: owner/repo or URL">
+          <div class="sheet-actions"><button id="gh-connect-go" class="btn btn-primary">Connect &amp; push</button></div>
+        </div>
+        <div class="provider-form">
+          <input id="gh-new-name" class="text-input" placeholder="…or create a brand-new repo: name">
+          <div class="seg" id="gh-new-vis" role="radiogroup" aria-label="Visibility">
+            <button data-v="private" role="radio" class="on">Private</button>
+            <button data-v="public" role="radio">Public</button>
+          </div>
+          <div class="sheet-actions"><button id="gh-create-go" class="btn btn-primary">Create &amp; push</button></div>
+        </div>
+      </div>
     </section>
 
     <section data-tab="chat">

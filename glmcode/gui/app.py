@@ -29,6 +29,7 @@ from .. import backup as backup_module
 from ..config import (BUILTIN_PROVIDER_NAME, CONFIG_DIR, PERMISSION_MODES, Config,
                       all_providers, find_provider, load_config, save_config)
 from ..events import AgentEvents
+from .. import githubsync
 from ..notify import APP_NAME, notify
 from ..prompts import EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT
 from ..sessions import SessionStore, new_id, to_display
@@ -901,6 +902,8 @@ class Api:
             "browser_keep_logins": c.browser_keep_logins,
             "browser_provider": c.browser_provider, "browser_model": c.browser_model,
             "path_rules": [dict(r) for r in c.path_rules],
+            "github_clone_root": c.github_clone_root,
+            "github_auto_pull": c.github_auto_pull, "github_auto_push": c.github_auto_push,
         }
 
     def set_setting(self, key: str, value):
@@ -973,6 +976,10 @@ class Api:
                 c.temperature = min(1.5, max(0.0, float(value)))
             except (TypeError, ValueError):
                 pass
+        elif key == "github_clone_root":
+            c.github_clone_root = str(value or "").strip()
+        elif key in ("github_auto_pull", "github_auto_push"):
+            setattr(c, key, bool(value))
         elif key == "path_rules":
             # Mutate the existing list IN PLACE (c.path_rules[:] = ...) rather
             # than rebinding it: every live agent's PermissionEngine shares this
@@ -1405,6 +1412,8 @@ class Api:
         agent.rebuild_system_prompt()
         self._cfg.last_session_id = sid
         save_config(self._cfg)
+        if cwd_ok:
+            self._maybe_autopull(workdir)  # background pull if this is a connected repo
         return self._session_payload(self._chats[sid])
 
     def _switch_to_live(self, sid: str) -> dict:
@@ -1474,6 +1483,226 @@ class Api:
             except OSError:
                 pass
         return {"ok": True}
+
+    # -- GitHub integration ------------------------------------------------- #
+
+    def _clone_root(self) -> Path:
+        """Where cloned repos land: the configured folder, or the default
+        sibling of the app + whiteboard folders."""
+        raw = (self._cfg.github_clone_root or "").strip()
+        if raw:
+            return Path(raw).expanduser()
+        return WHITEBOARD_DIR.parent / "repos"
+
+    def _gh_token(self) -> str | None:
+        return githubsync.load_token("github.com")
+
+    def github_env(self):
+        """Everything the UI needs to render the GitHub controls: whether git is
+        present, whether a token is stored (and how securely), and the current
+        clone-root / auto-sync settings."""
+        store_secure = githubsync.get_store_secure()
+        login = self._cfg.extra.get("github_login", "")
+        return {
+            "available": githubsync.available(),
+            "token_present": bool(self._gh_token()),
+            "login": login,
+            "backend": githubsync.token_backend(),
+            "secure": store_secure,
+            "clone_root": str(self._clone_root()),
+            "auto_pull": bool(self._cfg.github_auto_pull),
+            "auto_push": bool(self._cfg.github_auto_push),
+        }
+
+    def github_set_token(self, token: str):
+        """Verify a token against the GitHub API, then store it securely. The
+        raw token is never returned or written to config -- only the resolved
+        login name (public) is cached for display."""
+        token = (token or "").strip()
+        if not token:
+            return {"error": "Enter a token."}
+        try:
+            who = githubsync.verify_token(token)
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        githubsync.save_token("github.com", token)
+        self._cfg.extra["github_login"] = who.get("login", "")
+        save_config(self._cfg)
+        return {"ok": True, **self.github_env()}
+
+    def github_forget_token(self):
+        githubsync.forget_token("github.com")
+        self._cfg.extra.pop("github_login", None)
+        save_config(self._cfg)
+        return {"ok": True, **self.github_env()}
+
+    def github_list_repos(self):
+        token = self._gh_token()
+        if not token:
+            return {"error": "Connect a GitHub token first."}
+        try:
+            return {"repos": githubsync.list_repos(token)}
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+
+    def github_status(self):
+        """Live sync status of the ACTIVE session's folder (no network)."""
+        cs = self._active
+        if cs is None:
+            return {"connected": False}
+        path = Path(cs.agent.workdir)
+        try:
+            st = githubsync.status(path)
+            if st.remote_url:
+                try:
+                    st.host, st.owner, st.repo = githubsync.parse_repo(st.remote_url)
+                except githubsync.GitHubError:
+                    pass
+            d = st.as_dict()
+        except Exception:
+            d = {"connected": False}
+        d["token_present"] = bool(self._gh_token())
+        return d
+
+    def github_clone(self, url: str, auto_backup: bool = True):
+        """Clone a repo into the clone-root and open a new session in it."""
+        if not githubsync.available():
+            return {"error": "git isn't installed or on PATH."}
+        try:
+            host, owner, repo = githubsync.parse_repo(url)
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        token = self._gh_token()
+        dest = githubsync.target_dir(self._clone_root(), owner, repo)
+        try:
+            githubsync.clone(host, owner, repo, dest, token,
+                             on_status=lambda m: self._events.toast(m, "info"))
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        res = self._activate_session(new_id(), [], str(dest), 0, 0, [],
+                                     auto_backup=auto_backup)
+        res["sessions"] = self.list_sessions()
+        res["github"] = self.github_status()
+        return res
+
+    def github_connect(self, url: str):
+        """Mid-session: attach the ACTIVE folder to an existing (often empty)
+        repo and push everything up."""
+        cs = self._active
+        if cs is None:
+            return {"error": "Open a chat first."}
+        try:
+            host, owner, repo = githubsync.parse_repo(url)
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        token = self._gh_token()
+        try:
+            githubsync.connect_existing(Path(cs.agent.workdir), host, owner, repo,
+                                        token, on_status=lambda m: self._events.toast(m, "info"))
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        self._events.toast("Connected to GitHub and synced.", "info")
+        return {"ok": True, "github": self.github_status()}
+
+    def github_create_and_connect(self, name: str, private: bool = True):
+        """Create a brand-new repo under the user's account, then connect the
+        active folder to it and sync -- the smooth 'push this to a new repo' flow."""
+        cs = self._active
+        if cs is None:
+            return {"error": "Open a chat first."}
+        token = self._gh_token()
+        if not token:
+            return {"error": "Connect a GitHub token first."}
+        try:
+            made = githubsync.create_repo(token, name, private=private)
+            githubsync.connect_existing(
+                Path(cs.agent.workdir), "github.com", made["owner"], made["name"],
+                token, on_status=lambda m: self._events.toast(m, "info"))
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        self._events.toast(f"Created {made['full_name']} and synced.", "info")
+        return {"ok": True, "github": self.github_status()}
+
+    def github_pull(self):
+        cs = self._active
+        if cs is None:
+            return {"error": "Open a chat first."}
+        path = Path(cs.agent.workdir)
+        token = self._gh_token()
+        try:
+            # Commit local work first so a rebase pull never fails on a dirty
+            # tree (nothing is lost; the user can review the commit).
+            githubsync.commit_all(path, "Local changes before pull")
+            msg = githubsync.pull(path, token,
+                                  on_status=lambda m: self._events.toast(m, "info"))
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        self._events.toast(msg, "info")
+        return {"ok": True, "github": self.github_status()}
+
+    def github_sync(self):
+        cs = self._active
+        if cs is None:
+            return {"error": "Open a chat first."}
+        token = self._gh_token()
+        try:
+            msg = githubsync.sync(Path(cs.agent.workdir), token,
+                                  message=cs.title or "Update via Make No Mistakes",
+                                  on_status=lambda m: self._events.toast(m, "info"))
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        self._events.toast(msg, "info")
+        return {"ok": True, "github": self.github_status()}
+
+    def github_disconnect(self):
+        cs = self._active
+        if cs is None:
+            return {"error": "Open a chat first."}
+        try:
+            githubsync.disconnect(Path(cs.agent.workdir))
+        except Exception as e:
+            return {"error": str(e)}
+        return {"ok": True, "github": self.github_status()}
+
+    def _maybe_autopull(self, workdir: Path) -> None:
+        """Background best-effort pull when opening a connected session. Skips a
+        dirty tree (never touches uncommitted local work automatically)."""
+        if not self._cfg.github_auto_pull:
+            return
+        ev = self._events  # capture now; the active chat may change later
+        def work():
+            try:
+                st = githubsync.status(workdir)
+                if not st.connected or st.dirty:
+                    return
+                token = self._gh_token()
+                out = githubsync.pull(workdir, token)
+                if "up to date" not in out.lower():
+                    ev.toast("Pulled latest from GitHub.", "info")
+            except Exception:
+                pass  # opening a chat must never fail because of a pull
+        threading.Thread(target=work, daemon=True).start()
+
+    def _maybe_autopush(self, cs: "ChatState") -> None:
+        """Background best-effort commit+push after a turn that changed files."""
+        if not self._cfg.github_auto_push:
+            return
+        workdir = Path(cs.agent.workdir)
+        ev = cs.events
+        def work():
+            try:
+                st = githubsync.status(workdir)
+                if not st.connected or not (st.dirty or st.ahead > 0):
+                    return
+                token = self._gh_token()
+                githubsync.sync(workdir, token,
+                                message=cs.title or "Update via Make No Mistakes")
+                ev.toast("Synced changes to GitHub.", "info")
+            except githubsync.GitHubError as e:
+                ev.toast(f"GitHub sync failed: {e}", "warn")
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
 
     def open_session(self, sid: str):
         # Live chats (running or not) switch instantly; others load from disk.
@@ -1841,6 +2070,7 @@ class Api:
                         completion_tokens=u.completion_tokens,
                         context=agent.context_estimate(),
                         title=cs.title, sessions=self.list_sessions())
+            self._maybe_autopush(cs)  # background commit+push if connected
             self._os_attention(cs.sid, "Done -- waiting for you."
                                if ok else "Stopped on an error -- waiting for you.")
 

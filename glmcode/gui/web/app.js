@@ -3241,6 +3241,12 @@ function syncSettingsUI() {
   $("opt-reduce-fx").setAttribute("aria-checked", !!settings.reduce_effects);
   $("opt-browser-headless").setAttribute("aria-checked", !!settings.browser_headless);
   $("opt-browser-logins").setAttribute("aria-checked", !!settings.browser_keep_logins);
+  $("gh-auto-pull").setAttribute("aria-checked", settings.github_auto_pull !== false);
+  $("gh-auto-push").setAttribute("aria-checked", settings.github_auto_push !== false);
+  if (document.activeElement !== $("gh-clone-root"))
+    $("gh-clone-root").value = settings.github_clone_root || "";
+  if (githubEnv && githubEnv.clone_root)
+    $("gh-clone-root-note").textContent = "Cloned repositories go here: " + githubEnv.clone_root;
   applyPerfMode();
   $("cwd-label").textContent = settings.cwd || "No chat selected";
   $("cwd-label").title = settings.cwd || "";
@@ -3306,6 +3312,8 @@ async function openSettings() {
   populateMcp();
   populateCommands();
   renderPathRules();
+  refreshGithubEnv();
+  refreshGithubRepo();
   try {
     const u = await api().usage();
     $("session-usage").textContent =
@@ -3384,6 +3392,189 @@ bindSwitch("opt-notify", "notifications");
 bindSwitch("opt-reduce-fx", "reduce_effects");
 bindSwitch("opt-browser-headless", "browser_headless");
 bindSwitch("opt-browser-logins", "browser_keep_logins");
+bindSwitch("gh-auto-pull", "github_auto_pull");
+bindSwitch("gh-auto-push", "github_auto_push");
+
+/* ---- GitHub integration ---------------------------------------------- */
+
+let githubEnv = {};
+let ghNewVisibility = "private";
+let ghRemoteUrl = "";
+
+async function refreshGithubEnv() {
+  try { githubEnv = await api().github_env(); } catch (e) { githubEnv = { available: false }; }
+  renderGithubSettings();
+}
+
+function renderGithubSettings() {
+  const e = githubEnv || {};
+  const connected = !!e.token_present;
+  $("gh-disconnected").hidden = connected;
+  $("gh-connected").hidden = !connected;
+  $("gh-login").textContent = e.login ? ("@" + e.login) : "connected";
+  const note = $("gh-storage-note");
+  if (connected && e.secure === false) {
+    note.hidden = false;
+    note.textContent = "No OS keyring was found, so your token is kept in an encrypted file " +
+      "instead — weaker, since someone with your user account could read it. Install the " +
+      "'keyring' package for OS-backed storage.";
+  } else { note.hidden = true; }
+  $("gh-unavailable").hidden = e.available !== false;
+  $("newchat-gh-hint").hidden = connected;
+}
+
+function ghStatusText(st) {
+  const bits = ["branch " + (st.branch || "?")];
+  if (st.ahead) bits.push("↑" + st.ahead + " to push");
+  if (st.behind) bits.push("↓" + st.behind + " to pull");
+  if (st.dirty) bits.push("uncommitted changes");
+  if (!st.ahead && !st.behind && !st.dirty) bits.push("up to date");
+  return bits.join(" · ");
+}
+
+async function refreshGithubRepo() {
+  let st = { connected: false };
+  try { st = await api().github_status(); } catch (e) { /* ignore */ }
+  const connected = !!st.connected;
+  const rc = $("gh-repo-connected"), rd = $("gh-repo-disconnected");
+  if (rc) rc.hidden = !connected;
+  if (rd) rd.hidden = connected;
+  if (connected) {
+    const name = (st.owner && st.repo) ? `${st.owner}/${st.repo}` : (st.remote_url || "repository");
+    if ($("gh-repo-name")) $("gh-repo-name").textContent = name;
+    if ($("gh-repo-status")) $("gh-repo-status").textContent = ghStatusText(st);
+    ghRemoteUrl = (st.owner && st.repo) ? `https://${st.host || "github.com"}/${st.owner}/${st.repo}` : "";
+  }
+  renderGithubFoot(st);
+}
+
+function renderGithubFoot(st) {
+  const foot = $("gh-foot");
+  if (!foot) return;
+  if (!st || !st.connected) { foot.hidden = true; return; }
+  foot.hidden = false;
+  $("gh-foot-name").textContent = (st.owner && st.repo) ? `${st.owner}/${st.repo}` : "repo";
+  const c = [];
+  if (st.ahead) c.push("↑" + st.ahead);
+  if (st.behind) c.push("↓" + st.behind);
+  if (st.dirty) c.push("●");
+  $("gh-foot-counts").textContent = c.join(" ");
+}
+
+async function ghAction(btn, fn, restore) {
+  const label = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; if (restore !== false) btn.textContent = "…"; }
+  try {
+    const res = await fn();
+    if (res && res.error) { toast(res.error, "error", 6000); return null; }
+    return res;
+  } finally {
+    if (btn) { btn.disabled = false; if (restore !== false) btn.textContent = label; }
+  }
+}
+
+$("gh-token-save").addEventListener("click", async () => {
+  const t = $("gh-token").value.trim();
+  if (!t) { toast("Paste a token first.", "error", 3000); return; }
+  const res = await ghAction($("gh-token-save"), () => api().github_set_token(t));
+  if (!res) return;
+  $("gh-token").value = "";
+  githubEnv = res; renderGithubSettings();
+  toast("GitHub connected" + (res.login ? ` as @${res.login}` : "") + ".", "info", 3500);
+});
+$("gh-token-forget").addEventListener("click", async () => {
+  githubEnv = await api().github_forget_token();
+  renderGithubSettings();
+  toast("GitHub token removed.", "info", 2500);
+});
+$("gh-token-help").addEventListener("click", (e) => {
+  e.preventDefault();
+  api().open_external("https://github.com/settings/tokens?type=beta");
+});
+$("gh-clone-root").addEventListener("change", async () => {
+  settings = await api().set_setting("github_clone_root", $("gh-clone-root").value.trim());
+  refreshGithubEnv();
+});
+
+async function ghClone(url, btn) {
+  if (!url) { toast("Enter a repository.", "error", 3000); return; }
+  const res = await ghAction(btn, () => api().github_clone(url));
+  if (!res) return;
+  $("settings-backdrop").hidden = true;
+  $("newchat-backdrop").hidden = true;
+  applySession(res);
+  input.focus();
+}
+$("gh-clone-go").addEventListener("click", () => ghClone($("gh-clone-url").value.trim(), $("gh-clone-go")));
+$("newchat-gh-go").addEventListener("click", () => ghClone($("newchat-gh-url").value.trim(), $("newchat-gh-go")));
+$("newchat-gh-url").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("newchat-gh-go").click(); }
+});
+
+$("gh-clone-pick").addEventListener("click", async () => {
+  const list = $("gh-repo-list");
+  const res = await ghAction($("gh-clone-pick"), () => api().github_list_repos(), false);
+  if (!res) return;
+  list.hidden = false;
+  list.innerHTML = "";
+  for (const r of res.repos || []) {
+    const row = document.createElement("button");
+    row.className = "gh-repo-row";
+    row.innerHTML = `<span class="gh-repo-name mono"></span>` +
+      `<span class="gh-repo-tag">${r.private ? "private" : "public"}${r.empty ? " · empty" : ""}</span>`;
+    row.querySelector(".gh-repo-name").textContent = r.full_name;
+    row.addEventListener("click", () => ghClone(r.full_name, row));
+    list.appendChild(row);
+  }
+  if (!list.children.length) list.innerHTML = '<div class="row-sub">No repositories found for this token.</div>';
+});
+
+$("gh-connect-go").addEventListener("click", async () => {
+  const url = $("gh-connect-url").value.trim();
+  if (!url) { toast("Enter the repo to connect to.", "error", 3000); return; }
+  const res = await ghAction($("gh-connect-go"), () => api().github_connect(url));
+  if (!res) return;
+  $("gh-connect-url").value = "";
+  refreshGithubRepo();
+});
+
+document.querySelectorAll("#gh-new-vis button").forEach((b) =>
+  b.addEventListener("click", () => {
+    ghNewVisibility = b.dataset.v;
+    document.querySelectorAll("#gh-new-vis button").forEach((x) => {
+      x.classList.toggle("on", x === b);
+      x.setAttribute("aria-checked", x === b);
+    });
+  }));
+
+$("gh-create-go").addEventListener("click", async () => {
+  const name = $("gh-new-name").value.trim();
+  if (!name) { toast("Name the new repository.", "error", 3000); return; }
+  const res = await ghAction($("gh-create-go"),
+    () => api().github_create_and_connect(name, ghNewVisibility === "private"));
+  if (!res) return;
+  $("gh-new-name").value = "";
+  refreshGithubRepo();
+});
+
+$("gh-pull").addEventListener("click", async () => {
+  if (await ghAction($("gh-pull"), () => api().github_pull())) refreshGithubRepo();
+});
+$("gh-sync").addEventListener("click", async () => {
+  if (await ghAction($("gh-sync"), () => api().github_sync())) refreshGithubRepo();
+});
+$("gh-repo-disconnect").addEventListener("click", async () => {
+  if (!confirm("Stop syncing this folder with GitHub? Your files are kept.")) return;
+  if (await ghAction($("gh-repo-disconnect"), () => api().github_disconnect())) refreshGithubRepo();
+});
+$("gh-open-remote").addEventListener("click", () => { if (ghRemoteUrl) api().open_external(ghRemoteUrl); });
+
+$("gh-foot-pull").addEventListener("click", async () => {
+  if (await ghAction($("gh-foot-pull"), () => api().github_pull())) refreshGithubRepo();
+});
+$("gh-foot-sync").addEventListener("click", async () => {
+  if (await ghAction($("gh-foot-sync"), () => api().github_sync())) refreshGithubRepo();
+});
 
 $("browser-clear-data").addEventListener("click", async () => {
   if (!confirm("Log the agent browser out of everything and delete its saved data?")) return;
@@ -3630,6 +3821,7 @@ function applySession(res) {
   }
   renderSidebar();
   populateModelPicker(); // each chat can use a different model -- refresh the footer
+  refreshGithubRepo();   // update the sync chip for this chat's folder
 }
 
 async function newChat() {
