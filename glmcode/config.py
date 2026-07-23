@@ -177,7 +177,7 @@ class Config:
     # store (see secretstore.py).
     github_clone_root: str = ""
     github_auto_pull: bool = True
-    github_auto_push: bool = True
+    github_auto_push: bool = False   # off by default: push happens on the Sync button, not every turn
 
     extra: dict = field(default_factory=dict)
 
