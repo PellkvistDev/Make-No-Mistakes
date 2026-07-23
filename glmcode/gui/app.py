@@ -884,7 +884,7 @@ class Api:
             "mode": c.mode, "model": c.model, "vision_model": c.vision_model,
             "vision_route": c.vision_route, "thinking": c.thinking,
             "thinking_mode": c.thinking_mode, "verify_edits": c.verify_edits,
-            "auto_fix_tests": c.auto_fix_tests,
+            "auto_fix_tests": c.auto_fix_tests, "parallel_attempts": c.parallel_attempts,
             "show_reasoning": c.show_reasoning, "temperature": c.temperature,
             "cwd": str(Path.cwd()) if self.session_id else "",
             "background_custom": bool(c.background_path),
@@ -975,6 +975,11 @@ class Api:
         elif key == "temperature":
             try:
                 c.temperature = min(1.5, max(0.0, float(value)))
+            except (TypeError, ValueError):
+                pass
+        elif key == "parallel_attempts":
+            try:
+                c.parallel_attempts = int(min(3, max(1, int(value))))
             except (TypeError, ValueError):
                 pass
         elif key == "github_clone_root":

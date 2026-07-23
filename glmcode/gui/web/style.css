@@ -1527,6 +1527,38 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
   background: rgba(10,132,255,0.16); }
 .gh-foot-btn:disabled { opacity: 0.6; cursor: default; }
 
+/* composer message-options popover (per-message behavior) */
+#opts-btn { position: relative; }
+#opts-btn.has-active { color: var(--accent); }
+.opts-dot {
+  position: absolute; top: 5px; right: 5px; width: 7px; height: 7px;
+  border-radius: 50%; background: var(--accent);
+  box-shadow: 0 0 6px rgba(10,132,255,0.7);
+}
+.opts-menu {
+  align-self: flex-start; width: min(430px, 100%);
+  background: rgba(16, 21, 34, 0.97);
+  border: 1px solid var(--stroke); border-radius: var(--r-md);
+  box-shadow: var(--shadow), var(--hi-top);
+  padding: 12px 15px; margin-bottom: 8px;
+  animation: floatUp var(--dur-3) var(--ease-out);
+}
+.opts-title {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.09em;
+  color: var(--text-faint); font-weight: 700; margin-bottom: 6px;
+}
+.opts-row { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
+.opts-row + .opts-row { border-top: 1px solid var(--stroke-soft); }
+.opts-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.opts-label { font-size: 13.5px; color: var(--text); font-weight: 600; }
+.opts-sub { font-size: 11.5px; color: var(--text-dim); }
+.opts-seg { flex: none; }
+.opts-seg button { padding: 4px 11px; font-size: 12px; }
+.opts-note {
+  font-size: 11px; color: var(--text-faint); margin-top: 8px;
+  border-top: 1px solid var(--stroke-soft); padding-top: 8px; line-height: 1.45;
+}
+
 /* custom slash-commands editor (same shell as the MCP editor) */
 #commands-editor {
   margin: 4px 0 12px; border: 1px solid var(--stroke-soft); border-radius: var(--r-sm);

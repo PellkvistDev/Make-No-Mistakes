@@ -3271,6 +3271,7 @@ function syncSettingsUI() {
   $("voice-wake-word").value = settings.voice_wake_word || "hey assistant";
   applyModeChip();
   applyReadAloudChip();
+  renderComposerOpts();
 }
 function shortPath(p) {
   const parts = p.split(/[\\/]/).filter(Boolean);
@@ -3390,6 +3391,52 @@ function bindSwitch(id, key) {
 bindSwitch("opt-reasoning", "show_reasoning");
 bindSwitch("opt-verify", "verify_edits");
 bindSwitch("opt-green", "auto_fix_tests");
+
+/* ---- composer message-options popover (per-message behavior) ---------- */
+function renderComposerOpts() {
+  const green = !!settings.auto_fix_tests;
+  const verify = settings.verify_edits === true;
+  const attempts = settings.parallel_attempts || 1;
+  $("opt-green2").setAttribute("aria-checked", String(green));
+  $("opt-verify2").setAttribute("aria-checked", String(verify));
+  document.querySelectorAll("#seg-attempts button").forEach((b) => {
+    const on = String(attempts) === b.dataset.v;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-checked", String(on));
+  });
+  const active = green || verify || attempts > 1;
+  $("opts-dot").hidden = !active;
+  $("opts-btn").classList.toggle("has-active", active);
+}
+async function setOpt(key, val) {
+  settings = await api().set_setting(key, val);
+  renderComposerOpts();
+  syncSettingsUI();   // keep the Settings-panel copies in sync
+}
+function closeOptsMenu() {
+  $("opts-menu").hidden = true;
+  $("opts-btn").setAttribute("aria-expanded", "false");
+}
+$("opts-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const show = $("opts-menu").hidden;
+  $("opts-menu").hidden = !show;
+  $("opts-btn").setAttribute("aria-expanded", String(show));
+  if (show) renderComposerOpts();
+});
+$("opt-green2").addEventListener("click", () =>
+  setOpt("auto_fix_tests", $("opt-green2").getAttribute("aria-checked") !== "true"));
+$("opt-verify2").addEventListener("click", () =>
+  setOpt("verify_edits", $("opt-verify2").getAttribute("aria-checked") !== "true"));
+document.querySelectorAll("#seg-attempts button").forEach((b) =>
+  b.addEventListener("click", () => setOpt("parallel_attempts", parseInt(b.dataset.v, 10))));
+document.addEventListener("click", (e) => {
+  if ($("opts-menu").hidden) return;
+  if (!$("opts-menu").contains(e.target) && !$("opts-btn").contains(e.target)) closeOptsMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("opts-menu").hidden) closeOptsMenu();
+});
 bindSwitch("opt-notify", "notifications");
 bindSwitch("opt-reduce-fx", "reduce_effects");
 bindSwitch("opt-browser-headless", "browser_headless");

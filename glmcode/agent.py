@@ -17,12 +17,12 @@ from .api import ApiError, Cancelled, RateLimiter, Usage, ZaiClient, estimate_to
 from .config import Config
 from .events import AgentEvents
 from .permissions import PermissionEngine
-from .prompts import (BROWSER_AGENT_SYSTEM, BROWSER_RESUME_NOTE, COMPACT_PROMPT,
-                      CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM, FRESH_CRITIC_SYSTEM,
-                      GREEN_GIVEUP_NUDGE, GREEN_NUDGE, REFINE_NUDGE,
-                      STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE, SUBAGENT_PREAMBLE,
-                      VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT, WRAP_UP_NUDGE,
-                      blind_critique_prompt, build_system_prompt,
+from .prompts import (ATTEMPT_TASK, BROWSER_AGENT_SYSTEM, BROWSER_RESUME_NOTE,
+                      COMPACT_PROMPT, CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM,
+                      FRESH_CRITIC_SYSTEM, GREEN_GIVEUP_NUDGE, GREEN_NUDGE,
+                      REFINE_NUDGE, STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE,
+                      SUBAGENT_PREAMBLE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
+                      WRAP_UP_NUDGE, blind_critique_prompt, build_system_prompt,
                       conversational_project_context, detect_check_command,
                       fresh_review_nudge, is_critic_approval, verify_nudge)
 from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
@@ -727,7 +727,10 @@ class Agent:
         self.wrap_up_requested.clear()
         self.busy = True
         try:
-            self._run_turn(user_message)
+            if self._should_race():
+                self._run_parallel_attempts(user_message)
+            else:
+                self._run_turn(user_message)
         finally:
             self.busy = False
             # If a steering message was queued but the turn ended (final
@@ -1088,6 +1091,119 @@ class Agent:
         self.messages.append({"role": "user",
                               "content": GREEN_NUDGE.format(cmd=cmd, output=output)})
         return True
+
+    # -- parallel attempts ("race", best-of-N) ---------------------------- #
+
+    def _should_race(self) -> bool:
+        """Race mode needs >1 attempts AND change tracking (the shadow-git repo)
+        to snapshot a common baseline, isolate each attempt by reverting to it,
+        and restore the winner. Only the main agent races (never a sub-agent /
+        attempt / worker / voice)."""
+        from .backup import available as backup_available
+        return (getattr(self.cfg, "parallel_attempts", 1) > 1
+                and self.allow_subagents and not self.conversational
+                and self.backup_repo is not None and backup_available())
+
+    def _make_attempt_agent(self, aid: str) -> "Agent":
+        sub = Agent(self.cfg, self.client,
+                    events=_CaptureEvents(self._emit_subagent_stream, aid),
+                    allow_subagents=False, workdir=self.workdir)
+        sub.model_override = self.model_override
+        sub.vision_client = self.vision_client
+        sub.backup_repo = self.backup_repo
+        sub.mcp = self.mcp
+        sub.permissions.mode = self.permissions.mode
+        return sub
+
+    def _score_attempt(self) -> tuple[bool | None, str]:
+        """Run the project's checks on the current work-tree. Returns
+        (passed, output): True/False, or None when there's nothing to run."""
+        cmd = detect_check_command(self.workdir)
+        if not cmd:
+            return None, ""
+        try:
+            return self._run_check(cmd)
+        except Exception:
+            return None, ""
+
+    @staticmethod
+    def _pick_winner(results: list[dict]) -> dict:
+        """Best attempt: tests passing beats unknown beats failing; a real change
+        beats none; earlier attempt wins ties (so we don't churn for no reason)."""
+        def rank(r):
+            tier = 2 if r["passed"] is True else (1 if r["passed"] is None else 0)
+            return (tier, 1 if r["changed"] else 0, -r["attempt"])
+        return max(results, key=rank)
+
+    def _run_parallel_attempts(self, user_message: dict) -> None:
+        self.maybe_autocompact()
+        self.messages.append(user_message)
+        if self.transcript:
+            self.transcript.user(_msg_text(user_message))
+        n = min(max(int(self.cfg.parallel_attempts), 2), 3)
+        baseline = self.backup_repo.snapshot("race baseline")
+        if not baseline:  # git hiccup -> just run a single normal turn
+            self.messages.pop()
+            self._run_turn(user_message)
+            return
+        task = _msg_text(user_message)
+        self.events.info(f"racing {n} independent attempts…")
+        results: list[dict] = []
+        for k in range(1, n + 1):
+            if self.cancel.is_set():
+                break
+            if k > 1:
+                self.backup_repo.revert_to(baseline)  # each attempt starts clean
+            aid = f"attempt-{k}"
+            self._emit_subagent(aid, f"attempt {k}", "running",
+                                mission=f"attempt {k} of {n}")
+            sub = self._make_attempt_agent(aid)
+            try:
+                sub.run_turn({"role": "user",
+                              "content": ATTEMPT_TASK.format(task=task, k=k, n=n)})
+            except (Cancelled, KeyboardInterrupt):
+                self._emit_subagent(aid, f"attempt {k}", "error", summary="cancelled")
+                break
+            commit = self.backup_repo.snapshot(f"attempt {k}")
+            passed, output = self._score_attempt()
+            changed = bool(self.backup_repo.changed_files_since(baseline))
+            report = _final_report_text(sub.messages)
+            verdict = ("tests pass" if passed else "tests fail" if passed is False
+                       else "no tests")
+            self._emit_subagent(aid, f"attempt {k}", "done",
+                                summary=f"{verdict}; {'changes made' if changed else 'no changes'}")
+            results.append({"attempt": k, "commit": commit, "passed": passed,
+                            "output": output, "changed": changed, "report": report})
+
+        if not results:  # cancelled before any attempt finished
+            self.backup_repo.revert_to(baseline)
+            self.messages.append({"role": "assistant",
+                                  "content": "(attempts cancelled before any finished)"})
+            return
+        winner = self._pick_winner(results)
+        if winner["commit"]:
+            self.backup_repo.revert_to(winner["commit"])  # keep the winner's files
+        summary = self._race_summary(results, winner)
+        self.events.stream_start()
+        self.events.content_delta(summary)
+        self.events.stream_end()
+        msg = {"role": "assistant", "content": summary}
+        self.messages.append(msg)
+        self._log_assistant_msg(msg)
+
+    def _race_summary(self, results: list[dict], winner: dict) -> str:
+        n = len(results)
+        lines = [f"Ran {n} independent attempt{'s' if n != 1 else ''} and kept "
+                 f"attempt {winner['attempt']}.\n"]
+        for r in results:
+            mark = "✓ kept" if r is winner else "·"
+            verdict = ("tests pass" if r["passed"] else "tests fail"
+                       if r["passed"] is False else "no tests to run")
+            lines.append(f"- Attempt {r['attempt']}: {verdict}"
+                         f"{'' if r['changed'] else ', no changes'} {mark}")
+        lines.append("")
+        lines.append(winner["report"] or "(the winning attempt left no written summary)")
+        return "\n".join(lines)
 
     # -- fresh-eyes review (High/Max) ------------------------------------- #
 

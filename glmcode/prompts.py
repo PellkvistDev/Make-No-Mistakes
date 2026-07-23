@@ -444,6 +444,16 @@ def detect_check_command(cwd: Path | None = None) -> str:
     return ""
 
 
+ATTEMPT_TASK = (
+    "{task}\n\n"
+    "[You are attempt {k} of {n} independent attempts at this SAME task — each runs in "
+    "isolation from a clean copy of the project, and only the best one is kept. Do the "
+    "COMPLETE task and verify your work. Take a genuinely different, sensible approach from "
+    "the most obvious one so the attempts explore different solutions; don't sabotage "
+    "yourself with a bad approach just to be different.]"
+)
+
+
 GREEN_NUDGE = (
     "[Automatic test run -- not from the user] I ran the project's checks (`{cmd}`) after your "
     "edits and they FAILED — output below. Find the ROOT CAUSE and fix it. Do not edit the tests "

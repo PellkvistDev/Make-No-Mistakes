@@ -147,7 +147,29 @@
       <span>Drop files to attach</span>
     </div>
   </div>
+  <div id="opts-menu" class="opts-menu" hidden>
+    <div class="opts-title">For the next message</div>
+    <div class="opts-row"><div class="opts-text"><span class="opts-label">Make it green</span>
+      <span class="opts-sub">Run the tests after edits and fix until they pass</span></div>
+      <button id="opt-green2" class="switch" role="switch" aria-checked="false"><span></span></button></div>
+    <div class="opts-row"><div class="opts-text"><span class="opts-label">Parallel attempts</span>
+      <span class="opts-sub">Try several isolated approaches, keep the best</span></div>
+      <div class="seg opts-seg" id="seg-attempts" role="radiogroup" aria-label="Parallel attempts">
+        <button data-v="1" role="radio">Off</button>
+        <button data-v="2" role="radio">2</button>
+        <button data-v="3" role="radio">3</button>
+      </div></div>
+    <div class="opts-row"><div class="opts-text"><span class="opts-label">Verify edits</span>
+      <span class="opts-sub">Nudge once to check changes if nothing was run</span></div>
+      <button id="opt-verify2" class="switch" role="switch" aria-checked="false"><span></span></button></div>
+    <div class="opts-note">These stick until you change them. Thinking effort and permission mode are in the title bar.</div>
+  </div>
   <div id="composer" class="glass">
+    <button id="opts-btn" class="icon-btn" aria-label="Message options" aria-expanded="false"
+            title="Options for the next message (auto-check, parallel attempts, verify)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>
+      <span id="opts-dot" class="opts-dot" hidden></span>
+    </button>
     <button id="plan-toggle" class="icon-btn" aria-label="Plan first" aria-pressed="false"
             title="Plan first: explore read-only and propose a plan before touching anything">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
