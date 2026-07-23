@@ -172,6 +172,7 @@ def test_edit_without_verification_gets_one_nudge(scripted_agent, tmp_path, monk
         return FakeResult(content="done (no verification run)")
 
     agent = _yolo(scripted_agent(script))
+    agent.cfg.verify_edits = True   # opt-in (off by default)
     agent.run_turn({"role": "user", "content": "make the file"})
 
     nudges = [m for m in agent.messages if m.get("content") == VERIFY_NUDGE]

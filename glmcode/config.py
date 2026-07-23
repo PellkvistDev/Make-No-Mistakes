@@ -122,7 +122,7 @@ class Config:
     max_tokens: int = 16384
     thinking: bool = True            # GLM reasoning mode (derived from thinking_mode; kept for compat)
     thinking_mode: str = "medium"    # low | medium | high | max (effort/iteration level)
-    verify_edits: bool = True        # nudge the agent to verify edits it never ran anything to check
+    verify_edits: bool = False       # nudge the agent to verify edits it never ran anything to check (off by default)
     show_reasoning: bool = True      # print the model's reasoning (dimmed)
     vision_route: str = "describe"   # describe | direct
     context_limit_tokens: int = 155_000  # hard auto-compact fallback above this estimate
