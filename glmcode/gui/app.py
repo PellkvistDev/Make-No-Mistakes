@@ -1794,6 +1794,29 @@ class Api:
         self.send(task)
         return {"ok": True, "github": self.github_status()}
 
+    def github_setup_phone_access(self):
+        """Write the GitHub Actions workflow that lets you run the agent from
+        your phone into the connected repo, and point the user at the secret
+        page. They Sync it up, add the ZAI_API_KEY secret, and can then comment
+        /agent from anywhere."""
+        coords = self._active_repo_coords()
+        if coords is None:
+            return {"error": "This chat isn't a connected GitHub repository."}
+        _, owner, repo, workdir = coords
+        tmpl = Path(__file__).resolve().parents[2] / "docs" / "agent-workflow.yml"
+        try:
+            content = tmpl.read_text(encoding="utf-8")
+        except OSError:
+            return {"error": "Workflow template missing — copy docs/agent-workflow.yml manually."}
+        try:
+            dest = workdir / ".github" / "workflows" / "agent.yml"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding="utf-8")
+        except OSError as e:
+            return {"error": f"Couldn't write the workflow: {e}"}
+        return {"ok": True, "path": ".github/workflows/agent.yml",
+                "secrets_url": f"https://github.com/{owner}/{repo}/settings/secrets/actions/new"}
+
     def _maybe_autopull(self, workdir: Path) -> None:
         """Background best-effort pull when opening a connected session. Skips a
         dirty tree (never touches uncommitted local work automatically)."""

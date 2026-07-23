@@ -1,0 +1,80 @@
+# Make No Mistakes — run the agent from your phone, with your computer off.
+#
+# SETUP (once per repo you want to control):
+#   1. Copy this file to  .github/workflows/agent.yml  in that repo.
+#   2. Add a repository secret named  ZAI_API_KEY  (free key at https://z.ai):
+#        repo → Settings → Secrets and variables → Actions → New repository secret.
+#   3. (Optional) point AGENT_REPO below at your own fork of the agent.
+#
+# USE (from the GitHub mobile app, or anywhere):
+#   Comment  /agent <what you want done>  on any issue or pull request, e.g.
+#     /agent add a dark-mode toggle to the settings screen and cover it with a test
+#   A runner does the work on a new branch and opens a DRAFT pull request; you get
+#   a comment with the link. Review and merge from your phone. Nothing on your own
+#   machine is touched or exposed.
+#
+# SECURITY: the job only runs for a "/agent" comment from someone who can write to
+# the repo (owner / member / collaborator), so a stranger opening an issue can't
+# trigger it. The model key stays an encrypted Actions secret. Work always lands
+# as a PR you merge — it is never merged automatically.
+
+name: Agent
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  AGENT_REPO: PellkvistDev/Make-No-Mistakes   # where the agent code lives
+  AGENT_REF: main
+
+jobs:
+  agent:
+    if: >-
+      startsWith(github.event.comment.body, '/agent') &&
+      contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Acknowledge the request
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.reactions.createForIssueComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              comment_id: context.payload.comment.id, content: 'eyes' });
+
+      - name: Check out this project
+        uses: actions/checkout@v4
+        with:
+          path: project
+          fetch-depth: 0
+
+      - name: Check out the agent
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.AGENT_REPO }}
+          ref: ${{ env.AGENT_REF }}
+          path: agent
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - run: pip install requests
+
+      - name: Run the agent
+        working-directory: project
+        env:
+          PYTHONPATH: ${{ github.workspace }}/agent
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MNM_TASK: ${{ github.event.comment.body }}
+          MNM_ISSUE: ${{ github.event.issue.number }}
+          MNM_REPO: ${{ github.repository }}
+          MNM_BASE: ${{ github.event.repository.default_branch }}
+        run: python -m glmcode.ci

@@ -586,6 +586,14 @@ def post_issue_comment(token: str, owner: str, repo: str, number: int, body: str
     return r.get("html_url", "")
 
 
+def create_pull(token: str, owner: str, repo: str, title: str, head: str,
+                base: str, body: str = "", draft: bool = True) -> dict:
+    r = _api("POST", f"/repos/{owner}/{repo}/pulls", token,
+             {"title": title[:250], "head": head, "base": base,
+              "body": body[:60000], "draft": bool(draft)})
+    return {"number": r.get("number"), "url": r.get("html_url", "")}
+
+
 def fetch_pr_branch(path: Path, token: str | None, number: int, head_ref: str = "") -> str:
     """Check out a PR's head locally so the agent can work on it and push back.
     Uses the pull/N/head ref (works even for forks). Returns the local branch."""

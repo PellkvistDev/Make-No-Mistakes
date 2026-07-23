@@ -3698,6 +3698,15 @@ $("gh-repo-disconnect").addEventListener("click", async () => {
 });
 $("gh-open-remote").addEventListener("click", () => { if (ghRemoteUrl) api().open_external(ghRemoteUrl); });
 
+$("gh-phone-setup").addEventListener("click", async () => {
+  const res = await ghAction($("gh-phone-setup"), () => api().github_setup_phone_access(), false);
+  if (!res) return;
+  toast(`Added ${res.path}. Now: Sync it up, add a ZAI_API_KEY secret (opening that page), ` +
+        `then comment "/agent …" on any issue from your phone.`, "info", 9000);
+  if (res.secrets_url) api().open_external(res.secrets_url);
+  refreshGithubRepo();
+});
+
 $("gh-pr-load").addEventListener("click", async () => {
   const res = await ghAction($("gh-pr-load"), () => api().github_open_pulls(), false);
   if (!res) return;
