@@ -18,11 +18,12 @@ from .config import Config
 from .events import AgentEvents
 from .permissions import PermissionEngine
 from .prompts import (BROWSER_AGENT_SYSTEM, BROWSER_RESUME_NOTE, COMPACT_PROMPT,
-                      CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM, REFINE_NUDGE,
-                      STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE, SUBAGENT_PREAMBLE,
-                      VERIFY_NUDGE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
-                      WRAP_UP_NUDGE, build_system_prompt,
-                      conversational_project_context)
+                      CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM, FRESH_CRITIC_SYSTEM,
+                      REFINE_NUDGE, STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE,
+                      SUBAGENT_PREAMBLE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
+                      WRAP_UP_NUDGE, blind_critique_prompt, build_system_prompt,
+                      conversational_project_context, fresh_review_nudge,
+                      is_critic_approval, verify_nudge)
 from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
                     CHECK_WORKERS_TOOL, COMPACT_CONTEXT_TOOL,
                     CONTROL_CHROME_TOOL, CONVERSATIONAL_READONLY_SCHEMAS,
@@ -173,7 +174,11 @@ class Agent:
             from .ui import ConsoleEvents
             events = ConsoleEvents(cfg)
         self.events = events
-        self.permissions = PermissionEngine(mode=cfg.mode)
+        # path_rules is the SAME list object as cfg.path_rules (not a copy), so a
+        # settings change that mutates it in place takes effect on every live
+        # agent immediately (see gui set_setting). workdir anchors relative globs.
+        self.permissions = PermissionEngine(
+            mode=cfg.mode, path_rules=cfg.path_rules, workdir=self.workdir)
         self.messages: list[dict] = []
         self.session_usage = Usage()
         self.cancel = threading.Event()
@@ -893,6 +898,9 @@ class Agent:
         self._turn_wrote_files = False
         self._turn_verified = False
         self._verify_nudged = False
+        # The user's request this turn, kept for the fresh-eyes reviewer (which
+        # judges the diff against the task in a clean, reasoning-free context).
+        self._turn_task = _msg_text(user_message)
         # High/Max thinking modes: after the main answer, run self-review passes
         # that re-examine the work and fix issues. Only the main chat agent
         # refines -- sub-agents, workers and the voice delegator do not (it would
@@ -941,19 +949,23 @@ class Agent:
                     self._verify_nudged = True
                     self.events.info("files were edited but nothing was run -- "
                                      "asking the agent to verify its changes")
-                    self.messages.append({"role": "user", "content": VERIFY_NUDGE})
+                    self.messages.append({"role": "user",
+                                          "content": verify_nudge(self.workdir)})
                     continue
-                # High/Max: run a self-review pass over the answer. The first
-                # pass always runs; further passes (Max) only run if the previous
-                # one actually changed something -- once a review finds nothing to
+                # High/Max: run a review pass over the answer. The first pass
+                # always runs; further passes (Max) only run if the previous one
+                # actually changed something -- once a review finds nothing to
                 # fix, more reviews are just wasted work.
                 if self._refine_done < self._refine_budget and \
                         (self._refine_done == 0 or self._refine_pass_changed):
+                    nudge = self._refine_nudge()
+                    if nudge is None:
+                        return  # independent review approved the work as-is
                     self._refine_done += 1
                     self._refine_pass_changed = False
                     self.events.info(f"reviewing and improving the answer "
                                      f"(pass {self._refine_done})…")
-                    self.messages.append({"role": "user", "content": REFINE_NUDGE})
+                    self.messages.append({"role": "user", "content": nudge})
                     continue
                 return  # final answer already streamed
 
@@ -1014,6 +1026,58 @@ class Agent:
             pass  # best-effort wrap-up either way
         finally:
             self.events.stream_end()
+
+    # -- fresh-eyes review (High/Max) ------------------------------------- #
+
+    def _refine_nudge(self) -> str | None:
+        """The message that drives one High/Max review pass, or None to stop.
+
+        When there's a real diff to judge, run an INDEPENDENT critic in a clean
+        context (task + diff only, no reasoning) and feed its concrete findings
+        back for the main agent to fix -- returning None if it approved the work.
+        With no change tracking, or no diff, or the critic unavailable, fall back
+        to the in-context self-review (REFINE_NUDGE), which also handles prose-
+        only answers that have nothing to diff."""
+        diff = ""
+        if self.backup_repo is not None:
+            try:
+                diff = self.backup_repo.turn_diff()
+            except Exception:
+                diff = ""
+        has_diff = bool(diff) and not diff.startswith(
+            ("No changes", "(no pre-turn", "(git is not", "(could not"))
+        if not has_diff:
+            return REFINE_NUDGE
+        critique = self._blind_critique(self._turn_task, diff)
+        if not critique:
+            return REFINE_NUDGE  # reviewer unavailable -> self-review fallback
+        if is_critic_approval(critique):
+            self.events.info("independent review found nothing to fix")
+            return None
+        return fresh_review_nudge(critique)
+
+    def _blind_critique(self, task: str, diff: str) -> str:
+        """One independent-reviewer model call over a fresh, minimal context so
+        it can't just rubber-stamp its own reasoning. Returns the critique text
+        ('APPROVED' when it's happy), or "" if the call failed (caller falls
+        back). Not streamed to the UI -- it's internal plumbing."""
+        model = self.model_override or self.cfg.model
+        msgs = [
+            {"role": "system", "content": FRESH_CRITIC_SYSTEM},
+            {"role": "user", "content": blind_critique_prompt(task, diff)},
+        ]
+        try:
+            result = self._client_for(model).chat(
+                model=model, messages=msgs, tools=None,
+                temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens,
+                thinking=(self.cfg.thinking_mode != "low") and model != self.model_override,
+                cancel=self.cancel,
+            )
+        except (ApiError, Cancelled, KeyboardInterrupt):
+            return ""
+        except Exception:
+            return ""
+        return (result.content or "").strip()
 
     def _tools_for_call(self) -> list:
         """Built-in tool schemas plus whatever MCP servers currently expose

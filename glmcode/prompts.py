@@ -406,6 +406,59 @@ VERIFY_NUDGE = (
 )
 
 
+def detect_check_command(cwd: Path | None = None) -> str:
+    """Best guess at the command that verifies changes in this project, or "" if
+    none is obvious. Advisory only -- it makes the verify nudge concrete ("run
+    pytest -q") instead of vague; it never runs anything itself."""
+    cwd = cwd or Path.cwd()
+    try:
+        names = {p.name for p in cwd.iterdir()}
+    except OSError:
+        return ""
+    # Python: a tests/ dir or pytest config is the strongest signal.
+    if "pytest.ini" in names or "conftest.py" in names or (cwd / "tests").is_dir():
+        return "pytest -q"
+    if "pyproject.toml" in names:
+        try:
+            if "pytest" in (cwd / "pyproject.toml").read_text(encoding="utf-8", errors="replace"):
+                return "pytest -q"
+        except OSError:
+            pass
+    # Node: prefer a real test script, then a build script.
+    if "package.json" in names:
+        try:
+            import json as _json
+            data = _json.loads((cwd / "package.json").read_text(encoding="utf-8", errors="replace"))
+            scripts = data.get("scripts", {}) if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            scripts = {}
+        if isinstance(scripts, dict):
+            if scripts.get("test"):
+                return "npm test"
+            if scripts.get("build"):
+                return "npm run build"
+    if "Cargo.toml" in names:
+        return "cargo test"
+    if "go.mod" in names:
+        return "go test ./..."
+    return ""
+
+
+def verify_nudge(cwd: Path | None = None) -> str:
+    """VERIFY_NUDGE made concrete with the project's likely check command, when
+    one can be detected. Falls back to the generic nudge otherwise -- and the
+    detected form still begins with VERIFY_NUDGE verbatim, so history replay
+    keeps recognising it as internal plumbing."""
+    cmd = detect_check_command(cwd)
+    if not cmd:
+        return VERIFY_NUDGE
+    return VERIFY_NUDGE + (
+        f"\n\nThis project looks checkable with `{cmd}` — run that (or a more targeted "
+        f"subset, e.g. just the affected test file) unless a different check fits the "
+        f"change better."
+    )
+
+
 REFINE_NUDGE = (
     "[Automatic review pass -- not from the user] Before we finish, review the work you "
     "just did as a demanding senior engineer would review a colleague's pull request. "
@@ -418,6 +471,65 @@ REFINE_NUDGE = (
     "genuinely checking, the work is complete and correct, reply with a one-line "
     "confirmation and do NOT invent busywork or make changes just to look productive."
 )
+
+
+# --- Fresh-eyes review (High/Max) -------------------------------------- #
+# A weak model reviewing its OWN work with its own reasoning in context tends to
+# rubber-stamp it. So when there's a real diff to judge, High/Max runs an
+# independent critic in a CLEAN context: it sees only the task and the diff, not
+# the chain of thought that produced them, and must decide for itself whether
+# the diff satisfies the task. Its concrete findings are then fed back into the
+# main thread (which has full tool access) to actually fix.
+
+FRESH_CRITIC_SYSTEM = (
+    "You are a meticulous senior engineer doing a blind code review. You did NOT write "
+    "this code and you have NOT seen the author's reasoning — you are given only the task "
+    "they were asked to do and the actual diff of what they changed. Judge independently "
+    "whether the diff correctly and COMPLETELY accomplishes the task.\n\n"
+    "Look for: requirements missed or only half-done, bugs, unhandled edge cases, "
+    "off-by-one/boundary errors, wrong assumptions, code that only appears to work, "
+    "missing or broken tests, and anything left half-finished.\n\n"
+    "Be concrete and specific — name the file and the exact problem, one per line. Do NOT "
+    "nitpick style, do NOT ask for anything the task didn't call for, and do NOT invent "
+    "work. If the diff genuinely and fully satisfies the task, reply with exactly the "
+    "single word APPROVED and nothing else."
+)
+
+
+def blind_critique_prompt(task: str, diff: str) -> str:
+    """The user turn handed to the blind critic: just the task and the diff."""
+    return (
+        "# The task the engineer was given\n"
+        f"{(task or '').strip() or '(no task text captured)'}\n\n"
+        "# The diff they produced\n"
+        f"{(diff or '').strip() or '(no changes were made)'}\n\n"
+        "Review it per your instructions. List concrete problems, one per line, or reply "
+        "with the single word APPROVED if it fully and correctly satisfies the task."
+    )
+
+
+# Header shared by fresh_review_nudge; also used by sessions.py to keep these
+# injected messages out of the replayed chat history.
+FRESH_REVIEW_HEADER = "[Automatic independent review -- not from the user]"
+
+
+def fresh_review_nudge(critique: str) -> str:
+    """Feed an independent reviewer's findings back to the main agent to fix."""
+    return (
+        f"{FRESH_REVIEW_HEADER} A separate reviewer looked ONLY at the original request and "
+        "the actual diff of your changes — not your reasoning — and raised the points below. "
+        "Work through each one: if it is a real problem, fix it now and verify (re-read the "
+        "changed files with review_changes, run the tests or the affected code); if a point "
+        "is mistaken, say in one line why and move on. Do not invent busywork.\n\n"
+        f"{(critique or '').strip()}"
+    )
+
+
+def is_critic_approval(text: str) -> bool:
+    """True when the blind critic signalled it found nothing to fix. Deliberately
+    strict: any hedged 'APPROVED, but...' is treated as NOT approved so its notes
+    still reach the agent."""
+    return (text or "").strip().rstrip(".! ").upper() == "APPROVED"
 
 
 WRAP_UP_NUDGE = (

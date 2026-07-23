@@ -1404,6 +1404,16 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 .mcp-dot.on { background: var(--green); }
 .mcp-dot.off { background: var(--text-faint); }
 
+/* scoped-autonomy access-rule badges */
+.rule-badge {
+  flex: none; font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+  padding: 2px 8px; border-radius: 999px; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.rule-badge.rule-allow { color: #7ee0a8; background: rgba(60,180,110,.14); border-color: rgba(60,180,110,.30); }
+.rule-badge.rule-ask   { color: #ffcf7a; background: rgba(210,150,40,.15); border-color: rgba(210,150,40,.30); }
+.rule-badge.rule-deny  { color: #ff9a9a; background: rgba(200,70,70,.16);  border-color: rgba(200,70,70,.32); }
+
 /* custom slash-commands editor (same shell as the MCP editor) */
 #commands-editor {
   margin: 4px 0 12px; border: 1px solid var(--stroke-soft); border-radius: var(--r-sm);

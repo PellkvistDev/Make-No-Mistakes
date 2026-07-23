@@ -165,6 +165,11 @@ class Config:
     # with /name in the composer. $INPUT in the template is replaced by any
     # text typed after the command (else appended).
     commands: list = field(default_factory=list)
+    # Scoped autonomy: per-path permission rules [{"glob", "action"}] where
+    # action is allow | ask | deny. They override the permission mode for file
+    # writes (see permissions.path_rule_action): trusted paths auto-approve even
+    # in "ask" mode, protected paths prompt/block even in "yolo".
+    path_rules: list = field(default_factory=list)
 
     extra: dict = field(default_factory=dict)
 

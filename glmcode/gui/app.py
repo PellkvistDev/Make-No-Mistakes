@@ -520,6 +520,32 @@ def _tts_engine_voice(cfg) -> tuple[str, str]:
     return "kokoro", (getattr(cfg, "tts_voice", "") if cfg else "") or "af_heart"
 
 
+_PATH_RULE_ACTIONS = ("allow", "ask", "deny")
+
+
+def _normalize_path_rules(value) -> list:
+    """Clean scoped-autonomy rules coming from the UI: keep only entries with a
+    non-empty glob and a valid action, de-duplicate, and cap the list."""
+    if not isinstance(value, list):
+        return []
+    out, seen = [], set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        glob = str(item.get("glob", "")).strip()[:200]
+        action = str(item.get("action", "")).strip().lower()
+        if not glob or action not in _PATH_RULE_ACTIONS:
+            continue
+        key = (glob, action)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"glob": glob, "action": action})
+        if len(out) >= 100:
+            break
+    return out
+
+
 def _data_uri(path: Path, max_bytes: int = 12_000_000) -> str:
     data = path.read_bytes()[:max_bytes]
     mime = mimetypes.guess_type(str(path))[0] or "image/jpeg"
@@ -874,6 +900,7 @@ class Api:
             "browser_headless": c.browser_headless,
             "browser_keep_logins": c.browser_keep_logins,
             "browser_provider": c.browser_provider, "browser_model": c.browser_model,
+            "path_rules": [dict(r) for r in c.path_rules],
         }
 
     def set_setting(self, key: str, value):
@@ -946,6 +973,12 @@ class Api:
                 c.temperature = min(1.5, max(0.0, float(value)))
             except (TypeError, ValueError):
                 pass
+        elif key == "path_rules":
+            # Mutate the existing list IN PLACE (c.path_rules[:] = ...) rather
+            # than rebinding it: every live agent's PermissionEngine shares this
+            # same list object, so in-place update applies the new rules to all
+            # open chats immediately.
+            c.path_rules[:] = _normalize_path_rules(value)
         else:
             return {"error": f"unknown setting {key}"}
         save_config(c)

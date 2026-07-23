@@ -398,6 +398,26 @@
       <p class="row-sub">Ask: approve every edit &amp; command. Auto-edit: file edits and
          read-only commands (git status, ls, cat, grep…) run automatically; other
          commands still ask. Full auto: everything runs without asking.</p>
+      <details id="pathrules-editor">
+        <summary>Access rules — per-path exceptions to the mode…</summary>
+        <p class="row-sub">Override the mode for specific files or folders, whatever it's set to.
+           <strong>Allow</strong> auto-approves edits there (even in Ask); <strong>Ask</strong> always
+           prompts; <strong>Deny</strong> blocks edits entirely (even in Full auto). Most protective rule
+           wins. Globs: <code>src/**</code> a whole folder, <code>*.py</code> a segment,
+           <code>.env</code> that filename anywhere.</p>
+        <div id="pathrules-list" class="provider-list"></div>
+        <div class="provider-form">
+          <input id="pathrule-glob" class="text-input" placeholder="Path or glob — e.g. .env, src/**, migrations/">
+          <div class="seg" id="pathrule-action" role="radiogroup" aria-label="Rule action">
+            <button data-v="allow" role="radio" class="on">Allow</button>
+            <button data-v="ask" role="radio">Ask</button>
+            <button data-v="deny" role="radio">Deny</button>
+          </div>
+          <div class="sheet-actions">
+            <button id="pathrule-add" class="btn btn-primary">Add rule</button>
+          </div>
+        </div>
+      </details>
     </section>
 
     <section data-tab="models">
@@ -576,9 +596,9 @@
       </div>
       <p class="row-sub"><strong>Low</strong>: no reasoning, answers instantly.
         <strong>Medium</strong>: the model thinks before answering (default).
-        <strong>High</strong>: after answering, it reviews its own work once and fixes
-        what it finds. <strong>Max</strong>: reviews repeatedly (up to 3×) until nothing's
-        left to improve.</p>
+        <strong>High</strong>: after answering, an independent reviewer checks the actual diff
+        (blind to the reasoning that produced it) and the model fixes what it flags.
+        <strong>Max</strong>: reviews repeatedly (up to 3×) until it's approved.</p>
       <div class="row"><div class="row-text"><label for="opt-reasoning">Show reasoning</label>
         <span class="row-sub">Display the thinking stream in chat</span></div>
         <button id="opt-reasoning" class="switch" role="switch" aria-checked="true"><span></span></button></div>

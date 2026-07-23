@@ -14,6 +14,7 @@ from __future__ import annotations
 import difflib
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from .tools import (READONLY_TOOLS, FILE_WRITE_TOOLS, NETWORK_TOOLS, GIT_TOOLS,
@@ -148,6 +149,102 @@ def is_readonly_command(command: str) -> bool:
     return True
 
 
+# --------------------------------------------------------------------- #
+# Scoped autonomy: per-path permission rules.
+#
+# A rule is {"glob": "...", "action": "allow"|"ask"|"deny"} and applies to
+# file-WRITE tools only. It OVERRIDES the current mode: an "allow" path is
+# auto-approved even in "ask" mode, and an "ask"/"deny" path is prompted/blocked
+# even in "yolo" -- so you can let the agent edit src/ freely while `.env` and
+# migrations always stop for a human. When several rules match, the most
+# protective wins (deny > ask > allow).
+#
+# Glob syntax: `*` matches within a path segment, `**` across segments, a
+# trailing `/` means the whole directory, and a pattern with no `/` (e.g.
+# `.env`) matches a file of that name at ANY depth.
+
+_RULE_SEVERITY = {"deny": 3, "ask": 2, "allow": 1}
+
+
+@lru_cache(maxsize=512)
+def _glob_to_regex(pattern: str) -> "re.Pattern":
+    pattern = pattern.strip().replace("\\", "/")
+    if pattern.endswith("/"):
+        pattern += "**"
+    i, n, out = 0, len(pattern), []
+    while i < n:
+        c = pattern[i]
+        if c == "*":
+            if pattern[i:i + 2] == "**":
+                i += 2
+                if i < n and pattern[i] == "/":
+                    i += 1
+                    out.append("(?:.*/)?")   # ** / -> any (or no) leading dirs
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+def _glob_matches(rel: str, pattern: str) -> bool:
+    pattern = pattern.strip().replace("\\", "/")
+    if not pattern:
+        return False
+    rx = _glob_to_regex(pattern)
+    if rx.match(rel):
+        return True
+    if "/" not in pattern:               # bare name -> match basename at any depth
+        return bool(rx.match(rel.rsplit("/", 1)[-1]))
+    return False
+
+
+def _rel_posix(path: str, workdir) -> str | None:
+    """Project-relative POSIX form of a tool's path argument (for glob matching),
+    or the absolute POSIX path when it falls outside the project."""
+    raw = str(path or "").strip()
+    if not raw:
+        return None
+    try:
+        p = Path(raw).expanduser()
+        if not p.is_absolute() and workdir is not None:
+            p = Path(workdir) / p
+        rp = p.resolve()
+    except (OSError, ValueError, RuntimeError):
+        return raw.replace("\\", "/")
+    if workdir is not None:
+        try:
+            return rp.relative_to(Path(workdir).resolve()).as_posix()
+        except (ValueError, OSError):
+            pass
+    return rp.as_posix()
+
+
+def path_rule_action(path: str, workdir, rules: list) -> str | None:
+    """The most protective rule action matching `path`, or None if none do."""
+    if not rules:
+        return None
+    rel = _rel_posix(path, workdir)
+    if rel is None:
+        return None
+    best, best_sev = None, 0
+    for r in rules:
+        if not isinstance(r, dict):
+            continue
+        pat = str(r.get("glob", "")).strip()
+        action = str(r.get("action", "")).strip().lower()
+        if not pat or action not in _RULE_SEVERITY:
+            continue
+        if _glob_matches(rel, pat) and _RULE_SEVERITY[action] > best_sev:
+            best, best_sev = action, _RULE_SEVERITY[action]
+    return best
+
+
 @dataclass
 class Decision:
     allowed: bool
@@ -164,6 +261,12 @@ class PermissionEngine:
     # than by prompt-asking-nicely -- a hard deny with corrective feedback,
     # regardless of ask/autoedit/yolo mode or session allowlists.
     plan_only: bool = False
+    # Scoped autonomy: per-path rules ({"glob","action"}) applied to file writes,
+    # overriding the mode (see path_rule_action). Read live on every check, so
+    # updating the list takes effect immediately. `workdir` anchors relative
+    # globs to the project root.
+    path_rules: list = field(default_factory=list)
+    workdir: object = None
 
     def check(self, name: str, args: dict, asker) -> Decision:
         """asker(prompt_lines, preview) -> 'y' | 'a' | 'n' | ('n', feedback)"""
@@ -201,6 +304,22 @@ class PermissionEngine:
                 "Plan mode is active: only read-only exploration (reads, "
                 "searches, and read-only commands) is allowed this turn. "
                 "Finish exploring and write the plan."))
+
+        # Scoped autonomy: a per-path rule for a file write overrides the mode
+        # (even yolo) -- protected paths always stop for a human, trusted paths
+        # never do.
+        if name in FILE_WRITE_TOOLS and self.path_rules:
+            action = path_rule_action(str(args.get("path", "")), self.workdir, self.path_rules)
+            if action == "deny":
+                return Decision(False, (
+                    f"'{args.get('path', '?')}' is a protected path: a permission rule "
+                    f"forbids writing here. Do not edit it; if the user needs this "
+                    f"change, ask them to make it or to relax the rule."))
+            if action == "ask":
+                return self._ask_protected_path(name, args, asker)
+            if action == "allow":
+                return Decision(True)
+
         if self.mode == "yolo":
             return Decision(True)
         if name in self.allowed_tools:
@@ -299,6 +418,16 @@ class PermissionEngine:
         title = f"{'Edit' if name == 'edit_file' else 'Write'} file: {path}"
         answer = asker(title, preview, always_label=f"always allow {name} this session")
         return self._to_decision(answer, name=name)
+
+    def _ask_protected_path(self, name: str, args: dict, asker) -> Decision:
+        """Prompt for a write to a rule-protected path. No 'always allow this
+        session' option -- the whole point of a protected path is that it keeps
+        asking; a session-wide grant would quietly defeat the rule."""
+        path = str(args.get("path", "?"))
+        preview = build_diff_preview(name, args)
+        title = f"Protected path — {'edit' if name == 'edit_file' else 'write'} {path}?"
+        answer = asker(title, preview, always_label=None)
+        return self._to_decision(answer)  # name omitted -> 'a' won't allowlist the tool
 
     def _ask_command(self, command: str, prefix: str, asker, background: bool = False) -> Decision:
         always = f"always allow `{prefix} ...` this session" if prefix else None

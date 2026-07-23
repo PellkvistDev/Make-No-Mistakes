@@ -3090,6 +3090,68 @@ $("cmd-add").addEventListener("click", async () => {
   toast("Command saved — run it with /name in the composer.", "info", 3500);
 });
 
+/* ---- scoped autonomy: per-path access rules (Settings) ---------------- */
+
+let pathRuleAction = "allow";
+document.querySelectorAll("#pathrule-action button").forEach((b) =>
+  b.addEventListener("click", () => {
+    pathRuleAction = b.dataset.v;
+    document.querySelectorAll("#pathrule-action button").forEach((x) => {
+      x.classList.toggle("on", x === b);
+      x.setAttribute("aria-checked", x === b);
+    });
+  }));
+
+const RULE_LABEL = { allow: "Allow", ask: "Ask", deny: "Deny" };
+function ruleHint(a) {
+  return a === "deny" ? "edits blocked — even in Full auto"
+    : a === "ask" ? "always prompts — even in Full auto"
+    : "auto-approved — even in Ask mode";
+}
+
+function renderPathRules() {
+  const list = $("pathrules-list");
+  if (!list) return;
+  const rules = (settings && settings.path_rules) || [];
+  list.innerHTML = "";
+  for (const r of rules) {
+    const row = document.createElement("div");
+    row.className = "provider-row";
+    row.innerHTML =
+      `<span class="rule-badge rule-${r.action}"></span>` +
+      `<div class="provider-row-text"><span class="provider-name mono"></span>` +
+      `<span class="provider-sub"></span></div>` +
+      `<button class="icon-btn-mini rule-del" title="Delete">${CROSS_SVG}</button>`;
+    row.querySelector(".rule-badge").textContent = RULE_LABEL[r.action] || r.action;
+    row.querySelector(".provider-name").textContent = r.glob;
+    row.querySelector(".provider-sub").textContent = ruleHint(r.action);
+    row.querySelector(".rule-del").addEventListener("click", async () => {
+      const next = rules.filter((x) => !(x.glob === r.glob && x.action === r.action));
+      settings = await api().set_setting("path_rules", next);
+      renderPathRules();
+    });
+    list.appendChild(row);
+  }
+  if (!list.children.length) {
+    list.innerHTML =
+      '<div class="row-sub">No access rules — the permission mode applies everywhere.</div>';
+  }
+}
+
+$("pathrule-add").addEventListener("click", async () => {
+  const glob = $("pathrule-glob").value.trim();
+  if (!glob) { toast("Enter a path or glob first.", "error", 3000); return; }
+  const rules = ((settings && settings.path_rules) || []).slice();
+  if (rules.some((x) => x.glob === glob && x.action === pathRuleAction)) {
+    toast("That rule already exists.", "info", 2500); return;
+  }
+  rules.push({ glob, action: pathRuleAction });
+  settings = await api().set_setting("path_rules", rules);
+  $("pathrule-glob").value = "";
+  renderPathRules();
+  toast(`Rule added: ${pathRuleAction} ${glob}`, "info", 2800);
+});
+
 $("prov-detect").addEventListener("click", async () => {
   const res = await api().detect_local_providers();
   if (res && res.error) { toast(res.error, "error", 6000); return; }
@@ -3243,6 +3305,7 @@ async function openSettings() {
   populateBrowserModelSelect();
   populateMcp();
   populateCommands();
+  renderPathRules();
   try {
     const u = await api().usage();
     $("session-usage").textContent =
