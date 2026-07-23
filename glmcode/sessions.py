@@ -12,12 +12,19 @@ from pathlib import Path
 
 from .config import CONFIG_DIR
 from .prompts import (CONTINUE_NUDGE, EXECUTE_PLAN_MESSAGE, FILE_CONTEXT_MARKER,
-                      PLAN_MODE_PREAMBLE, STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE,
-                      VERIFY_NUDGE, WRAP_UP_NUDGE)
+                      FRESH_REVIEW_HEADER, PLAN_MODE_PREAMBLE, REFINE_NUDGE,
+                      STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE, VERIFY_NUDGE,
+                      WRAP_UP_NUDGE)
 
 # Internal plumbing messages the agent injects mid-turn; they were never
 # typed by the user, so history replay must not render them as user bubbles.
-_INTERNAL_NUDGES = {CONTINUE_NUDGE, STEP_LIMIT_NUDGE, VERIFY_NUDGE, WRAP_UP_NUDGE}
+_INTERNAL_NUDGES = {CONTINUE_NUDGE, STEP_LIMIT_NUDGE, VERIFY_NUDGE,
+                    REFINE_NUDGE, WRAP_UP_NUDGE}
+# Some of those carry variable content (a detected command, the reviewer's
+# findings, test output), so exact-match isn't enough -- match their stable
+# leading text too.
+_INTERNAL_NUDGE_PREFIXES = (VERIFY_NUDGE, REFINE_NUDGE, FRESH_REVIEW_HEADER,
+                            "[Automatic test run -- not from the user]")
 # STEER_NUDGE_TEMPLATE-wrapped messages ARE from the user -- shown as the
 # same "You steered" note the live view used, not as a framed wall of text.
 _STEER_PREFIX = STEER_NUDGE_TEMPLATE.split("{text}")[0]
@@ -191,9 +198,9 @@ def to_display(messages: list) -> list[dict]:
             if text.startswith("[Context was compacted"):
                 items.append({"kind": "compacted", "summary": _compacted_summary(text)})
                 continue
-            if text in _INTERNAL_NUDGES:
-                # Internal agent plumbing (auto-continue, step-limit/wrap-up
-                # and verify nudges); not real user messages, don't render.
+            if text in _INTERNAL_NUDGES or text.startswith(_INTERNAL_NUDGE_PREFIXES):
+                # Internal agent plumbing (auto-continue, step-limit/wrap-up,
+                # verify and review nudges); not real user messages, don't render.
                 continue
             if text.startswith(_STEER_PREFIX):
                 items.append({"kind": "steered",

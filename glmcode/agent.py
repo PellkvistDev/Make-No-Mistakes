@@ -17,17 +17,20 @@ from .api import ApiError, Cancelled, RateLimiter, Usage, ZaiClient, estimate_to
 from .config import Config
 from .events import AgentEvents
 from .permissions import PermissionEngine
-from .prompts import (BROWSER_AGENT_SYSTEM, BROWSER_RESUME_NOTE, COMPACT_PROMPT,
-                      CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM, REFINE_NUDGE,
-                      STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE, SUBAGENT_PREAMBLE,
-                      VERIFY_NUDGE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
-                      WRAP_UP_NUDGE, build_system_prompt,
-                      conversational_project_context)
+from .prompts import (ATTEMPT_TASK, BROWSER_AGENT_SYSTEM, BROWSER_RESUME_NOTE,
+                      COMPACT_PROMPT, CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM,
+                      FRESH_CRITIC_SYSTEM, GREEN_GIVEUP_NUDGE, GREEN_NUDGE,
+                      REFINE_NUDGE, STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE,
+                      SUBAGENT_PREAMBLE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
+                      WRAP_UP_NUDGE, blind_critique_prompt, build_system_prompt,
+                      conversational_project_context, detect_check_command,
+                      fresh_review_nudge, is_critic_approval, verify_nudge)
 from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
                     CHECK_WORKERS_TOOL, COMPACT_CONTEXT_TOOL,
                     CONTROL_CHROME_TOOL, CONVERSATIONAL_READONLY_SCHEMAS,
                     CONVERSATIONAL_SCHEMAS,
-                    DISPATCH_WORKER_TOOL, GENERATE_IMAGE_TOOL, PREVIEW_PAGE_TOOL,
+                    CHECK_PAGE_TOOL, DISPATCH_WORKER_TOOL, GENERATE_IMAGE_TOOL,
+                    PREVIEW_PAGE_TOOL,
                     REMEMBER_TOOL, REVERT_WORKER_TOOL, REVIEW_CHANGES_TOOL,
                     SHOW_HTTP_CAT_TOOL, SHOW_IMAGE_TOOL, SPEAK_TOOL,
                     STEER_WORKER_TOOL, STOP_WORKER_TOOL, SUBAGENT_TOOL,
@@ -39,11 +42,14 @@ from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
 # runs any of these gets one automatic push to verify before finishing.
 VERIFICATION_TOOLS = {"run_powershell", "run_background", "run_tests",
                       "run_test_file", "preview_page"}
-EDIT_TOOLS = {"write_file", "edit_file"}
+EDIT_TOOLS = {"write_file", "edit_file", "replace_in_files"}
 
 MAX_SUBAGENTS = 6
 # Safety cap on auto-continue-on-truncation rounds (see _call_model_until_done).
 MAX_CONTINUATIONS = 3
+# "Make it green": how many times the bounded test-fix loop will re-run the
+# project's checks and feed a failure back before giving up and reporting.
+GREEN_LOOP_MAX_ROUNDS = 4
 
 
 def _first_line(text: str, limit: int = 280) -> str:
@@ -173,7 +179,11 @@ class Agent:
             from .ui import ConsoleEvents
             events = ConsoleEvents(cfg)
         self.events = events
-        self.permissions = PermissionEngine(mode=cfg.mode)
+        # path_rules is the SAME list object as cfg.path_rules (not a copy), so a
+        # settings change that mutates it in place takes effect on every live
+        # agent immediately (see gui set_setting). workdir anchors relative globs.
+        self.permissions = PermissionEngine(
+            mode=cfg.mode, path_rules=cfg.path_rules, workdir=self.workdir)
         self.messages: list[dict] = []
         self.session_usage = Usage()
         self.cancel = threading.Event()
@@ -630,6 +640,42 @@ class Agent:
             "you need a detailed description of what rendered."
         )
 
+    def _check_page_tool(self, url: str, wait_seconds: float = 2.5) -> str:
+        """Load a running page and report runtime console/JS errors + failed
+        requests alongside a screenshot, so the agent can fix what breaks when
+        the app actually runs."""
+        from .browser import capture_page
+        url = (url or "").strip()
+        if not url:
+            raise ToolError("check_page needs a 'url'")
+        slug = re.sub(r"[^a-z0-9]+", "-", url.lower()).strip("-")[:40].strip("-") or "page"
+        out_path = self.workdir / "generated" / f"runtime-{slug}-{uuid.uuid4().hex[:6]}.png"
+        with self.events.status(f"running {url} and watching for errors..."):
+            try:
+                r = capture_page(url, out_path, wait_seconds=wait_seconds, status=self.events.info)
+            except Exception as e:
+                raise ToolError(f"could not run the page: {e}")
+
+        if r.get("screenshot"):
+            self.events.show_image(r["screenshot"], caption=url)
+        lines = []
+        if r.get("load_error"):
+            lines.append(f"LOAD ERROR: {r['load_error']}")
+        for label, key in (("Uncaught JS errors", "page_errors"),
+                           ("Console errors/warnings", "console"),
+                           ("Failed network requests", "failed_requests")):
+            items = r.get(key) or []
+            if items:
+                lines.append(f"{label} ({len(items)}):")
+                lines.extend(f"  - {it}" for it in items)
+        clean = not lines
+        marker = self._asset_marker("image", Path(r["screenshot"]), url,
+                                    "Screenshot shown to the user.") if r.get("screenshot") else ""
+        if clean:
+            return f"{url} loaded with no console errors, JS exceptions, or failed requests. {marker}"
+        return (f"Runtime check of {url} found problems — fix them and check again:\n"
+                + "\n".join(lines) + f"\n\n{marker}")
+
     def _generate_image(self, prompt: str, path: str = "", steps: int = 1) -> str:
         """Generate an image locally with sd-turbo and show it to the user."""
         from .imagegen import generate_image
@@ -718,7 +764,10 @@ class Agent:
         self.wrap_up_requested.clear()
         self.busy = True
         try:
-            self._run_turn(user_message)
+            if self._should_race():
+                self._run_parallel_attempts(user_message)
+            else:
+                self._run_turn(user_message)
         finally:
             self.busy = False
             # If a steering message was queued but the turn ended (final
@@ -893,6 +942,12 @@ class Agent:
         self._turn_wrote_files = False
         self._turn_verified = False
         self._verify_nudged = False
+        # The user's request this turn, kept for the fresh-eyes reviewer (which
+        # judges the diff against the task in a clean, reasoning-free context).
+        self._turn_task = _msg_text(user_message)
+        # "Make it green" bookkeeping, reset each turn (see _green_step).
+        self._green_rounds = 0
+        self._green_done = False
         # High/Max thinking modes: after the main answer, run self-review passes
         # that re-examine the work and fix issues. Only the main chat agent
         # refines -- sub-agents, workers and the voice delegator do not (it would
@@ -932,6 +987,16 @@ class Agent:
             self._log_assistant_msg(msg)
 
             if not result.tool_calls:
+                # "Make it green" (opt-in): after an edit turn, actually RUN the
+                # project's checks and, if they fail, feed the failure back and
+                # keep fixing -- bounded, and only when there's something to run.
+                # Deliberately gated so it never fires on a small/no-test/passing
+                # task: enabled + this is the main agent + files were edited.
+                if (self.cfg.auto_fix_tests and self.allow_subagents
+                        and not self.conversational and self._turn_wrote_files
+                        and not self._green_done):
+                    if self._green_step():
+                        continue
                 # One automatic push before accepting a final answer: a turn
                 # that edited files but never ran ANYTHING has skipped the
                 # "Verify" step entirely -- ask once, then accept whatever
@@ -941,19 +1006,23 @@ class Agent:
                     self._verify_nudged = True
                     self.events.info("files were edited but nothing was run -- "
                                      "asking the agent to verify its changes")
-                    self.messages.append({"role": "user", "content": VERIFY_NUDGE})
+                    self.messages.append({"role": "user",
+                                          "content": verify_nudge(self.workdir)})
                     continue
-                # High/Max: run a self-review pass over the answer. The first
-                # pass always runs; further passes (Max) only run if the previous
-                # one actually changed something -- once a review finds nothing to
+                # High/Max: run a review pass over the answer. The first pass
+                # always runs; further passes (Max) only run if the previous one
+                # actually changed something -- once a review finds nothing to
                 # fix, more reviews are just wasted work.
                 if self._refine_done < self._refine_budget and \
                         (self._refine_done == 0 or self._refine_pass_changed):
+                    nudge = self._refine_nudge()
+                    if nudge is None:
+                        return  # independent review approved the work as-is
                     self._refine_done += 1
                     self._refine_pass_changed = False
                     self.events.info(f"reviewing and improving the answer "
                                      f"(pass {self._refine_done})…")
-                    self.messages.append({"role": "user", "content": REFINE_NUDGE})
+                    self.messages.append({"role": "user", "content": nudge})
                     continue
                 return  # final answer already streamed
 
@@ -1014,6 +1083,216 @@ class Agent:
             pass  # best-effort wrap-up either way
         finally:
             self.events.stream_end()
+
+    # -- "make it green": bounded test-fix loop --------------------------- #
+
+    def _run_check(self, cmd: str) -> tuple[bool, str]:
+        """Run the project's check command in this chat's workdir and return
+        (passed, output). Isolated for testing (monkeypatched in unit tests)."""
+        from .tools import run_check_command
+        code, output = run_check_command(cmd)
+        return code == 0, output
+
+    def _green_step(self) -> bool:
+        """One iteration of the make-it-green loop. Runs the detected check
+        command; returns True if it injected a fix nudge and the turn loop should
+        continue, False when there's nothing to run or the tests already pass.
+        A real run here also counts as verification (so the verify-nudge, if
+        enabled, won't also fire)."""
+        cmd = detect_check_command(self.workdir)
+        if not cmd:
+            self._green_done = True   # nothing detectable to run -- don't retry
+            return False
+        self.events.info(f"running the project's tests ({cmd})…")
+        try:
+            passed, output = self._run_check(cmd)
+        except Exception as e:
+            self._green_done = True
+            self.events.warn(f"couldn't run the tests: {e}")
+            return False
+        self._turn_verified = True
+        if passed:
+            self._green_done = True
+            self.events.info("tests pass.")
+            return False
+        if self._green_rounds >= GREEN_LOOP_MAX_ROUNDS:
+            self._green_done = True
+            self.events.warn(f"tests still failing after {GREEN_LOOP_MAX_ROUNDS} "
+                             "fix attempts — stopping and reporting.")
+            self.messages.append({"role": "user",
+                                  "content": GREEN_GIVEUP_NUDGE.format(cmd=cmd, output=output)})
+            return True
+        self._green_rounds += 1
+        self.events.warn(f"tests failing — fixing (attempt {self._green_rounds}/"
+                         f"{GREEN_LOOP_MAX_ROUNDS})…")
+        self.messages.append({"role": "user",
+                              "content": GREEN_NUDGE.format(cmd=cmd, output=output)})
+        return True
+
+    # -- parallel attempts ("race", best-of-N) ---------------------------- #
+
+    def _should_race(self) -> bool:
+        """Race mode needs >1 attempts AND change tracking (the shadow-git repo)
+        to snapshot a common baseline, isolate each attempt by reverting to it,
+        and restore the winner. Only the main agent races (never a sub-agent /
+        attempt / worker / voice)."""
+        from .backup import available as backup_available
+        return (getattr(self.cfg, "parallel_attempts", 1) > 1
+                and self.allow_subagents and not self.conversational
+                and self.backup_repo is not None and backup_available())
+
+    def _make_attempt_agent(self, aid: str) -> "Agent":
+        sub = Agent(self.cfg, self.client,
+                    events=_CaptureEvents(self._emit_subagent_stream, aid),
+                    allow_subagents=False, workdir=self.workdir)
+        sub.model_override = self.model_override
+        sub.vision_client = self.vision_client
+        sub.backup_repo = self.backup_repo
+        sub.mcp = self.mcp
+        sub.permissions.mode = self.permissions.mode
+        return sub
+
+    def _score_attempt(self) -> tuple[bool | None, str]:
+        """Run the project's checks on the current work-tree. Returns
+        (passed, output): True/False, or None when there's nothing to run."""
+        cmd = detect_check_command(self.workdir)
+        if not cmd:
+            return None, ""
+        try:
+            return self._run_check(cmd)
+        except Exception:
+            return None, ""
+
+    @staticmethod
+    def _pick_winner(results: list[dict]) -> dict:
+        """Best attempt: tests passing beats unknown beats failing; a real change
+        beats none; earlier attempt wins ties (so we don't churn for no reason)."""
+        def rank(r):
+            tier = 2 if r["passed"] is True else (1 if r["passed"] is None else 0)
+            return (tier, 1 if r["changed"] else 0, -r["attempt"])
+        return max(results, key=rank)
+
+    def _run_parallel_attempts(self, user_message: dict) -> None:
+        self.maybe_autocompact()
+        self.messages.append(user_message)
+        if self.transcript:
+            self.transcript.user(_msg_text(user_message))
+        n = min(max(int(self.cfg.parallel_attempts), 2), 3)
+        baseline = self.backup_repo.snapshot("race baseline")
+        if not baseline:  # git hiccup -> just run a single normal turn
+            self.messages.pop()
+            self._run_turn(user_message)
+            return
+        task = _msg_text(user_message)
+        self.events.info(f"racing {n} independent attempts…")
+        results: list[dict] = []
+        for k in range(1, n + 1):
+            if self.cancel.is_set():
+                break
+            if k > 1:
+                self.backup_repo.revert_to(baseline)  # each attempt starts clean
+            aid = f"attempt-{k}"
+            self._emit_subagent(aid, f"attempt {k}", "running",
+                                mission=f"attempt {k} of {n}")
+            sub = self._make_attempt_agent(aid)
+            try:
+                sub.run_turn({"role": "user",
+                              "content": ATTEMPT_TASK.format(task=task, k=k, n=n)})
+            except (Cancelled, KeyboardInterrupt):
+                self._emit_subagent(aid, f"attempt {k}", "error", summary="cancelled")
+                break
+            commit = self.backup_repo.snapshot(f"attempt {k}")
+            passed, output = self._score_attempt()
+            changed = bool(self.backup_repo.changed_files_since(baseline))
+            report = _final_report_text(sub.messages)
+            verdict = ("tests pass" if passed else "tests fail" if passed is False
+                       else "no tests")
+            self._emit_subagent(aid, f"attempt {k}", "done",
+                                summary=f"{verdict}; {'changes made' if changed else 'no changes'}")
+            results.append({"attempt": k, "commit": commit, "passed": passed,
+                            "output": output, "changed": changed, "report": report})
+
+        if not results:  # cancelled before any attempt finished
+            self.backup_repo.revert_to(baseline)
+            self.messages.append({"role": "assistant",
+                                  "content": "(attempts cancelled before any finished)"})
+            return
+        winner = self._pick_winner(results)
+        if winner["commit"]:
+            self.backup_repo.revert_to(winner["commit"])  # keep the winner's files
+        summary = self._race_summary(results, winner)
+        self.events.stream_start()
+        self.events.content_delta(summary)
+        self.events.stream_end()
+        msg = {"role": "assistant", "content": summary}
+        self.messages.append(msg)
+        self._log_assistant_msg(msg)
+
+    def _race_summary(self, results: list[dict], winner: dict) -> str:
+        n = len(results)
+        lines = [f"Ran {n} independent attempt{'s' if n != 1 else ''} and kept "
+                 f"attempt {winner['attempt']}.\n"]
+        for r in results:
+            mark = "✓ kept" if r is winner else "·"
+            verdict = ("tests pass" if r["passed"] else "tests fail"
+                       if r["passed"] is False else "no tests to run")
+            lines.append(f"- Attempt {r['attempt']}: {verdict}"
+                         f"{'' if r['changed'] else ', no changes'} {mark}")
+        lines.append("")
+        lines.append(winner["report"] or "(the winning attempt left no written summary)")
+        return "\n".join(lines)
+
+    # -- fresh-eyes review (High/Max) ------------------------------------- #
+
+    def _refine_nudge(self) -> str | None:
+        """The message that drives one High/Max review pass, or None to stop.
+
+        When there's a real diff to judge, run an INDEPENDENT critic in a clean
+        context (task + diff only, no reasoning) and feed its concrete findings
+        back for the main agent to fix -- returning None if it approved the work.
+        With no change tracking, or no diff, or the critic unavailable, fall back
+        to the in-context self-review (REFINE_NUDGE), which also handles prose-
+        only answers that have nothing to diff."""
+        diff = ""
+        if self.backup_repo is not None:
+            try:
+                diff = self.backup_repo.turn_diff()
+            except Exception:
+                diff = ""
+        has_diff = bool(diff) and not diff.startswith(
+            ("No changes", "(no pre-turn", "(git is not", "(could not"))
+        if not has_diff:
+            return REFINE_NUDGE
+        critique = self._blind_critique(self._turn_task, diff)
+        if not critique:
+            return REFINE_NUDGE  # reviewer unavailable -> self-review fallback
+        if is_critic_approval(critique):
+            self.events.info("independent review found nothing to fix")
+            return None
+        return fresh_review_nudge(critique)
+
+    def _blind_critique(self, task: str, diff: str) -> str:
+        """One independent-reviewer model call over a fresh, minimal context so
+        it can't just rubber-stamp its own reasoning. Returns the critique text
+        ('APPROVED' when it's happy), or "" if the call failed (caller falls
+        back). Not streamed to the UI -- it's internal plumbing."""
+        model = self.model_override or self.cfg.model
+        msgs = [
+            {"role": "system", "content": FRESH_CRITIC_SYSTEM},
+            {"role": "user", "content": blind_critique_prompt(task, diff)},
+        ]
+        try:
+            result = self._client_for(model).chat(
+                model=model, messages=msgs, tools=None,
+                temperature=self.cfg.temperature, max_tokens=self.cfg.max_tokens,
+                thinking=(self.cfg.thinking_mode != "low") and model != self.model_override,
+                cancel=self.cancel,
+            )
+        except (ApiError, Cancelled, KeyboardInterrupt):
+            return ""
+        except Exception:
+            return ""
+        return (result.content or "").strip()
 
     def _tools_for_call(self) -> list:
         """Built-in tool schemas plus whatever MCP servers currently expose
@@ -1173,6 +1452,8 @@ class Agent:
                     output = self._show_http_cat_tool(args.get("status_code", 0))
                 elif name == PREVIEW_PAGE_TOOL:
                     output = self._preview_page_tool(args.get("url", ""), args.get("wait_seconds", 2.0))
+                elif name == CHECK_PAGE_TOOL:
+                    output = self._check_page_tool(args.get("url", ""), args.get("wait_seconds", 2.5))
                 elif name == COMPACT_CONTEXT_TOOL:
                     output = self._compact_context_tool(args.get("reason", ""), assistant_idx)
                 elif name == SPEAK_TOOL:

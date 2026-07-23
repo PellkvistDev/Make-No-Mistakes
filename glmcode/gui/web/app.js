@@ -697,6 +697,11 @@ function handleBackgroundEvent(ev) {
       busySessions.add(ev.sid);
       renderSidebar();
       break;
+    case "bg_refresh":       // a scheduled task produced a new background chat
+      if (ev.sessions) sessions = ev.sessions;
+      if (ev.sid) unreadSessions.add(ev.sid);
+      renderSidebar();
+      break;
     case "turn_complete": {
       busySessions.delete(ev.sid);
       unreadSessions.add(ev.sid);
@@ -2536,7 +2541,7 @@ function updateContextDonut(used) {
 }
 
 const MODES = ["ask", "autoedit", "yolo"];
-const MODE_LABEL = { ask: "ask", autoedit: "auto-edit", yolo: "full auto" };
+const MODE_LABEL = { ask: "Ask", autoedit: "Auto-edit", yolo: "Full auto" };
 let settings = {};
 
 function applyModeChip() {
@@ -3090,6 +3095,140 @@ $("cmd-add").addEventListener("click", async () => {
   toast("Command saved — run it with /name in the composer.", "info", 3500);
 });
 
+/* ---- scoped autonomy: per-path access rules (Settings) ---------------- */
+
+let pathRuleAction = "allow";
+document.querySelectorAll("#pathrule-action button").forEach((b) =>
+  b.addEventListener("click", () => {
+    pathRuleAction = b.dataset.v;
+    document.querySelectorAll("#pathrule-action button").forEach((x) => {
+      x.classList.toggle("on", x === b);
+      x.setAttribute("aria-checked", x === b);
+    });
+  }));
+
+const RULE_LABEL = { allow: "Allow", ask: "Ask", deny: "Deny" };
+function ruleHint(a) {
+  return a === "deny" ? "edits blocked — even in Full auto"
+    : a === "ask" ? "always prompts — even in Full auto"
+    : "auto-approved — even in Ask mode";
+}
+
+function renderPathRules() {
+  const list = $("pathrules-list");
+  if (!list) return;
+  const rules = (settings && settings.path_rules) || [];
+  list.innerHTML = "";
+  for (const r of rules) {
+    const row = document.createElement("div");
+    row.className = "provider-row";
+    row.innerHTML =
+      `<span class="rule-badge rule-${r.action}"></span>` +
+      `<div class="provider-row-text"><span class="provider-name mono"></span>` +
+      `<span class="provider-sub"></span></div>` +
+      `<button class="icon-btn-mini rule-del" title="Delete">${CROSS_SVG}</button>`;
+    row.querySelector(".rule-badge").textContent = RULE_LABEL[r.action] || r.action;
+    row.querySelector(".provider-name").textContent = r.glob;
+    row.querySelector(".provider-sub").textContent = ruleHint(r.action);
+    row.querySelector(".rule-del").addEventListener("click", async () => {
+      const next = rules.filter((x) => !(x.glob === r.glob && x.action === r.action));
+      settings = await api().set_setting("path_rules", next);
+      renderPathRules();
+    });
+    list.appendChild(row);
+  }
+  if (!list.children.length) {
+    list.innerHTML =
+      '<div class="row-sub">No access rules — the permission mode applies everywhere.</div>';
+  }
+}
+
+$("pathrule-add").addEventListener("click", async () => {
+  const glob = $("pathrule-glob").value.trim();
+  if (!glob) { toast("Enter a path or glob first.", "error", 3000); return; }
+  const rules = ((settings && settings.path_rules) || []).slice();
+  if (rules.some((x) => x.glob === glob && x.action === pathRuleAction)) {
+    toast("That rule already exists.", "info", 2500); return;
+  }
+  rules.push({ glob, action: pathRuleAction });
+  settings = await api().set_setting("path_rules", rules);
+  $("pathrule-glob").value = "";
+  renderPathRules();
+  toast(`Rule added: ${pathRuleAction} ${glob}`, "info", 2800);
+});
+
+/* ---- scheduled & watched tasks (Settings) ----------------------------- */
+
+let taskKind = "interval";
+function applyTaskKindUI() {
+  $("task-interval-row").hidden = taskKind !== "interval";
+  $("task-daily-row").hidden = taskKind !== "daily";
+  $("task-watch-row").hidden = taskKind !== "watch";
+  document.querySelectorAll("#task-kind button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.v === taskKind);
+    b.setAttribute("aria-checked", String(b.dataset.v === taskKind));
+  });
+}
+document.querySelectorAll("#task-kind button").forEach((b) =>
+  b.addEventListener("click", () => { taskKind = b.dataset.v; applyTaskKindUI(); }));
+
+function renderTasksList(res) {
+  const list = $("tasks-list");
+  const tasks = (res && res.tasks) || [];
+  list.innerHTML = "";
+  for (const t of tasks) {
+    const row = document.createElement("div");
+    row.className = "provider-row";
+    row.innerHTML =
+      `<div class="provider-row-text"><span class="provider-name"></span>` +
+      `<span class="provider-sub"></span></div>` +
+      `<button class="switch task-en" role="switch"><span></span></button>` +
+      `<button class="icon-btn-mini task-run" title="Run now">▶</button>` +
+      `<button class="icon-btn-mini task-del" title="Delete">${CROSS_SVG}</button>`;
+    row.querySelector(".provider-name").textContent = t.name || "(task)";
+    const last = t.last_run ? " · last run " + new Date(t.last_run * 1000).toLocaleString() : "";
+    row.querySelector(".provider-sub").textContent = (t.desc || "") + last;
+    const en = row.querySelector(".task-en");
+    en.setAttribute("aria-checked", String(t.enabled !== false));
+    en.addEventListener("click", async () =>
+      renderTasksList(await api().set_scheduled_enabled(t.id, en.getAttribute("aria-checked") !== "true")));
+    row.querySelector(".task-run").addEventListener("click", async () => {
+      const r = await api().run_scheduled_task_now(t.id);
+      toast(r && r.error ? r.error : `Running “${t.name}” now…`, r && r.error ? "error" : "info", 3500);
+    });
+    row.querySelector(".task-del").addEventListener("click", async () =>
+      renderTasksList(await api().delete_scheduled_task(t.id)));
+    list.appendChild(row);
+  }
+  if (!list.children.length)
+    list.innerHTML = '<div class="row-sub">No scheduled tasks yet.</div>';
+}
+async function populateTasks() {
+  try { renderTasksList(await api().scheduled_tasks()); } catch (e) { /* ignore */ }
+  if (!$("task-folder").value && settings.cwd) $("task-folder").value = settings.cwd;
+  applyTaskKindUI();
+}
+$("task-folder-pick").addEventListener("click", async () => {
+  const r = await api().pick_task_folder();
+  if (r && r.path) $("task-folder").value = r.path;
+});
+$("task-save").addEventListener("click", async () => {
+  const prompt = $("task-prompt").value.trim();
+  const cwd = $("task-folder").value.trim();
+  if (!prompt) { toast("Describe what the task should do.", "error", 3000); return; }
+  if (!cwd) { toast("Choose a project folder.", "error", 3000); return; }
+  let schedule = { kind: taskKind };
+  if (taskKind === "interval") schedule.minutes = parseInt($("task-minutes").value, 10) || 60;
+  else if (taskKind === "daily") schedule.at = $("task-at").value || "09:00";
+  else schedule.path = cwd;
+  const res = await api().save_scheduled_task({ name: $("task-name").value.trim(), prompt, cwd, schedule });
+  if (res && res.error) { toast(res.error, "error", 5000); return; }
+  $("task-name").value = ""; $("task-prompt").value = "";
+  renderTasksList(res);
+  $("task-editor").open = false;
+  toast("Task saved.", "info", 2500);
+});
+
 $("prov-detect").addEventListener("click", async () => {
   const res = await api().detect_local_providers();
   if (res && res.error) { toast(res.error, "error", 6000); return; }
@@ -3175,10 +3314,18 @@ function syncSettingsUI() {
   applyThinkChip();
   $("opt-reasoning").setAttribute("aria-checked", !!settings.show_reasoning);
   $("opt-verify").setAttribute("aria-checked", settings.verify_edits !== false);
+  $("opt-green").setAttribute("aria-checked", !!settings.auto_fix_tests);
+  $("opt-neural").setAttribute("aria-checked", !!settings.codebase_memory_neural);
   $("opt-notify").setAttribute("aria-checked", !!settings.notifications);
   $("opt-reduce-fx").setAttribute("aria-checked", !!settings.reduce_effects);
   $("opt-browser-headless").setAttribute("aria-checked", !!settings.browser_headless);
   $("opt-browser-logins").setAttribute("aria-checked", !!settings.browser_keep_logins);
+  $("gh-auto-pull").setAttribute("aria-checked", settings.github_auto_pull !== false);
+  $("gh-auto-push").setAttribute("aria-checked", settings.github_auto_push !== false);
+  if (document.activeElement !== $("gh-clone-root"))
+    $("gh-clone-root").value = settings.github_clone_root || "";
+  if (githubEnv && githubEnv.clone_root)
+    $("gh-clone-root-note").textContent = "Cloned repositories go here: " + githubEnv.clone_root;
   applyPerfMode();
   $("cwd-label").textContent = settings.cwd || "No chat selected";
   $("cwd-label").title = settings.cwd || "";
@@ -3202,6 +3349,7 @@ function syncSettingsUI() {
   $("voice-wake-word").value = settings.voice_wake_word || "hey assistant";
   applyModeChip();
   applyReadAloudChip();
+  renderComposerOpts();
 }
 function shortPath(p) {
   const parts = p.split(/[\\/]/).filter(Boolean);
@@ -3243,6 +3391,10 @@ async function openSettings() {
   populateBrowserModelSelect();
   populateMcp();
   populateCommands();
+  renderPathRules();
+  refreshGithubEnv();
+  refreshGithubRepo();
+  populateTasks();
   try {
     const u = await api().usage();
     $("session-usage").textContent =
@@ -3317,10 +3469,277 @@ function bindSwitch(id, key) {
 }
 bindSwitch("opt-reasoning", "show_reasoning");
 bindSwitch("opt-verify", "verify_edits");
+bindSwitch("opt-green", "auto_fix_tests");
+bindSwitch("opt-neural", "codebase_memory_neural");
+
+/* ---- composer message-options popover (per-message behavior) ---------- */
+function renderComposerOpts() {
+  const green = !!settings.auto_fix_tests;
+  const verify = settings.verify_edits === true;
+  const attempts = settings.parallel_attempts || 1;
+  $("opt-green2").setAttribute("aria-checked", String(green));
+  $("opt-verify2").setAttribute("aria-checked", String(verify));
+  document.querySelectorAll("#seg-attempts button").forEach((b) => {
+    const on = String(attempts) === b.dataset.v;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-checked", String(on));
+  });
+  const active = green || verify || attempts > 1;
+  $("opts-dot").hidden = !active;
+  $("opts-btn").classList.toggle("has-active", active);
+}
+async function setOpt(key, val) {
+  settings = await api().set_setting(key, val);
+  renderComposerOpts();
+  syncSettingsUI();   // keep the Settings-panel copies in sync
+}
+function closeOptsMenu() {
+  $("opts-menu").hidden = true;
+  $("opts-btn").setAttribute("aria-expanded", "false");
+}
+$("opts-btn").addEventListener("click", (e) => {
+  e.stopPropagation();
+  const show = $("opts-menu").hidden;
+  $("opts-menu").hidden = !show;
+  $("opts-btn").setAttribute("aria-expanded", String(show));
+  if (show) renderComposerOpts();
+});
+$("opt-green2").addEventListener("click", () =>
+  setOpt("auto_fix_tests", $("opt-green2").getAttribute("aria-checked") !== "true"));
+$("opt-verify2").addEventListener("click", () =>
+  setOpt("verify_edits", $("opt-verify2").getAttribute("aria-checked") !== "true"));
+document.querySelectorAll("#seg-attempts button").forEach((b) =>
+  b.addEventListener("click", () => setOpt("parallel_attempts", parseInt(b.dataset.v, 10))));
+document.addEventListener("click", (e) => {
+  if ($("opts-menu").hidden) return;
+  if (!$("opts-menu").contains(e.target) && !$("opts-btn").contains(e.target)) closeOptsMenu();
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("opts-menu").hidden) closeOptsMenu();
+});
 bindSwitch("opt-notify", "notifications");
 bindSwitch("opt-reduce-fx", "reduce_effects");
 bindSwitch("opt-browser-headless", "browser_headless");
 bindSwitch("opt-browser-logins", "browser_keep_logins");
+bindSwitch("gh-auto-pull", "github_auto_pull");
+bindSwitch("gh-auto-push", "github_auto_push");
+
+/* ---- GitHub integration ---------------------------------------------- */
+
+let githubEnv = {};
+let ghNewVisibility = "private";
+let ghRemoteUrl = "";
+
+async function refreshGithubEnv() {
+  try { githubEnv = await api().github_env(); } catch (e) { githubEnv = { available: false }; }
+  renderGithubSettings();
+}
+
+function renderGithubSettings() {
+  const e = githubEnv || {};
+  const connected = !!e.token_present;
+  $("gh-disconnected").hidden = connected;
+  $("gh-connected").hidden = !connected;
+  $("gh-login").textContent = e.login ? ("@" + e.login) : "connected";
+  const note = $("gh-storage-note");
+  if (connected && e.secure === false) {
+    note.hidden = false;
+    note.textContent = "No OS keyring was found, so your token is kept in an encrypted file " +
+      "instead — weaker, since someone with your user account could read it. Install the " +
+      "'keyring' package for OS-backed storage.";
+  } else { note.hidden = true; }
+  $("gh-unavailable").hidden = e.available !== false;
+  $("newchat-gh-hint").hidden = connected;
+}
+
+function ghStatusText(st) {
+  const bits = ["branch " + (st.branch || "?")];
+  if (st.ahead) bits.push("↑" + st.ahead + " to push");
+  if (st.behind) bits.push("↓" + st.behind + " to pull");
+  if (st.dirty) bits.push("uncommitted changes");
+  if (!st.ahead && !st.behind && !st.dirty) bits.push("up to date");
+  return bits.join(" · ");
+}
+
+async function refreshGithubRepo() {
+  let st = { connected: false };
+  try { st = await api().github_status(); } catch (e) { /* ignore */ }
+  const connected = !!st.connected;
+  const rc = $("gh-repo-connected"), rd = $("gh-repo-disconnected");
+  if (rc) rc.hidden = !connected;
+  if (rd) rd.hidden = connected;
+  if (connected) {
+    const name = (st.owner && st.repo) ? `${st.owner}/${st.repo}` : (st.remote_url || "repository");
+    if ($("gh-repo-name")) $("gh-repo-name").textContent = name;
+    if ($("gh-repo-status")) $("gh-repo-status").textContent = ghStatusText(st);
+    ghRemoteUrl = (st.owner && st.repo) ? `https://${st.host || "github.com"}/${st.owner}/${st.repo}` : "";
+  }
+  renderGithubFoot(st);
+}
+
+function renderGithubFoot(st) {
+  const foot = $("gh-foot");
+  if (!foot) return;
+  if (!st || !st.connected) { foot.hidden = true; return; }
+  foot.hidden = false;
+  $("gh-foot-name").textContent = (st.owner && st.repo) ? `${st.owner}/${st.repo}` : "repo";
+  const c = [];
+  if (st.ahead) c.push("↑" + st.ahead);
+  if (st.behind) c.push("↓" + st.behind);
+  if (st.dirty) c.push("●");
+  $("gh-foot-counts").textContent = c.join(" ");
+}
+
+async function ghAction(btn, fn, restore) {
+  const label = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; if (restore !== false) btn.textContent = "…"; }
+  try {
+    const res = await fn();
+    if (res && res.error) { toast(res.error, "error", 6000); return null; }
+    return res;
+  } finally {
+    if (btn) { btn.disabled = false; if (restore !== false) btn.textContent = label; }
+  }
+}
+
+$("gh-token-save").addEventListener("click", async () => {
+  const t = $("gh-token").value.trim();
+  if (!t) { toast("Paste a token first.", "error", 3000); return; }
+  const res = await ghAction($("gh-token-save"), () => api().github_set_token(t));
+  if (!res) return;
+  $("gh-token").value = "";
+  githubEnv = res; renderGithubSettings();
+  toast("GitHub connected" + (res.login ? ` as @${res.login}` : "") + ".", "info", 3500);
+});
+$("gh-token-forget").addEventListener("click", async () => {
+  githubEnv = await api().github_forget_token();
+  renderGithubSettings();
+  toast("GitHub token removed.", "info", 2500);
+});
+$("gh-token-help").addEventListener("click", (e) => {
+  e.preventDefault();
+  api().open_external("https://github.com/settings/tokens?type=beta");
+});
+$("gh-clone-root").addEventListener("change", async () => {
+  settings = await api().set_setting("github_clone_root", $("gh-clone-root").value.trim());
+  refreshGithubEnv();
+});
+
+async function ghClone(url, btn) {
+  if (!url) { toast("Enter a repository.", "error", 3000); return; }
+  const res = await ghAction(btn, () => api().github_clone(url));
+  if (!res) return;
+  $("settings-backdrop").hidden = true;
+  $("newchat-backdrop").hidden = true;
+  applySession(res);
+  input.focus();
+}
+$("gh-clone-go").addEventListener("click", () => ghClone($("gh-clone-url").value.trim(), $("gh-clone-go")));
+$("newchat-gh-go").addEventListener("click", () => ghClone($("newchat-gh-url").value.trim(), $("newchat-gh-go")));
+$("newchat-gh-url").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("newchat-gh-go").click(); }
+});
+
+$("gh-clone-pick").addEventListener("click", async () => {
+  const list = $("gh-repo-list");
+  const res = await ghAction($("gh-clone-pick"), () => api().github_list_repos(), false);
+  if (!res) return;
+  list.hidden = false;
+  list.innerHTML = "";
+  for (const r of res.repos || []) {
+    const row = document.createElement("button");
+    row.className = "gh-repo-row";
+    row.innerHTML = `<span class="gh-repo-name mono"></span>` +
+      `<span class="gh-repo-tag">${r.private ? "private" : "public"}${r.empty ? " · empty" : ""}</span>`;
+    row.querySelector(".gh-repo-name").textContent = r.full_name;
+    row.addEventListener("click", () => ghClone(r.full_name, row));
+    list.appendChild(row);
+  }
+  if (!list.children.length) list.innerHTML = '<div class="row-sub">No repositories found for this token.</div>';
+});
+
+$("gh-connect-go").addEventListener("click", async () => {
+  const url = $("gh-connect-url").value.trim();
+  if (!url) { toast("Enter the repo to connect to.", "error", 3000); return; }
+  const res = await ghAction($("gh-connect-go"), () => api().github_connect(url));
+  if (!res) return;
+  $("gh-connect-url").value = "";
+  refreshGithubRepo();
+});
+
+document.querySelectorAll("#gh-new-vis button").forEach((b) =>
+  b.addEventListener("click", () => {
+    ghNewVisibility = b.dataset.v;
+    document.querySelectorAll("#gh-new-vis button").forEach((x) => {
+      x.classList.toggle("on", x === b);
+      x.setAttribute("aria-checked", x === b);
+    });
+  }));
+
+$("gh-create-go").addEventListener("click", async () => {
+  const name = $("gh-new-name").value.trim();
+  if (!name) { toast("Name the new repository.", "error", 3000); return; }
+  const res = await ghAction($("gh-create-go"),
+    () => api().github_create_and_connect(name, ghNewVisibility === "private"));
+  if (!res) return;
+  $("gh-new-name").value = "";
+  refreshGithubRepo();
+});
+
+$("gh-pull").addEventListener("click", async () => {
+  if (await ghAction($("gh-pull"), () => api().github_pull())) refreshGithubRepo();
+});
+$("gh-sync").addEventListener("click", async () => {
+  if (await ghAction($("gh-sync"), () => api().github_sync())) refreshGithubRepo();
+});
+$("gh-repo-disconnect").addEventListener("click", async () => {
+  if (!confirm("Stop syncing this folder with GitHub? Your files are kept.")) return;
+  if (await ghAction($("gh-repo-disconnect"), () => api().github_disconnect())) refreshGithubRepo();
+});
+$("gh-open-remote").addEventListener("click", () => { if (ghRemoteUrl) api().open_external(ghRemoteUrl); });
+
+$("gh-phone-setup").addEventListener("click", async () => {
+  const res = await ghAction($("gh-phone-setup"), () => api().github_setup_phone_access(), false);
+  if (!res) return;
+  toast(`Added ${res.path}. Now: Sync it up, add a ZAI_API_KEY secret (opening that page), ` +
+        `then comment "/agent …" on any issue from your phone.`, "info", 9000);
+  if (res.secrets_url) api().open_external(res.secrets_url);
+  refreshGithubRepo();
+});
+
+$("gh-pr-load").addEventListener("click", async () => {
+  const res = await ghAction($("gh-pr-load"), () => api().github_open_pulls(), false);
+  if (!res) return;
+  const list = $("gh-pr-list");
+  list.hidden = false;
+  list.innerHTML = "";
+  for (const pr of res.pulls || []) {
+    const row = document.createElement("button");
+    row.className = "gh-repo-row";
+    row.innerHTML = `<span class="gh-repo-name">#${pr.number} ${esc(pr.title)}</span>` +
+      `<span class="gh-repo-tag">${esc(pr.author)}${pr.draft ? " · draft" : ""}</span>`;
+    row.addEventListener("click", () => { $("gh-pr-number").value = pr.number; });
+    list.appendChild(row);
+  }
+  if (!list.children.length) list.innerHTML = '<div class="row-sub">No open pull requests.</div>';
+});
+async function ghPrAction(btn, fn) {
+  const n = parseInt($("gh-pr-number").value, 10);
+  if (!n) { toast("Enter a PR number (or load and pick one).", "error", 3000); return; }
+  const res = await ghAction(btn, () => fn(n));
+  if (res && res.ok) { $("settings-backdrop").hidden = true; }
+}
+$("gh-pr-review").addEventListener("click", () =>
+  ghPrAction($("gh-pr-review"), (n) => api().github_review_pr(n)));
+$("gh-pr-address").addEventListener("click", () =>
+  ghPrAction($("gh-pr-address"), (n) => api().github_address_pr(n)));
+
+$("gh-foot-pull").addEventListener("click", async () => {
+  if (await ghAction($("gh-foot-pull"), () => api().github_pull())) refreshGithubRepo();
+});
+$("gh-foot-sync").addEventListener("click", async () => {
+  if (await ghAction($("gh-foot-sync"), () => api().github_sync())) refreshGithubRepo();
+});
 
 $("browser-clear-data").addEventListener("click", async () => {
   if (!confirm("Log the agent browser out of everything and delete its saved data?")) return;
@@ -3553,6 +3972,7 @@ function applySession(res) {
   $("welcome").hidden = true;
   $("empty-hint").hidden = hasItems;
   if (!hasItems) $("empty-hint-folder").textContent = basename(res.cwd);
+  $("learn-project").hidden = !(res.needs_notes && !hasItems);
   renderHistory(res.items, res.todos);
   if (res.cwd_missing) toast(`Project folder not found: ${res.cwd}`, "warn", 6000);
   // Live chats may still be working when we switch to them.
@@ -3567,7 +3987,14 @@ function applySession(res) {
   }
   renderSidebar();
   populateModelPicker(); // each chat can use a different model -- refresh the footer
+  refreshGithubRepo();   // update the sync chip for this chat's folder
 }
+
+$("learn-project").addEventListener("click", async () => {
+  $("learn-project").hidden = true;
+  const r = await api().generate_project_notes();
+  if (r && r.error) toast(r.error, "error", 4000);
+});
 
 async function newChat() {
   const autoBackup = $("newchat-backup").getAttribute("aria-checked") === "true";

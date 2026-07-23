@@ -123,6 +123,9 @@ class Config:
     thinking: bool = True            # GLM reasoning mode (derived from thinking_mode; kept for compat)
     thinking_mode: str = "medium"    # low | medium | high | max (effort/iteration level)
     verify_edits: bool = False       # nudge the agent to verify edits it never ran anything to check (off by default)
+    auto_fix_tests: bool = False     # "make it green": after an edit turn, run the project's tests and fix until they pass (opt-in, bounded)
+    codebase_memory_neural: bool = False  # search_code uses a local embedding model (semantic) instead of lexical TF-IDF
+    parallel_attempts: int = 1       # "race": 1 = off; 2 or 3 = run that many isolated attempts from a common baseline and keep the best
     show_reasoning: bool = True      # print the model's reasoning (dimmed)
     vision_route: str = "describe"   # describe | direct
     context_limit_tokens: int = 155_000  # hard auto-compact fallback above this estimate
@@ -165,6 +168,23 @@ class Config:
     # with /name in the composer. $INPUT in the template is replaced by any
     # text typed after the command (else appended).
     commands: list = field(default_factory=list)
+    # Scheduled & watched tasks: saved prompts that run themselves on an
+    # interval / at a daily time / when a folder changes (see scheduler.py).
+    # Each: {id, name, prompt, cwd, schedule, enabled, last_run, last_sig}.
+    scheduled_tasks: list = field(default_factory=list)
+    # Scoped autonomy: per-path permission rules [{"glob", "action"}] where
+    # action is allow | ask | deny. They override the permission mode for file
+    # writes (see permissions.path_rule_action): trusted paths auto-approve even
+    # in "ask" mode, protected paths prompt/block even in "yolo".
+    path_rules: list = field(default_factory=list)
+    # GitHub integration: where cloned repos land ("" = the default sibling of
+    # the app + whiteboard folders, resolved in the GUI), and whether a
+    # connected session auto-pulls on open / auto-pushes after a change. The
+    # token itself is NEVER stored here -- it lives in the OS keyring / encrypted
+    # store (see secretstore.py).
+    github_clone_root: str = ""
+    github_auto_pull: bool = True
+    github_auto_push: bool = False   # off by default: push happens on the Sync button, not every turn
 
     extra: dict = field(default_factory=dict)
 

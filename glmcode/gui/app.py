@@ -29,6 +29,7 @@ from .. import backup as backup_module
 from ..config import (BUILTIN_PROVIDER_NAME, CONFIG_DIR, PERMISSION_MODES, Config,
                       all_providers, find_provider, load_config, save_config)
 from ..events import AgentEvents
+from .. import githubsync
 from ..notify import APP_NAME, notify
 from ..prompts import EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT
 from ..sessions import SessionStore, new_id, to_display
@@ -520,6 +521,32 @@ def _tts_engine_voice(cfg) -> tuple[str, str]:
     return "kokoro", (getattr(cfg, "tts_voice", "") if cfg else "") or "af_heart"
 
 
+_PATH_RULE_ACTIONS = ("allow", "ask", "deny")
+
+
+def _normalize_path_rules(value) -> list:
+    """Clean scoped-autonomy rules coming from the UI: keep only entries with a
+    non-empty glob and a valid action, de-duplicate, and cap the list."""
+    if not isinstance(value, list):
+        return []
+    out, seen = [], set()
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        glob = str(item.get("glob", "")).strip()[:200]
+        action = str(item.get("action", "")).strip().lower()
+        if not glob or action not in _PATH_RULE_ACTIONS:
+            continue
+        key = (glob, action)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"glob": glob, "action": action})
+        if len(out) >= 100:
+            break
+    return out
+
+
 def _data_uri(path: Path, max_bytes: int = 12_000_000) -> str:
     data = path.read_bytes()[:max_bytes]
     mime = mimetypes.guess_type(str(path))[0] or "image/jpeg"
@@ -631,6 +658,14 @@ class Api:
             "pnpm": "npm",
             "git": "git",
         })
+        # Scheduled/watched tasks: a lightweight poller fires the ones that are
+        # due. Daemon thread, started once; does nothing until the user creates
+        # a task (so there's no cost/behavior unless opted in).
+        self._sched_stop = threading.Event()
+        threading.Thread(target=self._scheduler_loop, daemon=True).start()
+        # Codebase memory: honor the neural-search setting from the start.
+        from .. import codebase_memory
+        codebase_memory.set_neural_enabled(self._cfg.codebase_memory_neural)
 
     # -- active-chat accessors ------------------------------------------- #
     # Most of this class predates parallel chats and talks about THE agent/
@@ -857,6 +892,8 @@ class Api:
             "mode": c.mode, "model": c.model, "vision_model": c.vision_model,
             "vision_route": c.vision_route, "thinking": c.thinking,
             "thinking_mode": c.thinking_mode, "verify_edits": c.verify_edits,
+            "auto_fix_tests": c.auto_fix_tests, "parallel_attempts": c.parallel_attempts,
+            "codebase_memory_neural": c.codebase_memory_neural,
             "show_reasoning": c.show_reasoning, "temperature": c.temperature,
             "cwd": str(Path.cwd()) if self.session_id else "",
             "background_custom": bool(c.background_path),
@@ -874,6 +911,9 @@ class Api:
             "browser_headless": c.browser_headless,
             "browser_keep_logins": c.browser_keep_logins,
             "browser_provider": c.browser_provider, "browser_model": c.browser_model,
+            "path_rules": [dict(r) for r in c.path_rules],
+            "github_clone_root": c.github_clone_root,
+            "github_auto_pull": c.github_auto_pull, "github_auto_push": c.github_auto_push,
         }
 
     def set_setting(self, key: str, value):
@@ -890,7 +930,7 @@ class Api:
             c.thinking = value != "low"  # keep the derived flag consistent
         elif key in ("thinking", "show_reasoning", "read_aloud", "notifications",
                      "reduce_effects", "browser_headless", "browser_keep_logins",
-                     "verify_edits"):
+                     "verify_edits", "auto_fix_tests"):
             setattr(c, key, bool(value))
         elif key in ("model", "vision_model") and isinstance(value, str) and value.strip():
             setattr(c, key, value.strip())
@@ -946,6 +986,27 @@ class Api:
                 c.temperature = min(1.5, max(0.0, float(value)))
             except (TypeError, ValueError):
                 pass
+        elif key == "codebase_memory_neural":
+            c.codebase_memory_neural = bool(value)
+            from .. import codebase_memory
+            codebase_memory.set_neural_enabled(c.codebase_memory_neural)
+            if c.codebase_memory_neural and not codebase_memory.NeuralEmbedder.packages_installed():
+                self._install_neural_memory()   # background; falls back to lexical until ready
+        elif key == "parallel_attempts":
+            try:
+                c.parallel_attempts = int(min(3, max(1, int(value))))
+            except (TypeError, ValueError):
+                pass
+        elif key == "github_clone_root":
+            c.github_clone_root = str(value or "").strip()
+        elif key in ("github_auto_pull", "github_auto_push"):
+            setattr(c, key, bool(value))
+        elif key == "path_rules":
+            # Mutate the existing list IN PLACE (c.path_rules[:] = ...) rather
+            # than rebinding it: every live agent's PermissionEngine shares this
+            # same list object, so in-place update applies the new rules to all
+            # open chats immediately.
+            c.path_rules[:] = _normalize_path_rules(value)
         else:
             return {"error": f"unknown setting {key}"}
         save_config(c)
@@ -1372,6 +1433,8 @@ class Api:
         agent.rebuild_system_prompt()
         self._cfg.last_session_id = sid
         save_config(self._cfg)
+        if cwd_ok:
+            self._maybe_autopull(workdir)  # background pull if this is a connected repo
         return self._session_payload(self._chats[sid])
 
     def _switch_to_live(self, sid: str) -> dict:
@@ -1402,7 +1465,36 @@ class Api:
             "prompt_tokens": u.prompt_tokens, "completion_tokens": u.completion_tokens,
             "context": agent.context_estimate(),
             "busy": agent.busy,
+            "needs_notes": self._needs_project_notes(agent.workdir),
         }
+
+    @staticmethod
+    def _needs_project_notes(workdir: Path) -> bool:
+        """True for a real project folder that has no agent-notes file yet, so
+        the UI can offer to generate one. Skips the whiteboard and empty dirs."""
+        try:
+            if not workdir.is_dir() or workdir.resolve() == WHITEBOARD_DIR.resolve():
+                return False
+            from ..prompts import AGENT_MD_NAMES
+            if any((workdir / n).is_file() for n in AGENT_MD_NAMES):
+                return False
+            # Only offer when there's actually code/content to learn.
+            for entry in workdir.iterdir():
+                if entry.name.startswith("."):
+                    continue
+                if entry.is_file() or entry.is_dir():
+                    return True
+            return False
+        except OSError:
+            return False
+
+    def generate_project_notes(self):
+        """Kick off a turn that explores the project and writes a GLM.md."""
+        from ..prompts import GLM_MD_TASK
+        if self._active is None:
+            return {"error": "Open a chat first."}
+        self.send(GLM_MD_TASK)
+        return {"ok": True}
 
     def new_session(self, auto_backup: bool = True):
         """Start a brand-new chat. The user picks the project folder themselves —
@@ -1441,6 +1533,481 @@ class Api:
             except OSError:
                 pass
         return {"ok": True}
+
+    # -- GitHub integration ------------------------------------------------- #
+
+    def _clone_root(self) -> Path:
+        """Where cloned repos land: the configured folder, or the default
+        sibling of the app + whiteboard folders."""
+        raw = (self._cfg.github_clone_root or "").strip()
+        if raw:
+            return Path(raw).expanduser()
+        return WHITEBOARD_DIR.parent / "repos"
+
+    def _gh_token(self) -> str | None:
+        return githubsync.load_token("github.com")
+
+    def github_env(self):
+        """Everything the UI needs to render the GitHub controls: whether git is
+        present, whether a token is stored (and how securely), and the current
+        clone-root / auto-sync settings."""
+        store_secure = githubsync.get_store_secure()
+        login = self._cfg.extra.get("github_login", "")
+        return {
+            "available": githubsync.available(),
+            "token_present": bool(self._gh_token()),
+            "login": login,
+            "backend": githubsync.token_backend(),
+            "secure": store_secure,
+            "clone_root": str(self._clone_root()),
+            "auto_pull": bool(self._cfg.github_auto_pull),
+            "auto_push": bool(self._cfg.github_auto_push),
+        }
+
+    def github_set_token(self, token: str):
+        """Verify a token against the GitHub API, then store it securely. The
+        raw token is never returned or written to config -- only the resolved
+        login name (public) is cached for display."""
+        token = (token or "").strip()
+        if not token:
+            return {"error": "Enter a token."}
+        try:
+            who = githubsync.verify_token(token)
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        githubsync.save_token("github.com", token)
+        self._cfg.extra["github_login"] = who.get("login", "")
+        save_config(self._cfg)
+        return {"ok": True, **self.github_env()}
+
+    def github_forget_token(self):
+        githubsync.forget_token("github.com")
+        self._cfg.extra.pop("github_login", None)
+        save_config(self._cfg)
+        return {"ok": True, **self.github_env()}
+
+    def github_list_repos(self):
+        token = self._gh_token()
+        if not token:
+            return {"error": "Connect a GitHub token first."}
+        try:
+            return {"repos": githubsync.list_repos(token)}
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+
+    def github_status(self):
+        """Live sync status of the ACTIVE session's folder (no network)."""
+        cs = self._active
+        if cs is None:
+            return {"connected": False}
+        path = Path(cs.agent.workdir)
+        try:
+            st = githubsync.status(path)
+            if st.remote_url:
+                try:
+                    st.host, st.owner, st.repo = githubsync.parse_repo(st.remote_url)
+                except githubsync.GitHubError:
+                    pass
+            d = st.as_dict()
+        except Exception:
+            d = {"connected": False}
+        d["token_present"] = bool(self._gh_token())
+        return d
+
+    def github_clone(self, url: str, auto_backup: bool = True):
+        """Clone a repo into the clone-root and open a new session in it."""
+        if not githubsync.available():
+            return {"error": "git isn't installed or on PATH."}
+        try:
+            host, owner, repo = githubsync.parse_repo(url)
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        token = self._gh_token()
+        dest = githubsync.target_dir(self._clone_root(), owner, repo)
+        try:
+            githubsync.clone(host, owner, repo, dest, token,
+                             on_status=lambda m: self._events.toast(m, "info"))
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        res = self._activate_session(new_id(), [], str(dest), 0, 0, [],
+                                     auto_backup=auto_backup)
+        res["sessions"] = self.list_sessions()
+        res["github"] = self.github_status()
+        return res
+
+    def github_connect(self, url: str):
+        """Mid-session: attach the ACTIVE folder to an existing (often empty)
+        repo and push everything up."""
+        cs = self._active
+        if cs is None:
+            return {"error": "Open a chat first."}
+        try:
+            host, owner, repo = githubsync.parse_repo(url)
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        token = self._gh_token()
+        try:
+            githubsync.connect_existing(Path(cs.agent.workdir), host, owner, repo,
+                                        token, on_status=lambda m: self._events.toast(m, "info"))
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        self._events.toast("Connected to GitHub and synced.", "info")
+        return {"ok": True, "github": self.github_status()}
+
+    def github_create_and_connect(self, name: str, private: bool = True):
+        """Create a brand-new repo under the user's account, then connect the
+        active folder to it and sync -- the smooth 'push this to a new repo' flow."""
+        cs = self._active
+        if cs is None:
+            return {"error": "Open a chat first."}
+        token = self._gh_token()
+        if not token:
+            return {"error": "Connect a GitHub token first."}
+        try:
+            made = githubsync.create_repo(token, name, private=private)
+            githubsync.connect_existing(
+                Path(cs.agent.workdir), "github.com", made["owner"], made["name"],
+                token, on_status=lambda m: self._events.toast(m, "info"))
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        self._events.toast(f"Created {made['full_name']} and synced.", "info")
+        return {"ok": True, "github": self.github_status()}
+
+    def github_pull(self):
+        cs = self._active
+        if cs is None:
+            return {"error": "Open a chat first."}
+        path = Path(cs.agent.workdir)
+        token = self._gh_token()
+        try:
+            # Commit local work first so a rebase pull never fails on a dirty
+            # tree (nothing is lost; the user can review the commit).
+            githubsync.commit_all(path, "Local changes before pull")
+            msg = githubsync.pull(path, token,
+                                  on_status=lambda m: self._events.toast(m, "info"))
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        self._events.toast(msg, "info")
+        return {"ok": True, "github": self.github_status()}
+
+    def github_sync(self):
+        cs = self._active
+        if cs is None:
+            return {"error": "Open a chat first."}
+        token = self._gh_token()
+        try:
+            msg = githubsync.sync(Path(cs.agent.workdir), token,
+                                  message=cs.title or "Update via Make No Mistakes",
+                                  on_status=lambda m: self._events.toast(m, "info"))
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+        self._events.toast(msg, "info")
+        return {"ok": True, "github": self.github_status()}
+
+    def github_disconnect(self):
+        cs = self._active
+        if cs is None:
+            return {"error": "Open a chat first."}
+        try:
+            githubsync.disconnect(Path(cs.agent.workdir))
+        except Exception as e:
+            return {"error": str(e)}
+        return {"ok": True, "github": self.github_status()}
+
+    # -- PR review -------------------------------------------------------- #
+
+    def _active_repo_coords(self):
+        cs = self._active
+        if cs is None:
+            return None
+        try:
+            st = githubsync.status(Path(cs.agent.workdir))
+            if not st.remote_url:
+                return None
+            host, owner, repo = githubsync.parse_repo(st.remote_url)
+            return host, owner, repo, Path(cs.agent.workdir)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _format_pr_comments(comments) -> str:
+        lines = []
+        for c in comments:
+            loc = f"{c['path']}:{c['line']}" if c.get("path") else "(general)"
+            body = (c.get("body") or "").strip()[:600]
+            lines.append(f"- [{loc}] {c.get('author', '')}: {body}")
+        return "\n".join(lines)
+
+    def github_open_pulls(self):
+        coords = self._active_repo_coords()
+        if coords is None:
+            return {"error": "This chat isn't a connected GitHub repository."}
+        token = self._gh_token()
+        if not token:
+            return {"error": "Connect a GitHub token first."}
+        _, owner, repo, _ = coords
+        try:
+            return {"pulls": githubsync.list_open_pulls(token, owner, repo)}
+        except githubsync.GitHubError as e:
+            return {"error": str(e)}
+
+    def github_review_pr(self, number):
+        coords = self._active_repo_coords()
+        if coords is None:
+            return {"error": "This chat isn't a connected GitHub repository."}
+        token = self._gh_token()
+        if not token:
+            return {"error": "Connect a GitHub token first."}
+        _, owner, repo, _ = coords
+        try:
+            pr = githubsync.get_pull(token, owner, repo, int(number))
+            diff = githubsync.pull_diff(token, owner, repo, int(number))
+            comments = githubsync.pull_review_comments(token, owner, repo, int(number))
+        except (githubsync.GitHubError, ValueError) as e:
+            return {"error": str(e)}
+        from ..prompts import PR_REVIEW_TASK
+        task = PR_REVIEW_TASK.format(
+            number=pr["number"], title=pr["title"], author=pr["author"],
+            head=pr["head"], base=pr["base"], body=(pr["body"] or "(no description)")[:2000],
+            comments=self._format_pr_comments(comments) or "(none yet)", diff=diff)
+        self.send(task)
+        return {"ok": True}
+
+    def github_address_pr(self, number):
+        coords = self._active_repo_coords()
+        if coords is None:
+            return {"error": "This chat isn't a connected GitHub repository."}
+        token = self._gh_token()
+        if not token:
+            return {"error": "Connect a GitHub token first."}
+        _, owner, repo, workdir = coords
+        try:
+            pr = githubsync.get_pull(token, owner, repo, int(number))
+            githubsync.fetch_pr_branch(workdir, token, int(number), pr.get("head", ""))
+            comments = githubsync.pull_review_comments(token, owner, repo, int(number))
+        except (githubsync.GitHubError, ValueError) as e:
+            return {"error": str(e)}
+        from ..prompts import PR_ADDRESS_TASK
+        task = PR_ADDRESS_TASK.format(
+            number=pr["number"], title=pr["title"],
+            comments=self._format_pr_comments(comments) or "(no review comments found)")
+        self.send(task)
+        return {"ok": True, "github": self.github_status()}
+
+    def github_setup_phone_access(self):
+        """Write the GitHub Actions workflow that lets you run the agent from
+        your phone into the connected repo, and point the user at the secret
+        page. They Sync it up, add the ZAI_API_KEY secret, and can then comment
+        /agent from anywhere."""
+        coords = self._active_repo_coords()
+        if coords is None:
+            return {"error": "This chat isn't a connected GitHub repository."}
+        _, owner, repo, workdir = coords
+        tmpl = Path(__file__).resolve().parents[2] / "docs" / "agent-workflow.yml"
+        try:
+            content = tmpl.read_text(encoding="utf-8")
+        except OSError:
+            return {"error": "Workflow template missing — copy docs/agent-workflow.yml manually."}
+        try:
+            dest = workdir / ".github" / "workflows" / "agent.yml"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content, encoding="utf-8")
+        except OSError as e:
+            return {"error": f"Couldn't write the workflow: {e}"}
+        return {"ok": True, "path": ".github/workflows/agent.yml",
+                "secrets_url": f"https://github.com/{owner}/{repo}/settings/secrets/actions/new"}
+
+    def _maybe_autopull(self, workdir: Path) -> None:
+        """Background best-effort pull when opening a connected session. Skips a
+        dirty tree (never touches uncommitted local work automatically)."""
+        if not self._cfg.github_auto_pull:
+            return
+        ev = self._events  # capture now; the active chat may change later
+        def work():
+            try:
+                st = githubsync.status(workdir)
+                if not st.connected or st.dirty:
+                    return
+                token = self._gh_token()
+                out = githubsync.pull(workdir, token)
+                if "up to date" not in out.lower():
+                    ev.toast("Pulled latest from GitHub.", "info")
+            except Exception:
+                pass  # opening a chat must never fail because of a pull
+        threading.Thread(target=work, daemon=True).start()
+
+    def _maybe_autopush(self, cs: "ChatState") -> None:
+        """Background best-effort commit+push after a turn that changed files."""
+        if not self._cfg.github_auto_push:
+            return
+        workdir = Path(cs.agent.workdir)
+        ev = cs.events
+        def work():
+            try:
+                st = githubsync.status(workdir)
+                if not st.connected or not (st.dirty or st.ahead > 0):
+                    return
+                token = self._gh_token()
+                githubsync.sync(workdir, token,
+                                message=cs.title or "Update via Make No Mistakes")
+                ev.toast("Synced changes to GitHub.", "info")
+            except githubsync.GitHubError as e:
+                ev.toast(f"GitHub sync failed: {e}", "warn")
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    # -- scheduled & watched tasks ----------------------------------------- #
+
+    def scheduled_tasks(self):
+        from .. import scheduler as sched
+        return {"tasks": [{**t, "desc": sched.describe(t)} for t in self._cfg.scheduled_tasks]}
+
+    def save_scheduled_task(self, task: dict):
+        from .. import scheduler as sched
+        norm = sched.normalize_task(task or {})
+        if norm is None:
+            return {"error": "That task is missing a prompt, folder, or a valid schedule."}
+        tasks = self._cfg.scheduled_tasks
+        # For a watch task, record the current baseline so it fires on the NEXT
+        # change, not immediately.
+        if norm["schedule"]["kind"] == "watch" and not norm["last_sig"]:
+            norm["last_sig"] = sched.folder_signature(norm["schedule"]["path"])
+        for i, t in enumerate(tasks):
+            if t.get("id") == norm["id"]:
+                tasks[i] = norm
+                break
+        else:
+            if len(tasks) >= sched.MAX_TASKS:
+                return {"error": "You have the maximum number of scheduled tasks."}
+            tasks.append(norm)
+        save_config(self._cfg)
+        return self.scheduled_tasks()
+
+    def delete_scheduled_task(self, task_id: str):
+        self._cfg.scheduled_tasks = [t for t in self._cfg.scheduled_tasks
+                                     if t.get("id") != task_id]
+        save_config(self._cfg)
+        return self.scheduled_tasks()
+
+    def set_scheduled_enabled(self, task_id: str, enabled: bool):
+        for t in self._cfg.scheduled_tasks:
+            if t.get("id") == task_id:
+                t["enabled"] = bool(enabled)
+        save_config(self._cfg)
+        return self.scheduled_tasks()
+
+    def run_scheduled_task_now(self, task_id: str):
+        for t in self._cfg.scheduled_tasks:
+            if t.get("id") == task_id:
+                self._fire_scheduled_task(t)
+                t["last_run"] = time.time()
+                save_config(self._cfg)
+                return {"ok": True}
+        return {"error": "task not found"}
+
+    def pick_task_folder(self):
+        try:
+            picked = self._window.create_file_dialog(webview.FOLDER_DIALOG)
+        except Exception:
+            picked = None
+        if not picked:
+            return {"cancelled": True}
+        path = picked[0] if isinstance(picked, (list, tuple)) else picked
+        return {"path": str(path)}
+
+    def _install_neural_memory(self) -> None:
+        """Background pip-install of the local embedding model package the first
+        time neural code search is turned on. Until it's ready, search_code just
+        uses the lexical index, so nothing breaks meanwhile."""
+        ev = self._events
+
+        def work():
+            import sys as _sys
+            from ..tools import NO_WINDOW_KWARGS
+            try:
+                ev.toast("Setting up semantic code search (one-time model download)…", "info")
+                proc = subprocess.run(
+                    [_sys.executable, "-m", "pip", "install", "--user", "--upgrade",
+                     "sentence-transformers"],
+                    capture_output=True, text=True, timeout=900, **NO_WINDOW_KWARGS)
+                from .. import codebase_memory
+                if proc.returncode == 0 and codebase_memory.NeuralEmbedder.packages_installed():
+                    ev.toast("Semantic code search is ready.", "info")
+                else:
+                    ev.toast("Couldn't install the embedding model; using keyword search "
+                             "instead. You can turn this off in Settings.", "warn")
+            except Exception:
+                ev.toast("Couldn't set up semantic code search; using keyword search.", "warn")
+        threading.Thread(target=work, daemon=True).start()
+
+    def _scheduler_loop(self) -> None:
+        from .. import scheduler as sched
+        while not self._sched_stop.wait(30):
+            try:
+                tasks = self._cfg.scheduled_tasks
+                if not tasks:
+                    continue
+                now = time.time()
+                dirty = False
+                for t in tasks:
+                    kind = t.get("schedule", {}).get("kind")
+                    sig = (sched.folder_signature(t["schedule"]["path"])
+                           if kind == "watch" else None)
+                    if t.get("enabled", True) and sched.is_due(t, now, sig):
+                        self._fire_scheduled_task(t)
+                        t["last_run"] = now
+                        if kind == "watch":
+                            t["last_sig"] = sig
+                        dirty = True
+                    elif kind == "watch" and sig and not t.get("last_sig"):
+                        t["last_sig"] = sig   # establish the baseline
+                        dirty = True
+                if dirty:
+                    save_config(self._cfg)
+            except Exception:
+                pass   # a scheduler hiccup must never take the app down
+
+    def _fire_scheduled_task(self, task: dict) -> None:
+        """Run a task's prompt headlessly in its project folder as a background
+        chat (shows up in the sidebar), then notify. Best-effort."""
+        cwd = task.get("cwd", "")
+        if not cwd or not Path(cwd).is_dir():
+            return
+        client = self._ensure_client()
+        if client is None:
+            return
+        sid = new_id()
+        workdir = Path(cwd)
+        events = self._make_events(sid)
+        agent = Agent(self._cfg, client, events=events, workdir=workdir)
+        agent.mcp = self._mcp
+        cs = ChatState(sid, agent, events)
+        cs.title = (task.get("name") or "Scheduled task")[:60]
+        self._chats[sid] = cs
+        if backup_module.available():
+            cs.backup_repo = BackupRepo(sid, workdir)
+            agent.backup_repo = cs.backup_repo
+        agent.transcript = Transcript(sid, cwd=str(workdir))
+        agent.rebuild_system_prompt()
+
+        def work():
+            try:
+                agent.run_turn({"role": "user", "content": task["prompt"]})
+            except Exception as e:
+                events.error(f"scheduled task failed: {e}")
+            finally:
+                self._save_chat(cs)
+                try:
+                    self._maybe_autopush(cs)
+                except Exception:
+                    pass
+                try:
+                    events.emit("bg_refresh", sessions=self.list_sessions())
+                except Exception:
+                    pass
+                notify(APP_NAME, f"Scheduled task “{cs.title}” finished.")
+        threading.Thread(target=work, daemon=True).start()
 
     def open_session(self, sid: str):
         # Live chats (running or not) switch instantly; others load from disk.
@@ -1808,6 +2375,7 @@ class Api:
                         completion_tokens=u.completion_tokens,
                         context=agent.context_estimate(),
                         title=cs.title, sessions=self.list_sessions())
+            self._maybe_autopush(cs)  # background commit+push if connected
             self._os_attention(cs.sid, "Done -- waiting for you."
                                if ok else "Stopped on an error -- waiting for you.")
 

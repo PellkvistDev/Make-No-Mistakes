@@ -10,6 +10,7 @@ whatever the page itself loads).
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -26,6 +27,14 @@ StatusFn = Optional[Callable[[str], None]]
 _lock = threading.Lock()
 
 
+def _launch_kwargs() -> dict:
+    """Point Playwright at a specific Chromium binary when MNM_CHROMIUM_PATH is
+    set -- for machines with a pre-installed browser (or a pinned build) where
+    the bundled download isn't available. Empty otherwise (Playwright's own)."""
+    exe = os.environ.get("MNM_CHROMIUM_PATH", "").strip()
+    return {"executable_path": exe} if exe else {}
+
+
 def packages_installed() -> bool:
     import importlib.util
     return importlib.util.find_spec("playwright") is not None
@@ -40,7 +49,7 @@ def _chromium_installed() -> bool:
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
-            browser = p.chromium.launch()
+            browser = p.chromium.launch(**_launch_kwargs())
             browser.close()
         return True
     except Exception:
@@ -102,7 +111,7 @@ def preview_page(url: str, out_path: Path, wait_seconds: float = 2.0,
             status(f"Loading {url}...")
         try:
             with sync_playwright() as p:
-                browser = p.chromium.launch()
+                browser = p.chromium.launch(**_launch_kwargs())
                 try:
                     page = browser.new_page(viewport={"width": 1280, "height": 800})
                     try:
@@ -122,3 +131,71 @@ def preview_page(url: str, out_path: Path, wait_seconds: float = 2.0,
         except Exception as e:
             raise RuntimeError(f"Browser preview failed: {e}")
     return out_path
+
+
+def capture_page(url: str, out_path: Path, wait_seconds: float = 2.5,
+                 status: StatusFn = None) -> dict:
+    """Load a URL in headless Chromium like preview_page, but ALSO capture what
+    happens at runtime: console errors/warnings, uncaught exceptions, and failed
+    network requests. Returns {screenshot, console, page_errors, failed_requests,
+    load_error} so the agent can fix what actually breaks when the app runs, not
+    just what compiles."""
+    url = (url or "").strip()
+    if not url:
+        raise ValueError("url must not be empty")
+    if not re.match(r"^https?://", url, re.IGNORECASE):
+        url = "http://" + url
+    wait_seconds = max(0.0, min(float(wait_seconds or 2.5), 20.0))
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    result = {"screenshot": "", "console": [], "page_errors": [],
+              "failed_requests": [], "load_error": ""}
+
+    with _lock:
+        if not ready():
+            _install_packages(status)
+        from playwright.sync_api import sync_playwright
+        if status:
+            status(f"Running {url} and watching for errors...")
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(**_launch_kwargs())
+                try:
+                    page = browser.new_page(viewport={"width": 1280, "height": 800})
+
+                    def on_console(msg):
+                        if msg.type in ("error", "warning"):
+                            result["console"].append(f"[{msg.type}] {msg.text}"[:500])
+
+                    page.on("console", on_console)
+                    page.on("pageerror",
+                            lambda exc: result["page_errors"].append(str(exc)[:500]))
+                    page.on("requestfailed", lambda req: result["failed_requests"].append(
+                        f"{req.method} {req.url} — {(req.failure or '')}"[:300]))
+                    try:
+                        page.goto(url, wait_until="load", timeout=20_000)
+                    except Exception as e:
+                        result["load_error"] = (
+                            f"Could not load {url}: {e}. If this is a local dev server, make "
+                            f"sure it's actually running (run_background).")
+                    if wait_seconds:
+                        page.wait_for_timeout(wait_seconds * 1000)
+                    try:
+                        page.screenshot(path=str(out_path), full_page=True)
+                        result["screenshot"] = str(out_path)
+                    except Exception:
+                        pass
+                finally:
+                    browser.close()
+        except Exception as e:
+            if not result["load_error"]:
+                result["load_error"] = f"Browser run failed: {e}"
+    # De-duplicate while preserving order (a noisy app repeats the same error).
+    for key in ("console", "page_errors", "failed_requests"):
+        seen, uniq = set(), []
+        for item in result[key]:
+            if item not in seen:
+                seen.add(item)
+                uniq.append(item)
+        result[key] = uniq[:25]
+    return result

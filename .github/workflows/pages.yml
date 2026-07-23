@@ -1,0 +1,37 @@
+name: Deploy phone app to GitHub Pages
+
+# Publishes the static mobile/ PWA to GitHub Pages — free HTTPS hosting.
+# Only the mobile/ folder is uploaded, so the site root IS the app and nothing
+# else in the repo is exposed. Everything sensitive is encrypted client-side
+# with the user's PIN, so the host (GitHub) never sees keys or code.
+
+on:
+  push:
+    branches: [main]
+    paths: ["mobile/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Let a running deploy finish; queue at most one more.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: mobile
+      - id: deployment
+        uses: actions/deploy-pages@v4

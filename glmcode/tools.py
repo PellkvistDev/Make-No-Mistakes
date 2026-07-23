@@ -428,6 +428,73 @@ def edit_file(path: str, old_string: str, new_string: str, replace_all: bool = F
     return f"Edited {p} ({n} replacement{'s' if n != 1 else ''}).{_syntax_feedback(p)}"
 
 
+def replace_in_files(find: str, replace: str, glob: str = "", path: str = ".",
+                     regex: bool = False, dry_run: bool = False,
+                     max_files: int = 300) -> str:
+    """Find-and-replace the SAME text across many files in one shot — for
+    renames/refactors that would otherwise be a dozen error-prone edit_file
+    calls. `dry_run` reports what would change without writing. Skips binary and
+    ignored files (node_modules, .git, …)."""
+    if not find:
+        raise ToolErrorBase("replace_in_files needs a non-empty 'find'.", ErrorSeverity.ERROR)
+    root = _resolve(path)
+    max_files = max(1, min(int(max_files), 2000))
+    try:
+        rx = re.compile(find) if regex else None
+    except re.error as e:
+        raise ToolErrorBase(f"invalid regex: {e}", ErrorSeverity.ERROR)
+
+    targets: list[Path] = [root] if root.is_file() else []
+    if root.is_dir():
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not _should_skip_dir(d)]
+            for name in filenames:
+                if glob and not fnmatch.fnmatch(name, glob):
+                    continue
+                targets.append(Path(dirpath) / name)
+            if len(targets) > 40_000:
+                break
+
+    changed: list[tuple[str, int]] = []
+    total = 0
+    scanned = 0
+    for f in targets:
+        if len(changed) >= max_files:
+            break
+        if f.suffix in (".min.js", ".map", ".lock") or _is_binary(f):
+            continue
+        scanned += 1
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        if rx is not None:
+            new_text, n = rx.subn(replace, text)
+        else:
+            n = text.count(find)
+            new_text = text.replace(find, replace)
+        if n == 0 or new_text == text:
+            continue
+        rel = f.relative_to(root).as_posix() if root.is_dir() else f.name
+        changed.append((rel, n))
+        total += n
+        if not dry_run:
+            try:
+                f.write_text(new_text, encoding="utf-8", newline="\n")
+            except OSError as e:
+                raise ToolErrorBase(f"could not write {rel}: {e}", ErrorSeverity.ERROR)
+
+    if not changed:
+        return f"No occurrences of {find!r} found in {scanned} scanned file(s)."
+    verb = "Would replace" if dry_run else "Replaced"
+    head = (f"{verb} {total} occurrence(s) of {find!r} across {len(changed)} file(s)"
+            + (" (dry run — nothing written):" if dry_run else ":"))
+    lines = [head] + [f"  {rel}: {n}" for rel, n in changed[:100]]
+    if len(changed) > 100:
+        lines.append(f"  … and {len(changed) - 100} more files")
+    return _truncate("\n".join(lines))
+
+
 # --------------------------------------------------------------------- #
 # remember -- user-level memory, persists across every chat/project (unlike
 # GLM.md, which is per-project). Loaded into the system prompt by
@@ -612,6 +679,194 @@ def _looks_like_definition(line: str, symbol_re: str, flags: int = 0) -> bool:
     # always lowercase regardless of `flags`; only the symbol's own case
     # sensitivity should follow the caller's case_sensitive setting.
     return any(re.match(p.format(s=symbol_re), stripped, flags) for p in _DEFINITION_PATTERNS)
+
+
+def search_code(query: str, k: int = 6) -> str:
+    """Retrieve the most relevant code for a natural-language or keyword query
+    from the local codebase index (offline TF-IDF over identifier-aware tokens).
+    Use it to LOCATE the right place to read before diving in -- 'where is the
+    retry/backoff logic', 'the code that parses config' -- instead of guessing
+    or running several glob/grep probes."""
+    from .codebase_memory import search_codebase
+    query = (query or "").strip()
+    if not query:
+        raise ToolErrorBase("search_code needs a 'query'", ErrorSeverity.ERROR)
+    k = max(1, min(int(k or 6), 12))
+    try:
+        hits = search_codebase(get_workdir(), query, k=k)
+    except Exception as e:
+        raise ToolErrorBase(f"codebase search failed: {e}", ErrorSeverity.ERROR)
+    if not hits:
+        return f"No matches for {query!r} in the indexed project files."
+    parts = [f"Top {len(hits)} matches for {query!r} (most relevant first). "
+             f"Open a file with read_file to see full context:"]
+    for h in hits:
+        snippet = h["text"]
+        if len(snippet) > 700:
+            snippet = snippet[:700] + "\n…"
+        parts.append(f"\n{h['path']}:{h['start']}-{h['end']}  (relevance {h['score']})\n{snippet}")
+    return _truncate("\n".join(parts))
+
+
+_lsp_managers: dict = {}
+_lsp_lock = threading.Lock()
+
+
+def _lsp_manager():
+    from .lsp import LspManager
+    root = str(get_workdir())
+    with _lsp_lock:
+        m = _lsp_managers.get(root)
+        if m is None:
+            m = LspManager(get_workdir())
+            _lsp_managers[root] = m
+        return m
+
+
+def code_diagnostics(path: str) -> str:
+    """Real type errors / diagnostics for a file from its language server
+    (pyright, tsserver, gopls, ...). Static and usually instant -- catches
+    undefined names, type mismatches, unused imports, etc. WITHOUT running the
+    code. Run it on a file you just edited to check your work."""
+    from .lsp import available_for
+    p = _resolve(path)
+    if not p.is_file():
+        raise ToolErrorBase(f"file not found: {path}", ErrorSeverity.ERROR)
+    if not available_for(str(p)):
+        return (f"No language server is installed for {p.suffix or p.name} files, so static "
+                f"diagnostics aren't available here. (Verify by running the tests/build instead.)")
+    avail, diags = _lsp_manager().diagnostics(str(p))
+    if not avail:
+        return f"No language server is installed for {p.suffix} files."
+    if not diags:
+        return f"No problems reported by the language server for {p.name}."
+    order = {"error": 0, "warning": 1, "info": 2, "hint": 3}
+    diags.sort(key=lambda d: (order.get(d["severity"], 9), d["line"]))
+    lines = [f"{sum(1 for d in diags if d['severity'] == 'error')} error(s), "
+             f"{sum(1 for d in diags if d['severity'] == 'warning')} warning(s) in {p.name}:"]
+    for d in diags[:80]:
+        src = f" [{d['source']}]" if d.get("source") else ""
+        lines.append(f"  {d['severity']} {p.name}:{d['line']}:{d['character']} — {d['message']}{src}")
+    return _truncate("\n".join(lines))
+
+
+def go_to_definition(path: str, line: int, character: int) -> str:
+    """Ask the language server where the symbol at path:line:character is
+    defined (1-based). Precise where find_references/grep are only textual."""
+    from .lsp import available_for
+    p = _resolve(path)
+    if not p.is_file():
+        raise ToolErrorBase(f"file not found: {path}", ErrorSeverity.ERROR)
+    if not available_for(str(p)):
+        return f"No language server installed for {p.suffix or p.name} files (use find_references)."
+    avail, locs = _lsp_manager().definition(str(p), int(line), int(character))
+    if not locs:
+        return "The language server found no definition for the symbol at that position."
+    return "Defined at:\n" + "\n".join(f"  {loc['path']}:{loc['line']}:{loc['character']}"
+                                       for loc in locs)
+
+
+# Patterns for secrets that must never be committed. Deliberately high-signal
+# (specific token formats + private-key headers) to keep false positives low.
+_SECRET_PATTERNS = [
+    ("AWS access key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
+    ("GitHub token", re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}\b")),
+    ("GitHub fine-grained token", re.compile(r"\bgithub_pat_[A-Za-z0-9_]{60,}\b")),
+    ("Slack token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    ("Google API key", re.compile(r"\bAIza[0-9A-Za-z_\-]{35}\b")),
+    ("OpenAI/Anthropic-style key", re.compile(r"\bsk-[A-Za-z0-9]{20,}\b")),
+    ("Stripe secret key", re.compile(r"\b(?:sk|rk)_live_[A-Za-z0-9]{20,}\b")),
+    ("Private key block", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----")),
+    ("Generic assigned secret", re.compile(
+        r"(?i)(?:api[_-]?key|secret|token|passwd|password)\s*[:=]\s*['\"][^'\"\s]{12,}['\"]")),
+]
+# Files where a "secret-looking" string is expected/harmless (examples, tests,
+# lockfiles) -- flagged more quietly.
+_SECRET_SOFT = ("example", "sample", ".lock", "test", "spec", "fixture", ".md")
+
+
+def _redact(match: str) -> str:
+    m = match.strip()
+    return (m[:4] + "…" + m[-2:]) if len(m) > 10 else "…"
+
+
+def scan_secrets(path: str = ".", max_hits: int = 200) -> str:
+    """Scan the project for hardcoded secrets that shouldn't be committed — API
+    keys, tokens, and private keys. Run it before committing, or whenever you've
+    added config/credentials. Reports file:line and the kind of secret (the value
+    itself is redacted). High-signal patterns; still eyeball each hit."""
+    root = _resolve(path)
+    max_hits = max(1, min(int(max_hits), 1000))
+    targets: list[Path] = [root] if root.is_file() else []
+    if root.is_dir():
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames if not _should_skip_dir(d)]
+            for name in filenames:
+                targets.append(Path(dirpath) / name)
+            if len(targets) > 40_000:
+                break
+    hits: list[str] = []
+    soft: list[str] = []
+    scanned = 0
+    for f in targets:
+        if len(hits) >= max_hits:
+            break
+        if f.suffix in (".min.js", ".map") or _is_binary(f):
+            continue
+        scanned += 1
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        rel = f.relative_to(root).as_posix() if root.is_dir() else f.name
+        low = rel.lower()
+        is_soft = any(s in low for s in _SECRET_SOFT)
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if len(line) > 500:
+                continue
+            for label, rx in _SECRET_PATTERNS:
+                m = rx.search(line)
+                if m:
+                    entry = f"  {rel}:{lineno} — {label} ({_redact(m.group(0))})"
+                    (soft if is_soft else hits).append(entry)
+                    break
+    if not hits and not soft:
+        return f"No hardcoded secrets found in {scanned} scanned file(s)."
+    out = []
+    if hits:
+        out.append(f"⚠ {len(hits)} likely secret(s) found — do NOT commit these; move them to "
+                   f"environment variables or an ignored .env:")
+        out.extend(hits[:max_hits])
+    if soft:
+        out.append(f"\n{len(soft)} match(es) in example/test/doc files (usually fine, verify):")
+        out.extend(soft[:50])
+    return _truncate("\n".join(out))
+
+
+def post_pr_comment(number: int, body: str) -> str:
+    """Post a comment (e.g. a review) to a GitHub pull request in THIS project's
+    connected repo. Used after reviewing a PR, only when the user asks to post."""
+    from . import githubsync as gh
+    body = (body or "").strip()
+    if not body:
+        raise ToolErrorBase("post_pr_comment needs a non-empty 'body'", ErrorSeverity.ERROR)
+    st = gh.status(get_workdir())
+    if not st.remote_url:
+        raise ToolErrorBase("this folder isn't connected to a GitHub repository",
+                            ErrorSeverity.ERROR)
+    try:
+        host, owner, repo = gh.parse_repo(st.remote_url)
+    except gh.GitHubError as e:
+        raise ToolErrorBase(str(e), ErrorSeverity.ERROR)
+    token = gh.load_token(host)
+    if not token:
+        raise ToolErrorBase("no GitHub token is configured (connect one in Settings → GitHub)",
+                            ErrorSeverity.ERROR)
+    try:
+        url = gh.post_issue_comment(token, owner, repo, int(number), body)
+    except gh.GitHubError as e:
+        raise ToolErrorBase(str(e), ErrorSeverity.ERROR)
+    return f"Posted the comment to PR #{number}: {url}"
 
 
 def find_references(symbol: str, path: str = ".", glob: str = "",
@@ -812,6 +1067,37 @@ def run_powershell(command: str, timeout_seconds: int = 120) -> str:
         parts.append(f"[stderr]\n{err}")
     parts.append(f"[exit code: {proc.returncode}]")
     return _truncate("\n".join(parts))
+
+
+def run_check_command(command: str, timeout_seconds: int = 180) -> tuple[int, str]:
+    """Run a verification command in the working dir and return (exit_code,
+    combined stdout+stderr). Cross-platform: PowerShell on Windows, /bin/sh
+    elsewhere. Used by the 'make it green' loop to run the project's tests
+    deterministically (the model doesn't get to decide whether to run them)."""
+    timeout_seconds = max(1, min(int(timeout_seconds), 600))
+    if os.name == "nt":
+        argv = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+                "Bypass", "-Command", "$ErrorActionPreference='Continue'; " + command]
+    else:
+        argv = ["/bin/sh", "-c", command]
+    try:
+        proc = subprocess.Popen(
+            argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=str(get_workdir()), **NO_WINDOW_KWARGS,
+        )
+    except OSError as e:
+        return (127, f"Failed to start command: {e}")
+    try:
+        out_b, _ = proc.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        _terminate_process_tree(proc)
+        try:
+            out_b, _ = proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            out_b = b""
+        text = (out_b or b"").decode("utf-8", errors="replace")
+        return (124, _truncate(text + f"\n[timed out after {timeout_seconds}s]"))
+    return (proc.returncode, _truncate((out_b or b"").decode("utf-8", errors="replace")))
 
 
 # --------------------------------------------------------------------- #
@@ -1659,6 +1945,82 @@ TOOL_SCHEMAS = [
         ["symbol"],
     ),
     _schema(
+        "search_code",
+        "Semantic-ish retrieval over the project: rank the most RELEVANT code chunks for a "
+        "natural-language or keyword query using a local offline index (no network). Use it to "
+        "find WHERE to look when you don't know the exact symbol or filename -- e.g. 'where is "
+        "the retry/backoff logic', 'code that validates the config', 'how are sessions saved'. "
+        "It returns ranked file:line snippets; open the best hit with read_file. Prefer "
+        "find_references when you know the exact identifier, and grep for an exact string.",
+        {
+            "query": {"type": "string", "description": "What you're looking for, in words or keywords"},
+            "k": {"type": "integer", "description": "How many results to return (default 6, max 12)"},
+        },
+        ["query"],
+    ),
+    _schema(
+        "code_diagnostics",
+        "Real diagnostics (type errors, undefined names, unused imports, ...) for a file from its "
+        "language server — static and usually instant, WITHOUT running the code. Run it on a file "
+        "you just edited to catch mistakes before tests do. Returns errors/warnings with line "
+        "numbers, or says none were found. No-ops with a clear note if no server is installed for "
+        "that file type.",
+        {"path": {"type": "string", "description": "The file to check"}},
+        ["path"],
+    ),
+    _schema(
+        "go_to_definition",
+        "Ask the language server where the symbol at a given position is defined — precise "
+        "(understands scope/types) where find_references and grep are only textual. Positions are "
+        "1-based line and character.",
+        {
+            "path": {"type": "string", "description": "The file containing the symbol"},
+            "line": {"type": "integer", "description": "1-based line of the symbol"},
+            "character": {"type": "integer", "description": "1-based column of the symbol"},
+        },
+        ["path", "line", "character"],
+    ),
+    _schema(
+        "replace_in_files",
+        "Find-and-replace the SAME text across MANY files at once — for a rename or refactor "
+        "that would otherwise be a dozen edit_file calls. Set dry_run:true first to preview which "
+        "files and how many occurrences would change, then run it for real. Use `glob` to scope "
+        "by filename (e.g. '*.ts') and regex:true for a pattern. Skips binary and ignored files. "
+        "Prefer find_references first when renaming a code symbol, to be sure you're not also "
+        "hitting unrelated text.",
+        {
+            "find": {"type": "string", "description": "Text (or regex if regex:true) to find"},
+            "replace": {"type": "string", "description": "Replacement text (may use \\1 groups if regex)"},
+            "glob": {"type": "string", "description": "Only files whose NAME matches, e.g. '*.py'"},
+            "path": {"type": "string", "description": "Root directory or file (default: cwd)"},
+            "regex": {"type": "boolean", "description": "Treat 'find' as a regular expression"},
+            "dry_run": {"type": "boolean", "description": "Preview only, don't write (default false)"},
+        },
+        ["find", "replace"],
+    ),
+    _schema(
+        "scan_secrets",
+        "Scan the project for hardcoded secrets that must not be committed — API keys, access "
+        "tokens, and private keys. Run it before a commit, or after adding config/credentials. "
+        "Reports file:line and the kind of secret found (values are redacted). High-signal, but "
+        "still confirm each hit.",
+        {
+            "path": {"type": "string", "description": "Directory or file to scan (default: cwd)"},
+        },
+        [],
+    ),
+    _schema(
+        "post_pr_comment",
+        "Post a comment (typically your review) to a GitHub pull request in this project's "
+        "connected repo. Only use it when the user asks you to post — otherwise just show the "
+        "review in the chat.",
+        {
+            "number": {"type": "integer", "description": "The pull request number"},
+            "body": {"type": "string", "description": "The comment/review body (Markdown)"},
+        },
+        ["number", "body"],
+    ),
+    _schema(
         "run_powershell",
         "Run a Windows PowerShell command and return stdout/stderr/exit code. Use for running "
         "programs, tests, git, package managers. NOT for reading/searching files (use the file "
@@ -1791,6 +2153,20 @@ TOOL_SCHEMAS = [
             "wait_seconds": {"type": "number",
                              "description": "Seconds to wait after load before screenshotting, "
                                             "for pages that render asynchronously (default 2, max 15)"},
+        },
+        ["url"],
+    ),
+    _schema(
+        "check_page",
+        "Load a running web page (usually your run_background dev server) in a real headless "
+        "browser and report what happens AT RUNTIME: JavaScript console errors/warnings, uncaught "
+        "exceptions, and failed network requests — plus a screenshot. Use it after a UI/web change "
+        "to catch what actually breaks when the app runs, not just what compiles. If it reports "
+        "errors, fix them and check again. First call installs Chromium (~150-300MB, one-time).",
+        {
+            "url": {"type": "string", "description": "URL to load, e.g. 'http://localhost:3000'"},
+            "wait_seconds": {"type": "number",
+                             "description": "Seconds to interact/settle after load (default 2.5, max 20)"},
         },
         ["url"],
     ),
@@ -2240,7 +2616,7 @@ CONVERSATIONAL_SCHEMAS = [
 # for). All of these are in READONLY_TOOLS, so they run without a permission
 # prompt, which matters for a hands-free delegator.
 _CONVO_READONLY_NAMES = ("read_file", "list_dir", "glob", "grep",
-                         "find_references", "review_changes")
+                         "find_references", "search_code", "review_changes")
 CONVERSATIONAL_READONLY_SCHEMAS = [
     s for s in TOOL_SCHEMAS if s["function"]["name"] in _CONVO_READONLY_NAMES
 ]
@@ -2263,16 +2639,23 @@ REMEMBER_TOOL = "remember"
 REVIEW_CHANGES_TOOL = "review_changes"
 SHOW_HTTP_CAT_TOOL = "show_http_cat"
 PREVIEW_PAGE_TOOL = "preview_page"
+CHECK_PAGE_TOOL = "check_page"
 
 
 TOOL_FUNCTIONS = {
     "read_file": read_file,
     "write_file": write_file,
     "edit_file": edit_file,
+    "replace_in_files": replace_in_files,
     "list_dir": list_dir,
     "glob": glob_files,
     "grep": grep,
     "find_references": find_references,
+    "search_code": search_code,
+    "code_diagnostics": code_diagnostics,
+    "go_to_definition": go_to_definition,
+    "scan_secrets": scan_secrets,
+    "post_pr_comment": post_pr_comment,
     "run_powershell": run_powershell,
     "run_background": run_background,
     "read_output": read_output,
@@ -2309,17 +2692,19 @@ TOOL_FUNCTIONS = {
 # to a single small file outside any project, so a diff-preview permission
 # prompt would just be friction, not a meaningful safety check.
 READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "find_references",
-                 "todo_write", "remember", "show_image", "compact_context",
-                 "read_output", "stop_process", "list_processes",
-                 "review_changes"}
+                 "search_code", "code_diagnostics", "go_to_definition",
+                 "scan_secrets", "todo_write", "remember", "show_image",
+                 "compact_context", "read_output", "stop_process",
+                 "list_processes", "review_changes"}
 # Tools that modify files (auto-approved in autoedit mode).
-FILE_WRITE_TOOLS = {"write_file", "edit_file", "git_commit"}
+FILE_WRITE_TOOLS = {"write_file", "edit_file", "replace_in_files", "git_commit"}
 # Network read tools (prompt in ask mode, auto-approved in autoedit/yolo).
 # view_image sends the image's bytes to the vision model, so it's gated the
 # same way even though it "just reads" a local file. package_info/
 # show_http_cat are outbound requests to third-party APIs, same tier as
 # fetch_url.
-NETWORK_TOOLS = {"fetch_url", "web_search", "view_image", "package_info", "show_http_cat"}
+NETWORK_TOOLS = {"fetch_url", "web_search", "view_image", "package_info",
+                 "show_http_cat", "post_pr_comment"}
 # Git tools (prompt in ask mode, auto-approved in autoedit/yolo).
 GIT_TOOLS = {"git_push", "git_pull", "git_branch_list"}
 # Local image generation: creates a new file, and the first call installs
@@ -2332,7 +2717,7 @@ TTS_TOOLS = {"speak"}
 # Local browser screenshots: same shape of concern as IMAGE_GEN_TOOLS/TTS_TOOLS
 # (new file, first-call install/download of Playwright + Chromium), plus it
 # also loads a URL like fetch_url does.
-BROWSER_TOOLS = {"preview_page"}
+BROWSER_TOOLS = {"preview_page", "check_page"}
 # control_chrome launches an interactive browser that can log in, submit forms
 # and act on the live web -- a bigger deal than a screenshot, so it prompts
 # once (in ask mode) to approve the whole session + goal. Same tier as a
