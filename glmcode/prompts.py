@@ -406,6 +406,20 @@ VERIFY_NUDGE = (
 )
 
 
+REFINE_NUDGE = (
+    "[Automatic review pass -- not from the user] Before we finish, review the work you "
+    "just did as a demanding senior engineer would review a colleague's pull request. "
+    "Look hard for: bugs, unhandled edge cases, off-by-one or boundary errors, wrong "
+    "assumptions, parts of the request you missed or only partly did, missing or broken "
+    "tests, and code that merely appears to work. Actually LOOK -- re-read the changed "
+    "files (review_changes), run the tests or the affected code -- rather than judging "
+    "from memory.\n\n"
+    "If you find real problems, fix them now and say briefly what you changed. If, after "
+    "genuinely checking, the work is complete and correct, reply with a one-line "
+    "confirmation and do NOT invent busywork or make changes just to look productive."
+)
+
+
 WRAP_UP_NUDGE = (
     "The user has asked you to stop researching/working now and report immediately -- "
     "do not call any more tools. Reply with a plain-text summary: what you found or did "

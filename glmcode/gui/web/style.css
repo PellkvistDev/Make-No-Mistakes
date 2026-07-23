@@ -189,6 +189,7 @@ body.perf-mode #composer {
 .chip-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .chip-btn.mode-yolo { color: #ffb0ab; border-color: rgba(255, 69, 58, 0.4); }
 .chip-btn.mode-autoedit { color: #ffe28a; border-color: rgba(255, 214, 10, 0.35); }
+.chip-btn.think-hi { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 
 /* Top-of-chat model selector: one slick chip + a flat popover of every
    configured model (built-in and custom alike, no grouping). */

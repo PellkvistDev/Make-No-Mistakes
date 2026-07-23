@@ -52,6 +52,7 @@
         <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>
       </svg>
     </button>
+    <button id="think-chip" class="chip chip-btn" title="Thinking effort — click to cycle (low / medium / high / max)">Medium</button>
     <button id="mode-chip" class="chip chip-btn" title="Permission mode — click to cycle">ask</button>
     <button id="settings-btn" class="icon-btn" aria-label="Settings" title="Settings">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
@@ -564,9 +565,20 @@
           </div>
         </div>
       </details>
-      <div class="row"><div class="row-text"><label for="opt-thinking">Extended thinking</label>
-        <span class="row-sub">Model reasons before answering</span></div>
-        <button id="opt-thinking" class="switch" role="switch" aria-checked="true"><span></span></button></div>
+      <div class="row"><div class="row-text"><label>Thinking effort</label>
+        <span class="row-sub">Also on the chip in the title bar. Higher = better answers, slower.</span></div>
+        <div class="seg" id="seg-think" role="radiogroup" aria-label="Thinking effort">
+          <button data-v="low" role="radio">Low</button>
+          <button data-v="medium" role="radio">Medium</button>
+          <button data-v="high" role="radio">High</button>
+          <button data-v="max" role="radio">Max</button>
+        </div>
+      </div>
+      <p class="row-sub"><strong>Low</strong>: no reasoning, answers instantly.
+        <strong>Medium</strong>: the model thinks before answering (default).
+        <strong>High</strong>: after answering, it reviews its own work once and fixes
+        what it finds. <strong>Max</strong>: reviews repeatedly (up to 3×) until nothing's
+        left to improve.</p>
       <div class="row"><div class="row-text"><label for="opt-reasoning">Show reasoning</label>
         <span class="row-sub">Display the thinking stream in chat</span></div>
         <button id="opt-reasoning" class="switch" role="switch" aria-checked="true"><span></span></button></div>

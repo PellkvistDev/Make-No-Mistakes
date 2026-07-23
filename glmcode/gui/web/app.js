@@ -2553,6 +2553,31 @@ $("mode-chip").addEventListener("click", async () => {
   toast("Permission mode: " + MODE_LABEL[next], "info", 2200);
 });
 
+const THINK_MODES = ["low", "medium", "high", "max"];
+const THINK_LABEL = { low: "Low", medium: "Medium", high: "High", max: "Max" };
+const THINK_TIP = {
+  low: "Low — answers instantly, no reasoning",
+  medium: "Medium — thinks before answering",
+  high: "High — reviews and improves its own answer once",
+  max: "Max — reviews and improves repeatedly (up to 3×)",
+};
+function applyThinkChip() {
+  const chip = $("think-chip");
+  if (!chip) return;
+  const m = settings.thinking_mode || "medium";
+  chip.textContent = THINK_LABEL[m] || m;
+  chip.title = THINK_TIP[m] || "Thinking effort — click to cycle";
+  chip.className = "chip chip-btn" + (m === "high" || m === "max" ? " think-hi" : "");
+}
+$("think-chip").addEventListener("click", async () => {
+  const cur = settings.thinking_mode || "medium";
+  const next = THINK_MODES[(THINK_MODES.indexOf(cur) + 1) % THINK_MODES.length];
+  settings = await api().set_setting("thinking_mode", next);
+  applyThinkChip();
+  syncSettingsUI();
+  toast(THINK_TIP[next], "info", 2600);
+});
+
 /* ------------------------------------------------ read-aloud (TTS) */
 
 function applyReadAloudChip() {
@@ -3142,7 +3167,12 @@ function syncSettingsUI() {
     b.classList.toggle("on", b.dataset.v === settings.vision_route);
     b.setAttribute("aria-checked", b.dataset.v === settings.vision_route);
   });
-  $("opt-thinking").setAttribute("aria-checked", !!settings.thinking);
+  const tm = settings.thinking_mode || "medium";
+  document.querySelectorAll("#seg-think button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.v === tm);
+    b.setAttribute("aria-checked", b.dataset.v === tm);
+  });
+  applyThinkChip();
   $("opt-reasoning").setAttribute("aria-checked", !!settings.show_reasoning);
   $("opt-notify").setAttribute("aria-checked", !!settings.notifications);
   $("opt-reduce-fx").setAttribute("aria-checked", !!settings.reduce_effects);
@@ -3271,6 +3301,11 @@ document.querySelectorAll("#seg-vision button").forEach((b) =>
     settings = await api().set_setting("vision_route", b.dataset.v);
     syncSettingsUI();
   }));
+document.querySelectorAll("#seg-think button").forEach((b) =>
+  b.addEventListener("click", async () => {
+    settings = await api().set_setting("thinking_mode", b.dataset.v);
+    syncSettingsUI();
+  }));
 
 function bindSwitch(id, key) {
   $(id).addEventListener("click", async () => {
@@ -3279,7 +3314,6 @@ function bindSwitch(id, key) {
     syncSettingsUI();
   });
 }
-bindSwitch("opt-thinking", "thinking");
 bindSwitch("opt-reasoning", "show_reasoning");
 bindSwitch("opt-notify", "notifications");
 bindSwitch("opt-reduce-fx", "reduce_effects");

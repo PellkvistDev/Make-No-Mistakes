@@ -856,6 +856,7 @@ class Api:
         return {
             "mode": c.mode, "model": c.model, "vision_model": c.vision_model,
             "vision_route": c.vision_route, "thinking": c.thinking,
+            "thinking_mode": c.thinking_mode,
             "show_reasoning": c.show_reasoning, "temperature": c.temperature,
             "cwd": str(Path.cwd()) if self.session_id else "",
             "background_custom": bool(c.background_path),
@@ -884,6 +885,9 @@ class Api:
                 c.mode = value
         elif key == "vision_route" and value in ("describe", "direct"):
             c.vision_route = value
+        elif key == "thinking_mode" and value in ("low", "medium", "high", "max"):
+            c.thinking_mode = value
+            c.thinking = value != "low"  # keep the derived flag consistent
         elif key in ("thinking", "show_reasoning", "read_aloud", "notifications",
                      "reduce_effects", "browser_headless", "browser_keep_logins"):
             setattr(c, key, bool(value))

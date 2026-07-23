@@ -290,6 +290,25 @@ re-reads the now-current page first (its old element refs are stale, and it's
 told so) and continues its goal from wherever you left things. No lost
 context, no fighting over the page.
 
+### Thinking modes
+
+The **thinking chip** in the title bar (also in Settings → Models) sets how much
+effort goes into each answer — click to cycle:
+
+- **Low** — reasoning off; the model answers instantly. Good for quick edits and
+  simple questions.
+- **Medium** *(default)* — the model thinks before answering.
+- **High** — after finishing, the agent **reviews its own work once** as a
+  demanding code reviewer would: it re-reads the diff, runs the tests, hunts for
+  bugs and missed edge cases, and fixes what it finds (or confirms it's solid).
+- **Max** — the same review, but **repeated up to three times**, stopping early
+  the moment a pass finds nothing left to improve.
+
+High and Max trade speed for quality — the review runs in the *same*
+conversation, so the model critiques its real work with full context and its
+tools (not a detached second opinion). Only the main chat agent reviews;
+background workers and the voice delegator skip it.
+
 ### Plan mode
 
 The checklist icon in the composer toggles **plan first**: your next message

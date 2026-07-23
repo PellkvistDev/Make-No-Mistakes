@@ -18,7 +18,7 @@ from .config import Config
 from .events import AgentEvents
 from .permissions import PermissionEngine
 from .prompts import (BROWSER_AGENT_SYSTEM, BROWSER_RESUME_NOTE, COMPACT_PROMPT,
-                      CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM,
+                      CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM, REFINE_NUDGE,
                       STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE, SUBAGENT_PREAMBLE,
                       VERIFY_NUDGE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
                       WRAP_UP_NUDGE, build_system_prompt,
@@ -264,6 +264,10 @@ class Agent:
         self._turn_wrote_files = False
         self._turn_verified = False
         self._verify_nudged = False
+        # High/Max self-review bookkeeping, reset each turn (see _run_turn).
+        self._refine_budget = 0
+        self._refine_done = 0
+        self._refine_pass_changed = False
         # Per-agent todo list (todo_write is handled in-dispatch): parallel
         # chats each keep their own checklist instead of sharing one global.
         self.todos: list[dict] = []
@@ -889,6 +893,15 @@ class Agent:
         self._turn_wrote_files = False
         self._turn_verified = False
         self._verify_nudged = False
+        # High/Max thinking modes: after the main answer, run self-review passes
+        # that re-examine the work and fix issues. Only the main chat agent
+        # refines -- sub-agents, workers and the voice delegator do not (it would
+        # multiply latency and isn't where the quality payoff is).
+        from .config import THINKING_REFINE_PASSES
+        self._refine_budget = (THINKING_REFINE_PASSES.get(self.cfg.thinking_mode, 0)
+                               if (self.allow_subagents and not self.conversational) else 0)
+        self._refine_done = 0
+        self._refine_pass_changed = False
 
         for iteration in range(self.cfg.max_turns_per_request):
             # Recomputed each step: images can enter the context mid-turn (the
@@ -929,6 +942,18 @@ class Agent:
                     self.events.info("files were edited but nothing was run -- "
                                      "asking the agent to verify its changes")
                     self.messages.append({"role": "user", "content": VERIFY_NUDGE})
+                    continue
+                # High/Max: run a self-review pass over the answer. The first
+                # pass always runs; further passes (Max) only run if the previous
+                # one actually changed something -- once a review finds nothing to
+                # fix, more reviews are just wasted work.
+                if self._refine_done < self._refine_budget and \
+                        (self._refine_done == 0 or self._refine_pass_changed):
+                    self._refine_done += 1
+                    self._refine_pass_changed = False
+                    self.events.info(f"reviewing and improving the answer "
+                                     f"(pass {self._refine_done})…")
+                    self.messages.append({"role": "user", "content": REFINE_NUDGE})
                     continue
                 return  # final answer already streamed
 
@@ -1026,7 +1051,7 @@ class Agent:
                 # reject or choke on it. model != model_override is True for the
                 # built-in chat model AND for the GLM vision model routed through
                 # the built-in client; False only for the custom model itself.
-                thinking=self.cfg.thinking and model != self.model_override,
+                thinking=(self.cfg.thinking_mode != "low") and model != self.model_override,
                 on_content=self.events.content_delta,
                 on_reasoning=self.events.reasoning_delta,
                 on_status=self.events.info,
@@ -1174,6 +1199,7 @@ class Agent:
                     output = execute_tool(name, args)
                 if name in EDIT_TOOLS:
                     self._turn_wrote_files = True
+                    self._refine_pass_changed = True  # a review pass that edits keeps Max going
                 self._tool_reply(tc, output, name=name, args=args)
             except ToolError as e:
                 self._tool_reply(tc, f"ERROR: {e}", error=True, name=name, args=args)

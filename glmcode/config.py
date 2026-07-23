@@ -120,7 +120,8 @@ class Config:
     mode: str = "ask"                # ask | autoedit | yolo
     temperature: float = 0.6
     max_tokens: int = 16384
-    thinking: bool = True            # GLM reasoning mode
+    thinking: bool = True            # GLM reasoning mode (derived from thinking_mode; kept for compat)
+    thinking_mode: str = "medium"    # low | medium | high | max (effort/iteration level)
     show_reasoning: bool = True      # print the model's reasoning (dimmed)
     vision_route: str = "describe"   # describe | direct
     context_limit_tokens: int = 155_000  # hard auto-compact fallback above this estimate
@@ -173,8 +174,14 @@ class Config:
         return os.environ.get("TAVILY_API_KEY", "").strip() or self.tavily_api_key
 
 
+THINKING_MODES = ("low", "medium", "high", "max")
+# How many self-review-and-revise passes each mode runs after the main answer.
+THINKING_REFINE_PASSES = {"low": 0, "medium": 0, "high": 1, "max": 3}
+
+
 def load_config() -> Config:
     cfg = Config()
+    data = {}
     if CONFIG_FILE.exists():
         try:
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
@@ -187,6 +194,12 @@ def load_config() -> Config:
             pass
     if cfg.mode not in PERMISSION_MODES:
         cfg.mode = "ask"
+    # Configs written before thinking_mode existed only had the boolean
+    # `thinking`: map it (off -> low, on -> medium). Then keep the two
+    # consistent -- thinking is on for every mode except "low".
+    if "thinking_mode" not in data or cfg.thinking_mode not in THINKING_MODES:
+        cfg.thinking_mode = "medium" if cfg.thinking else "low"
+    cfg.thinking = cfg.thinking_mode != "low"
     return cfg
 
 
