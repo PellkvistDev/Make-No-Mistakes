@@ -1,0 +1,332 @@
+/* Make No Mistakes — mobile browser glue.
+ *
+ * This is the only DOM-touching layer. All crypto, GitHub, model, and agent
+ * logic lives in agent-core.js (AgentCore), which is unit-tested in Node.
+ *
+ * SECURITY posture enforced here:
+ *  - Only the encrypted vault blob is persisted (localStorage). The PIN and the
+ *    decrypted secrets live in JS memory (`session`) and only while unlocked.
+ *  - The app auto-locks — dropping the decrypted secrets — when it goes to the
+ *    background or after an idle timeout.
+ *  - Every write is routed through a modal confirm dialog by default.
+ */
+(function () {
+  "use strict";
+  const AC = window.AgentCore;
+  const $ = (id) => document.getElementById(id);
+  const VAULT_KEY = "mnm.vault.v1";
+  const IDLE_MS = 5 * 60 * 1000; // lock after 5 min idle
+
+  // In-memory session (cleared on lock). Never persisted.
+  let session = null; // { secrets, gh, model, repo:{owner,repo,branch,full_name} }
+  let currentRun = null; // { stop }
+
+  // ---------------------------------------------------------------- screens
+  const SCREENS = ["screen-setup", "screen-unlock", "screen-repo", "screen-chat"];
+  function show(id) {
+    for (const s of SCREENS) $(s).hidden = s !== id;
+  }
+
+  // ------------------------------------------------------------- vault I/O
+  function loadVault() {
+    try { return JSON.parse(localStorage.getItem(VAULT_KEY) || "null"); }
+    catch { return null; }
+  }
+  function storeVault(blob) { localStorage.setItem(VAULT_KEY, JSON.stringify(blob)); }
+  function clearVault() { localStorage.removeItem(VAULT_KEY); }
+
+  // ------------------------------------------------------------- auto-lock
+  let idleTimer = null;
+  function armIdle() {
+    clearTimeout(idleTimer);
+    if (session) idleTimer = setTimeout(lock, IDLE_MS);
+  }
+  function lock() {
+    if (currentRun) { try { currentRun.stop(); } catch {} currentRun = null; }
+    session = null;
+    clearTimeout(idleTimer);
+    $("in-unlock-pin").value = "";
+    show("screen-unlock");
+  }
+  // Lock the moment we lose focus/visibility — a phone set down shouldn't stay open.
+  document.addEventListener("visibilitychange", () => { if (document.hidden && session) lock(); });
+  window.addEventListener("pagehide", () => { if (session) lock(); });
+  ["pointerdown", "keydown"].forEach((ev) => document.addEventListener(ev, armIdle, { passive: true }));
+
+  // ---------------------------------------------------------------- toast
+  let toastTimer = null;
+  function toast(msg) {
+    const t = $("toast");
+    t.textContent = msg; t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
+  }
+
+  // ================================================================ SETUP
+  $("btn-save-setup").addEventListener("click", async () => {
+    const err = $("setup-error"); err.textContent = "";
+    const modelKey = $("in-model-key").value.trim();
+    const model = $("in-model").value.trim() || "glm-4.6";
+    const baseUrl = $("in-base-url").value;
+    const githubToken = $("in-gh-token").value.trim();
+    const pin = $("in-pin").value, pin2 = $("in-pin2").value;
+    if (!modelKey || !githubToken) return (err.textContent = "Model key and GitHub token are both required.");
+    if (pin.length < 4) return (err.textContent = "PIN must be at least 4 characters.");
+    if (pin !== pin2) return (err.textContent = "PINs don't match.");
+    try {
+      const secrets = { modelKey, model, baseUrl, githubToken };
+      const blob = await AC.encryptVault(secrets, pin);
+      storeVault(blob);
+      await unlockWith(secrets, pin);
+    } catch (e) { err.textContent = e.message || String(e); }
+  });
+
+  // ================================================================ UNLOCK
+  $("btn-unlock").addEventListener("click", doUnlock);
+  $("in-unlock-pin").addEventListener("keydown", (e) => { if (e.key === "Enter") doUnlock(); });
+  async function doUnlock() {
+    const err = $("unlock-error"); err.textContent = "";
+    const pin = $("in-unlock-pin").value;
+    const blob = loadVault();
+    if (!blob) return show("screen-setup");
+    try {
+      const secrets = await AC.decryptVault(blob, pin);
+      await unlockWith(secrets, pin);
+    } catch (e) { err.textContent = "Wrong PIN."; }
+  }
+  $("btn-reset").addEventListener("click", () => {
+    if (confirm("Erase your encrypted keys from this device? You'll re-enter them.")) {
+      clearVault(); session = null; show("screen-setup");
+    }
+  });
+
+  async function unlockWith(secrets, pin) {
+    session = { secrets, pin };
+    session.model = AC.makeModel({ apiKey: secrets.modelKey, model: secrets.model, baseUrl: secrets.baseUrl });
+    armIdle();
+    await enterRepoPicker();
+  }
+
+  // ================================================================ REPO PICKER
+  let repoCache = [];
+  async function enterRepoPicker() {
+    show("screen-repo");
+    $("repo-error").textContent = "";
+    $("repo-whoami").textContent = "Loading account…";
+    const tmpGh = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+    try {
+      const me = await tmpGh.me();
+      $("repo-whoami").textContent = "Signed in as " + me.login;
+      session.login = me.login;
+    } catch (e) {
+      $("repo-whoami").textContent = "";
+      $("repo-error").textContent = "GitHub token rejected: " + e.message;
+      return;
+    }
+    await refreshRepos();
+  }
+  async function refreshRepos() {
+    const tmpGh = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+    try {
+      repoCache = await tmpGh.listRepos();
+      renderRepos();
+    } catch (e) { $("repo-error").textContent = e.message; }
+  }
+  function renderRepos() {
+    const filter = $("in-repo-filter").value.toLowerCase();
+    const ul = $("repo-list"); ul.innerHTML = "";
+    for (const r of repoCache.filter((r) => r.full_name.toLowerCase().includes(filter))) {
+      const li = document.createElement("li");
+      li.textContent = r.full_name;
+      li.addEventListener("click", () => openRepo(r.full_name, r.default_branch || "main"));
+      ul.appendChild(li);
+    }
+    if (!ul.children.length) ul.innerHTML = "<li class='muted'>no matching repos</li>";
+  }
+  $("in-repo-filter").addEventListener("input", renderRepos);
+  $("btn-repo-refresh").addEventListener("click", refreshRepos);
+  $("btn-repo-lock").addEventListener("click", lock);
+  $("btn-create-repo").addEventListener("click", async () => {
+    const name = $("in-new-repo").value.trim();
+    if (!name) return;
+    $("repo-error").textContent = "";
+    const tmpGh = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+    try {
+      const created = await tmpGh.createRepo(name, $("in-new-private").checked);
+      openRepo(created.full_name, created.default_branch || "main");
+    } catch (e) { $("repo-error").textContent = e.message; }
+  });
+
+  function openRepo(fullName, branch) {
+    const [owner, repo] = fullName.split("/");
+    session.repo = { owner, repo, branch, full_name: fullName };
+    session.gh = AC.makeGitHub({ token: session.secrets.githubToken, owner, repo, branch });
+    session.messages = [{ role: "system", content: AC.SYSTEM_PROMPT + "\n\nRepository: " + fullName + " (branch " + branch + ")." }];
+    session.tools = AC.makeTools(session.gh, {
+      confirmWrite: confirmWrite,
+      onCommit: (p) => toast("committed " + p),
+    });
+    $("chat-repo-name").textContent = fullName;
+    $("messages").innerHTML = "";
+    addBubble("system", "Connected to " + fullName + ". I can read, search, and edit files here — each edit is committed. I can't run code on the phone; that happens when your desktop syncs or via CI.");
+    show("screen-chat");
+  }
+  $("btn-back-repo").addEventListener("click", () => { if (!currentRun) enterRepoPicker(); });
+  $("btn-chat-lock").addEventListener("click", lock);
+
+  // ================================================================ CONFIRM DIALOG
+  function confirmWrite(kind, path, content) {
+    if (!$("in-confirm-writes").checked) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      $("confirm-title").textContent = (kind === "edit" ? "Commit edit?" : "Commit new file?");
+      $("confirm-path").textContent = path;
+      $("confirm-preview").textContent = String(content).slice(0, 4000);
+      $("confirm-backdrop").hidden = false;
+      const done = (val) => {
+        $("confirm-backdrop").hidden = true;
+        $("btn-confirm-yes").onclick = null; $("btn-confirm-no").onclick = null;
+        resolve(val);
+      };
+      $("btn-confirm-yes").onclick = () => done(true);
+      $("btn-confirm-no").onclick = () => done(false);
+    });
+  }
+
+  // ================================================================ CHAT
+  const composer = $("composer");
+  const prompt = $("in-prompt");
+  prompt.addEventListener("input", () => {
+    prompt.style.height = "auto";
+    prompt.style.height = Math.min(prompt.scrollHeight, 160) + "px";
+  });
+  prompt.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); composer.requestSubmit(); }
+  });
+  composer.addEventListener("submit", (e) => { e.preventDefault(); sendPrompt(); });
+  $("btn-stop").addEventListener("click", () => { if (currentRun) currentRun.stop(); });
+
+  async function sendPrompt() {
+    if (currentRun) return;
+    const text = prompt.value.trim();
+    if (!text) return;
+    prompt.value = ""; prompt.style.height = "auto";
+    addBubble("user", text);
+    session.messages.push({ role: "user", content: text });
+    setRunning(true);
+
+    let stopped = false;
+    currentRun = { stop: () => { stopped = true; $("btn-stop").disabled = true; } };
+    let liveTool = null;
+    try {
+      await AC.runAgent({
+        model: session.model,
+        tools: session.tools,
+        messages: session.messages,
+        shouldStop: () => stopped,
+        onEvent: (ev) => {
+          armIdle();
+          if (ev.type === "thinking") setStatus("thinking…");
+          else if (ev.type === "tool") { liveTool = addTool(ev.name, ev.args); setStatus(ev.name + "…"); }
+          else if (ev.type === "tool_result") { if (liveTool) finishTool(liveTool, ev.out); }
+          else if (ev.type === "answer") { setStatus(""); if (ev.text) addBubble("assistant", ev.text); }
+          else if (ev.type === "error") { setStatus(""); addBubble("error", ev.text); }
+          else if (ev.type === "stopped") { setStatus(""); addBubble("system", "Stopped."); }
+        },
+      });
+    } catch (e) {
+      addBubble("error", e.message || String(e));
+    } finally {
+      setRunning(false);
+      currentRun = null;
+    }
+  }
+
+  function setRunning(on) {
+    $("btn-send").hidden = on;
+    $("btn-stop").hidden = !on;
+    $("btn-stop").disabled = false;
+    prompt.disabled = on;
+  }
+
+  // ------------------------------------------------------------- rendering
+  const messages = $("messages");
+  function atBottom() { return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80; }
+  function scroll() { messages.scrollTop = messages.scrollHeight; }
+  function addBubble(role, text) {
+    const near = atBottom();
+    const div = document.createElement("div");
+    div.className = "bubble " + role;
+    renderText(div, text);
+    messages.appendChild(div);
+    if (near) scroll();
+    return div;
+  }
+  // Minimal, safe markdown-ish rendering. Everything goes through textContent /
+  // createTextNode — no innerHTML with model output, so no HTML/script injection.
+  function renderText(container, text) {
+    const parts = String(text).split(/```/);
+    parts.forEach((part, i) => {
+      if (i % 2 === 1) {
+        const pre = document.createElement("pre");
+        pre.className = "code";
+        const nl = part.indexOf("\n");
+        pre.textContent = nl >= 0 ? part.slice(nl + 1) : part;
+        container.appendChild(pre);
+      } else if (part) {
+        const p = document.createElement("div");
+        p.className = "para";
+        p.textContent = part;
+        container.appendChild(p);
+      }
+    });
+  }
+  function addTool(name, args) {
+    const near = atBottom();
+    const div = document.createElement("div");
+    div.className = "tool-line running";
+    const head = document.createElement("div");
+    head.className = "tool-head";
+    head.textContent = "⚙ " + name + argSummary(name, args);
+    div.appendChild(head);
+    messages.appendChild(div);
+    if (near) scroll();
+    return div;
+  }
+  function finishTool(div, out) {
+    div.classList.remove("running");
+    const body = document.createElement("pre");
+    body.className = "tool-out";
+    body.textContent = String(out).slice(0, 1500);
+    div.appendChild(body);
+    div.querySelector(".tool-head").addEventListener("click", () => div.classList.toggle("open"));
+    if (atBottom()) scroll();
+  }
+  function argSummary(name, a) {
+    if (!a) return "";
+    if (a.path) return " · " + a.path;
+    if (a.pattern) return " · " + a.pattern;
+    if (a.query) return " · " + a.query;
+    return "";
+  }
+  let statusBubble = null;
+  function setStatus(text) {
+    if (!text) { if (statusBubble) { statusBubble.remove(); statusBubble = null; } return; }
+    if (!statusBubble) {
+      statusBubble = document.createElement("div");
+      statusBubble.className = "status";
+      messages.appendChild(statusBubble);
+    }
+    statusBubble.textContent = text;
+    if (atBottom()) scroll();
+  }
+
+  // ================================================================ BOOT
+  function boot() {
+    if (loadVault()) show("screen-unlock");
+    else show("screen-setup");
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("sw.js").catch(() => {});
+    }
+  }
+  boot();
+})();

@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="theme-color" content="#0b0d10" />
+  <!--
+    SECURITY: this Content-Security-Policy is the app's outer wall.
+      default-src 'none'      — nothing loads unless explicitly allowed below.
+      script-src 'self'       — only our own bundled JS; no CDNs, no inline <script>.
+      connect-src             — network is pinned to exactly the model API + GitHub.
+                                A key-stealer would have nowhere to send anything.
+      No 'unsafe-inline' for scripts, no 'unsafe-eval'.
+    Keep connect-src in lockstep with the two hosts the app actually talks to.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'none';
+    script-src 'self';
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data:;
+    font-src 'self';
+    manifest-src 'self';
+    connect-src https://api.github.com https://api.z.ai https://open.bigmodel.cn;
+    base-uri 'none';
+    form-action 'none';
+    frame-ancestors 'none';
+  " />
+  <meta name="referrer" content="no-referrer" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Cpath d='M8 21l4-10 4 7 4-7 4 10' fill='none' stroke='%237aa2ff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Cpath d='M8 21l4-10 4 7 4-7 4 10' fill='none' stroke='%237aa2ff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="style.css" />
+  <title>Make No Mistakes</title>
+</head>
+<body>
+  <div id="app">
+
+    <!-- ===================== SETUP (first run) ===================== -->
+    <section id="screen-setup" class="screen" hidden>
+      <div class="pane">
+        <h1 class="brand">Make&nbsp;No&nbsp;Mistakes</h1>
+        <p class="sub">Set up your phone workspace. Your keys are encrypted on this device with a PIN and never sent anywhere but the two services below.</p>
+
+        <label class="field">
+          <span>z.ai / model API key</span>
+          <input id="in-model-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="paste your model key" />
+        </label>
+        <label class="field">
+          <span>Model</span>
+          <input id="in-model" type="text" autocomplete="off" spellcheck="false" placeholder="glm-4.6" value="glm-4.6" />
+        </label>
+        <label class="field">
+          <span>Model API base URL</span>
+          <select id="in-base-url">
+            <option value="https://api.z.ai/api/paas/v4">api.z.ai (international)</option>
+            <option value="https://open.bigmodel.cn/api/paas/v4">open.bigmodel.cn (mainland)</option>
+          </select>
+        </label>
+
+        <label class="field">
+          <span>GitHub fine-grained token</span>
+          <input id="in-gh-token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="github_pat_… (Contents: read/write)" />
+          <small class="hint">Use a <b>fine-grained</b> token scoped to just your repos, <b>Contents: Read&nbsp;and&nbsp;write</b> only. Least privilege — if this phone were lost, that's all it could touch.</small>
+        </label>
+
+        <div class="pin-block">
+          <label class="field">
+            <span>Choose a PIN (min 4)</span>
+            <input id="in-pin" type="password" inputmode="numeric" autocomplete="off" placeholder="unlock PIN" />
+          </label>
+          <label class="field">
+            <span>Confirm PIN</span>
+            <input id="in-pin2" type="password" inputmode="numeric" autocomplete="off" placeholder="repeat PIN" />
+          </label>
+        </div>
+        <p class="hint">This PIN encrypts your keys (AES-GCM, PBKDF2 210k). We never store the PIN — if you forget it you'll re-enter your keys.</p>
+
+        <button id="btn-save-setup" class="primary">Encrypt &amp; continue</button>
+        <p id="setup-error" class="error" role="alert"></p>
+      </div>
+    </section>
+
+    <!-- ===================== UNLOCK ===================== -->
+    <section id="screen-unlock" class="screen" hidden>
+      <div class="pane center">
+        <h1 class="brand">Locked</h1>
+        <p class="sub">Enter your PIN to decrypt your workspace.</p>
+        <label class="field">
+          <input id="in-unlock-pin" type="password" inputmode="numeric" autocomplete="off" placeholder="PIN" autofocus />
+        </label>
+        <button id="btn-unlock" class="primary">Unlock</button>
+        <p id="unlock-error" class="error" role="alert"></p>
+        <button id="btn-reset" class="link danger">Forgot PIN — reset workspace</button>
+      </div>
+    </section>
+
+    <!-- ===================== REPO PICKER ===================== -->
+    <section id="screen-repo" class="screen" hidden>
+      <header class="bar">
+        <span class="bar-title">Choose a repository</span>
+        <button id="btn-repo-lock" class="icon-btn" title="Lock">🔒</button>
+      </header>
+      <div class="pane scroll">
+        <p class="sub" id="repo-whoami"></p>
+        <div class="row">
+          <input id="in-repo-filter" type="text" placeholder="filter repos…" spellcheck="false" />
+          <button id="btn-repo-refresh" class="ghost">Refresh</button>
+        </div>
+        <ul id="repo-list" class="repo-list"></ul>
+
+        <div class="new-repo">
+          <h3>Or start a fresh repo</h3>
+          <div class="row">
+            <input id="in-new-repo" type="text" placeholder="new-repo-name" spellcheck="false" />
+            <label class="chk"><input id="in-new-private" type="checkbox" checked /> private</label>
+          </div>
+          <button id="btn-create-repo" class="ghost">Create &amp; open</button>
+        </div>
+        <p id="repo-error" class="error" role="alert"></p>
+      </div>
+    </section>
+
+    <!-- ===================== CHAT ===================== -->
+    <section id="screen-chat" class="screen" hidden>
+      <header class="bar">
+        <button id="btn-back-repo" class="icon-btn" title="Switch repo">‹</button>
+        <span class="bar-title" id="chat-repo-name">repo</span>
+        <label class="chk auto-commit" title="Ask before every write">
+          <input id="in-confirm-writes" type="checkbox" checked /> confirm
+        </label>
+        <button id="btn-chat-lock" class="icon-btn" title="Lock">🔒</button>
+      </header>
+
+      <div id="messages" class="messages"></div>
+
+      <form id="composer" class="composer">
+        <textarea id="in-prompt" rows="1" placeholder="Ask the agent to build or fix something…" autocomplete="off"></textarea>
+        <button id="btn-send" class="send" type="submit" title="Send">▲</button>
+        <button id="btn-stop" class="send stop" type="button" title="Stop" hidden>■</button>
+      </form>
+    </section>
+
+    <!-- ===================== WRITE CONFIRM DIALOG ===================== -->
+    <div id="confirm-backdrop" class="backdrop" hidden>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <h3 id="confirm-title">Commit change?</h3>
+        <p id="confirm-path" class="mono"></p>
+        <pre id="confirm-preview" class="preview"></pre>
+        <div class="dialog-actions">
+          <button id="btn-confirm-no" class="ghost">Cancel</button>
+          <button id="btn-confirm-yes" class="primary">Commit</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+  </div>
+
+  <script src="agent-core.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
