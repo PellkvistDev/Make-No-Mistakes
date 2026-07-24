@@ -53,18 +53,40 @@ class SyncError(Exception):
 # --------------------------------------------------------------------- #
 # Crypto (lazy: cryptography is only needed when sync is actually used)
 
-def crypto_available() -> bool:
-    """True when AES-GCM is usable here. The UI uses this to offer/hide sync.
+INSTALL_HINT = "python -m pip install --user cryptography"
 
-    Catches BaseException on purpose: a broken native `cryptography` build
-    raises a Rust PanicException (a BaseException, not Exception), which a plain
-    `except Exception` would let through and crash import (see secretstore.py)."""
+
+def crypto_status() -> tuple[str, str]:
+    """(state, human message) for AES-GCM availability, where state is
+    'ok' | 'missing' | 'broken'.
+
+    `cryptography` only became a listed requirement when sync shipped, so the
+    common case by far is an install that predates it -- which deserves the
+    exact command to fix it, not a dead end.
+
+    Catches BaseException on purpose: a broken native build raises a Rust
+    PanicException (a BaseException, not Exception), which a plain
+    `except Exception` would let through and crash the caller (see
+    secretstore.py, which hit the same thing)."""
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         AESGCM(b"\x00" * 32)  # constructs only if the native backend is healthy
-        return True
-    except BaseException:
-        return False
+        return "ok", ""
+    except ImportError:
+        return "missing", (
+            "Chat sync needs the 'cryptography' package, which isn't installed yet "
+            "(it was added to the requirements when sync shipped). Re-run install.ps1, "
+            f"or: {INSTALL_HINT}")
+    except BaseException as e:
+        return "broken", (
+            "The 'cryptography' package is installed but its native backend won't "
+            f"load here ({type(e).__name__}), so chat sync is unavailable. "
+            f"Reinstalling usually fixes it: {INSTALL_HINT} --force-reinstall")
+
+
+def crypto_available() -> bool:
+    """True when AES-GCM is usable here. The UI uses this to offer/hide sync."""
+    return crypto_status()[0] == "ok"
 
 
 def _b64e(b: bytes) -> str:
@@ -284,9 +306,9 @@ def open_for_repo(owner: str, repo: str, passphrase: str | None = None,
                   token: str | None = None, api=None) -> tuple[bytes, SyncStore, bool]:
     """Convenience for the app layer: resolve the stored token + passphrase and
     open the store for owner/repo."""
-    if not crypto_available():
-        raise SyncError("Encryption isn't available in this build "
-                        "(the 'cryptography' package is required for sync).")
+    state, why = crypto_status()
+    if state != "ok":
+        raise SyncError(why)
     token = token or load_token()
     if not token:
         raise SyncError("Connect a GitHub token first.")

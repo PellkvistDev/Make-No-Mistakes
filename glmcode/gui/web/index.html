@@ -794,8 +794,13 @@
         Everything is encrypted on your device with a <strong>sync passphrase</strong> before it's
         uploaded: GitHub only ever stores ciphertext, and the passphrase never leaves this machine.
         Use the <em>same</em> passphrase on every device.</p>
-      <p class="row-sub" id="sync-unavailable" hidden>Encryption isn't available in this build, so
-        chat sync is turned off.</p>
+      <div id="sync-unavailable" hidden>
+        <p class="row-sub" id="sync-unavailable-why"></p>
+        <div class="provider-form">
+          <input id="sync-install-cmd" class="text-input mono" readonly>
+          <div class="sheet-actions"><button id="sync-install-copy" class="btn btn-ghost">Copy command</button></div>
+        </div>
+      </div>
       <div id="sync-noset">
         <div class="provider-form">
           <input id="sync-pass" class="text-input" type="password" placeholder="Sync passphrase (min 6 characters)">

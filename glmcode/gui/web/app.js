@@ -3741,6 +3741,13 @@ function renderSyncSettings() {
   const usable = e.available !== false;
   const set = usable && !!e.passphrase_set;
   if ($("sync-unavailable")) $("sync-unavailable").hidden = usable;
+  // When encryption is missing, say WHY and hand over the exact fix rather
+  // than just switching the panel off.
+  if (!usable) {
+    $("sync-unavailable-why").textContent = e.crypto_reason ||
+      "Chat sync needs the 'cryptography' package, which isn't available here.";
+    $("sync-install-cmd").value = e.install_hint || "python -m pip install --user cryptography";
+  }
   if ($("sync-noset")) $("sync-noset").hidden = !usable || set;
   if ($("sync-set")) $("sync-set").hidden = !set;
   const note = $("sync-repo-note");
@@ -3760,6 +3767,12 @@ async function saveSyncPassphrase(btn) {
   syncEnv = res; renderSyncSettings();
   toast("Chat sync enabled — use the same passphrase on your phone.", "info", 5000);
 }
+
+$("sync-install-copy").addEventListener("click", () => {
+  copyText($("sync-install-cmd").value)
+    .then(() => toast("Command copied — run it, then restart the app.", "info", 4000))
+    .catch(() => toast("Couldn't copy — select the command and copy it manually.", "error", 4000));
+});
 
 $("sync-pass-save").addEventListener("click", () => saveSyncPassphrase($("sync-pass-save")));
 $("sync-pass").addEventListener("keydown", (e) => {

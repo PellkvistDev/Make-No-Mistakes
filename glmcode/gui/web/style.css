@@ -1525,6 +1525,12 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .gh-repo-tag { flex: none; font-size: 10.5px; color: var(--text-faint); }
 
+/* Sync unavailable: a distinct notice, not just more body copy */
+#sync-unavailable { margin-top: 12px; padding: 11px 13px; border-radius: var(--r-sm);
+  background: rgba(245, 166, 35, 0.08); border: 1px solid rgba(245, 166, 35, 0.28); }
+#sync-unavailable-why { margin: 0 0 10px; color: var(--warn); }
+#sync-unavailable .provider-form { padding: 0; }
+
 /* Synced-chat rows carry their own action buttons, so the row isn't clickable */
 #sync-chat-list { max-height: 260px; overflow-y: auto; margin-top: 8px; }
 .sync-chat-row { cursor: default; }

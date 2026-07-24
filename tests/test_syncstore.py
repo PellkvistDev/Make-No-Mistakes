@@ -439,7 +439,7 @@ def test_sync_set_passphrase_rejects_short_and_reports_verify_failure(monkeypatc
     api = _bare_api()
     assert "at least 6" in api.sync_set_passphrase("abc")["error"]
 
-    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "crypto_status", lambda: ("ok", ""))
     monkeypatch.setattr(gui_app.Api, "_active_repo_coords",
                         lambda self: ("github.com", "o", "r", None))
     monkeypatch.setattr(gui_app.Api, "_gh_token", lambda self: "T")
@@ -521,3 +521,69 @@ def test_sync_push_chat_uploads_the_saved_session(monkeypatch):
     # the local system prompt is never shared, but the slot is kept for the phone
     assert uploaded[0]["messages"][0] == {"role": "system", "content": ""}
     assert uploaded[0]["transcript"] == [{"role": "user", "text": "hi"}]
+
+
+# ------------------------------------------- crypto availability diagnostics
+# `cryptography` only became a listed requirement when sync shipped, so an
+# install that predates it reports sync as unavailable. That must say WHY and
+# how to fix it -- these pin the wording contract the settings panel relies on.
+
+def test_crypto_status_missing_names_the_package_and_the_fix(monkeypatch):
+    import builtins
+    real_import = builtins.__import__
+
+    def no_cryptography(name, *a, **kw):
+        if name.startswith("cryptography"):
+            raise ImportError("No module named 'cryptography'")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_cryptography)
+    state, why = syncstore.crypto_status()
+    assert state == "missing"
+    assert "cryptography" in why
+    assert syncstore.INSTALL_HINT in why, "must hand the user the exact command"
+    assert "install.ps1" in why
+    assert not syncstore.crypto_available()
+
+
+def test_crypto_status_broken_backend_is_distinguished_from_missing(monkeypatch):
+    """A broken native build raises a BaseException (Rust PanicException), not
+    ImportError -- it needs a reinstall, not a first install."""
+    import builtins
+    real_import = builtins.__import__
+
+    class Panic(BaseException):
+        pass
+
+    def boom(name, *a, **kw):
+        if name.startswith("cryptography"):
+            raise Panic("Python API call failed")
+        return real_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", boom)
+    state, why = syncstore.crypto_status()
+    assert state == "broken"
+    assert "Panic" in why and "force-reinstall" in why
+    assert not syncstore.crypto_available()
+
+
+def test_sync_env_surfaces_the_reason_and_command(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.Api, "_active_repo_coords", lambda self: None)
+    monkeypatch.setattr(gui_app.Api, "_gh_token", lambda self: None)
+    monkeypatch.setattr(gui_app.syncstore, "crypto_status",
+                        lambda: ("missing", "needs cryptography: pip install it"))
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: None)
+    env = api.sync_env()
+    assert env["available"] is False
+    assert env["crypto_state"] == "missing"
+    assert env["crypto_reason"] == "needs cryptography: pip install it"
+    assert env["install_hint"] == syncstore.INSTALL_HINT
+
+
+def test_sync_set_passphrase_reports_the_real_crypto_reason(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "crypto_status",
+                        lambda: ("missing", "Chat sync needs the 'cryptography' package"))
+    res = api.sync_set_passphrase("a long enough passphrase")
+    assert res["error"] == "Chat sync needs the 'cryptography' package"

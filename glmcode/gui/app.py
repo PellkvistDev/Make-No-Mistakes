@@ -1843,10 +1843,16 @@ class Api:
     # secretstore). GitHub only ever sees ciphertext. See glmcode/syncstore.py.
 
     def sync_env(self):
-        """What the UI needs to render the sync controls."""
+        """What the UI needs to render the sync controls. When encryption is
+        unavailable we return WHY plus the command that fixes it, so the panel
+        can tell the user what to do instead of just switching itself off."""
         coords = self._active_repo_coords()
+        state, why = syncstore.crypto_status()
         return {
-            "available": syncstore.crypto_available(),
+            "available": state == "ok",
+            "crypto_state": state,
+            "crypto_reason": why,
+            "install_hint": syncstore.INSTALL_HINT,
             "passphrase_set": bool(syncstore.load_passphrase()),
             "token_present": bool(self._gh_token()),
             "repo": f"{coords[1]}/{coords[2]}" if coords else "",
@@ -1860,9 +1866,9 @@ class Api:
         passphrase = (passphrase or "").strip()
         if len(passphrase) < 6:
             return {"error": "Sync passphrase must be at least 6 characters."}
-        if not syncstore.crypto_available():
-            return {"error": "Encryption isn't available in this build "
-                             "(the 'cryptography' package is required for sync)."}
+        state, why = syncstore.crypto_status()
+        if state != "ok":
+            return {"error": why}
         coords = self._active_repo_coords()
         token = self._gh_token()
         if coords and token:
