@@ -337,16 +337,20 @@
     const blob = await AC.aesEncrypt(pass, session.cryptoKey);
     localStorage.setItem(SYNCPASS_KEY, JSON.stringify(blob));
   }
-  // Lazily open (and cache) the sync store for the connected repo.
+  // Lazily open (and cache) the ONE central sync store. It's independent of the
+  // project you're working in, so every chat lands in the same place and the
+  // history list never depends on which repo happens to be open.
   async function ensureSyncStore() {
-    if (!syncOn() || !session || !session.repo) return null;
-    if (session.syncStore && session.syncRepo === session.repo.full_name) return session.syncStore;
+    if (!syncOn() || !session) return null;
+    if (session.syncStore) return session.syncStore;
     const pass = await getSyncPass();
     if (!pass) return null;
+    const api = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+    const { owner, repo } = await AC.ensureSyncRepo(api);
     const syncGh = AC.makeGitHub({ token: session.secrets.githubToken,
-      owner: session.repo.owner, repo: session.repo.repo, branch: AC.STATE_BRANCH });
+      owner, repo, branch: AC.SYNC_REPO_BRANCH });
     const { store } = await AC.openSync(syncGh, pass);
-    session.syncStore = store; session.syncRepo = session.repo.full_name;
+    session.syncStore = store;
     return store;
   }
   function deriveTitle() {
@@ -371,6 +375,8 @@
       await store.save({
         id: session.chatId, title: session.chatTitle, preview: lastPreview(),
         repo: session.repo,
+        project: (session.repo && session.repo.full_name) || "",
+        device: "phone",
         messages: stripImages(session.messages || []),
         transcript: session.transcript || [],
       });
@@ -388,7 +394,8 @@
   }
   async function enterChatList() {
     show("screen-chats");
-    $("chats-repo-name").textContent = session.repo.full_name;
+    // The store spans every project now, so the header names the store, not a repo.
+    $("chats-repo-name").textContent = "Your chats";
     $("chats-error").textContent = "";
     $("chats-list").innerHTML = "<li class='muted'>Loading…</li>";
     let store;
@@ -417,7 +424,9 @@
       title.textContent = c.title || "Untitled";
       const meta = document.createElement("div");
       meta.className = "chat-row-meta";
-      meta.textContent = [relTime(c.updated), c.preview].filter(Boolean).join(" · ");
+      // Show which project a chat belongs to — they all share one store now.
+      meta.textContent = [c.project, relTime(c.updated), c.preview]
+        .filter(Boolean).join(" · ");
       main.append(title, meta);
       main.addEventListener("click", () => openSyncChat(c.id));
       const del = document.createElement("button");
@@ -435,6 +444,14 @@
       data = await store.load(id);
     } catch (e) { toast("Couldn't open that chat: " + friendlyGhError(e, "list")); return; }
     if (!data || !Array.isArray(data.messages)) { toast("That chat looks empty."); return; }
+    // The store is shared across projects now, so a chat may belong to a repo
+    // other than the one currently open — follow it there rather than silently
+    // re-pointing the conversation at the wrong codebase.
+    const r = data.repo;
+    if (r && r.full_name && (!session.repo || r.full_name !== session.repo.full_name)) {
+      connectRepo(r.owner, r.repo, r.branch || "main", r.full_name);
+    }
+    if (!session.repo) { toast("That chat has no repository — open one first."); return; }
     session.chatId = data.id || id;
     session.chatTitle = data.title || "";
     session.messages = data.messages;

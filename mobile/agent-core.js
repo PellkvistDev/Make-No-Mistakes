@@ -154,16 +154,44 @@
   }
 
   // --- cross-device session sync ------------------------------------------
-  // Sessions are stored on an ORPHAN branch (STATE_BRANCH) in the same repo,
-  // so they sync across the user's devices without ever touching main or PRs.
+  // Every synced chat lives in ONE dedicated private repo (SYNC_REPO_NAME),
+  // created automatically the first time sync is switched on. Chats from every
+  // project share it, which is what keeps the UI simple: one list, nothing to
+  // pick, and a chat syncs even when its project isn't on GitHub.
+  //
   // Everything is AES-GCM encrypted under a key derived (PBKDF2) from a SYNC
   // PASSPHRASE that is separate from the on-device PIN — GitHub only ever sees
   // ciphertext, and the passphrase is never stored server-side. sync.json holds
   // the shared salt + a check-blob so any device can derive the same key and
   // verify the passphrase; index.json (encrypted) lists the chats; each chat
   // lives in its own encrypted chats/<id>.json.
-  const STATE_BRANCH = "makenomistakes/state";
+  const SYNC_REPO_NAME = "makenomistakes-sync";
+  const SYNC_REPO_BRANCH = "main";
+  const STATE_BRANCH = "makenomistakes/state";  // legacy per-repo store
   const SYNC_CHECK = "mnm-sync-ok";
+
+  // Find (or create) the dedicated private sync repo for the signed-in user.
+  // Returns { owner, repo }.
+  async function ensureSyncRepo(gh) {
+    const me = await gh.me();
+    const owner = me && me.login;
+    if (!owner) throw new Error("GitHub didn't return your account name.");
+    try {
+      await gh.raw("GET", `/repos/${owner}/${SYNC_REPO_NAME}`);
+      return { owner, repo: SYNC_REPO_NAME };
+    } catch (e) { /* 404 — create it below */ }
+    try {
+      await gh.raw("POST", "/user/repos", {
+        name: SYNC_REPO_NAME, private: true, auto_init: true,
+        description: "Encrypted Make No Mistakes chat sync (managed by the app).",
+      });
+    } catch (e) {
+      throw new Error("Couldn't create the private sync repo '" + SYNC_REPO_NAME +
+        "'. Your token needs Administration: Read and write (to create repos), " +
+        "plus Contents: Read and write. (" + (e.message || e) + ")");
+    }
+    return { owner, repo: SYNC_REPO_NAME };
+  }
 
   // Connect a sync gh-client (branch=STATE_BRANCH) to a passphrase: verifies an
   // existing store or bootstraps a new one. Returns { key, store, created }.
@@ -179,7 +207,9 @@
       } catch (e) { throw new Error("Wrong sync passphrase"); }
       return { key, store: makeSyncStore(gh, key), created: false };
     }
-    // First device for this repo: create the orphan branch + sync.json.
+    // First device: make sure the branch exists, then write sync.json. The
+    // dedicated repo is auto_init'd so main already exists; the orphan path
+    // only matters for the legacy per-repo store.
     if (!(await gh.branchSha())) await gh.createOrphanBranch();
     const salt = getRandom(16);
     const key = await deriveKey(passphrase, salt);
@@ -225,7 +255,8 @@
         const { data, sha } = await readIndex();
         const chats = (data.chats || []).filter((c) => c.id !== chat.id);
         chats.push({ id: chat.id, title: chat.title || "Untitled",
-          updated: chat.updated, preview: chat.preview || "" });
+          updated: chat.updated, preview: chat.preview || "",
+          project: chat.project || "", device: chat.device || "" });
         await writeIndex(chats, sha);
         return chat.updated;
       },
@@ -478,7 +509,8 @@
     aesEncrypt, aesDecrypt, exportRawKey, importRawKey,
     makeGitHub, makeModel, makeTools, runAgent, TOOL_SCHEMAS, SPAWN_SCHEMA, VIEW_IMAGE_SCHEMA,
     SYSTEM_PROMPT, SUBAGENT_PROMPT,
-    openSync, makeSyncStore, STATE_BRANCH,
+    openSync, makeSyncStore, ensureSyncRepo,
+    SYNC_REPO_NAME, SYNC_REPO_BRANCH, STATE_BRANCH,
     _b64: { bytesToB64, b64ToBytes },
   };
   if (typeof module !== "undefined" && module.exports) module.exports = CoreAPI;

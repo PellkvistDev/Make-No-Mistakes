@@ -3751,11 +3751,11 @@ function renderSyncSettings() {
   if ($("sync-noset")) $("sync-noset").hidden = !usable || set;
   if ($("sync-set")) $("sync-set").hidden = !set;
   const note = $("sync-repo-note");
-  if (note) {
-    note.textContent = e.repo
-      ? `Chats stored on ${e.branch} in ${e.repo}`
-      : "Open a chat in a connected GitHub repository to sync it.";
+  if (note && e.repo) {
+    note.textContent = `Chats upload automatically after each turn, to ${e.repo}.`;
   }
+  const repoName = $("sync-repo-name");
+  if (repoName && e.repo) repoName.textContent = e.repo;
 }
 
 async function saveSyncPassphrase(btn) {
@@ -3765,7 +3765,9 @@ async function saveSyncPassphrase(btn) {
   if (!res) return;
   $("sync-pass").value = "";
   syncEnv = res; renderSyncSettings();
-  toast("Chat sync enabled — use the same passphrase on your phone.", "info", 5000);
+  refreshGithubChats(true);   // the sidebar's GitHub tab can load now
+  toast("Sync is on — your chats upload automatically. Use the same " +
+        "passphrase on your phone.", "info", 6000);
 }
 
 $("sync-install-copy").addEventListener("click", () => {
@@ -3787,74 +3789,10 @@ $("sync-pass-forget").addEventListener("click", async () => {
   if (!confirm("Forget the sync passphrase on this computer? Your synced chats stay on GitHub " +
                "(still encrypted), and you can re-enter the passphrase to read them again.")) return;
   syncEnv = await api().sync_forget_passphrase();
-  $("sync-chat-list").hidden = true;
   renderSyncSettings();
   toast("Sync passphrase removed from this computer.", "info", 3000);
 });
 
-$("sync-push").addEventListener("click", async () => {
-  if (await ghAction($("sync-push"), () => api().sync_push_chat("")))
-    toast("This chat is now on your other devices.", "info", 3000);
-});
-
-$("sync-refresh").addEventListener("click", () => loadSyncedChats($("sync-refresh")));
-
-async function loadSyncedChats(btn) {
-  const list = $("sync-chat-list");
-  const res = await ghAction(btn, () => api().sync_list_chats(), false);
-  if (!res) return;
-  list.hidden = false;
-  list.innerHTML = "";
-  for (const c of res.chats || []) {
-    const row = document.createElement("div");
-    row.className = "gh-repo-row sync-chat-row";
-    const name = document.createElement("span");
-    name.className = "gh-repo-name";
-    name.textContent = c.title || "Untitled";
-    const tag = document.createElement("span");
-    tag.className = "gh-repo-tag";
-    tag.textContent = [relTimeShort(c.updated), c.local ? "on this computer" : "from another device"]
-      .filter(Boolean).join(" · ");
-    const open = document.createElement("button");
-    open.className = "btn btn-ghost mini";
-    open.textContent = c.local ? "Open" : "Download";
-    open.addEventListener("click", () => pullSyncedChat(c.id, open));
-    const del = document.createElement("button");
-    del.className = "btn btn-danger-ghost mini";
-    del.textContent = "Delete";
-    del.addEventListener("click", () => deleteSyncedChat(c.id, c.title, btn));
-    row.append(name, tag, open, del);
-    list.appendChild(row);
-  }
-  if (!list.children.length)
-    list.innerHTML = '<div class="row-sub">No synced chats yet — upload this one to get started.</div>';
-}
-
-function relTimeShort(ms) {
-  if (!ms) return "";
-  const s = Math.max(0, (Date.now() - ms) / 1000);
-  if (s < 60) return "just now";
-  if (s < 3600) return Math.floor(s / 60) + "m ago";
-  if (s < 86400) return Math.floor(s / 3600) + "h ago";
-  return Math.floor(s / 86400) + "d ago";
-}
-
-async function pullSyncedChat(id, btn) {
-  const res = await ghAction(btn, () => api().sync_pull_chat(id));
-  if (!res) return;
-  $("settings-backdrop").hidden = true;
-  applySession(res);
-  input.focus();
-  toast("Opened the synced chat.", "info", 2500);
-}
-
-async function deleteSyncedChat(id, title, refreshBtn) {
-  if (!confirm(`Delete “${title || "this chat"}” from your synced chats? ` +
-               "It's removed from all your devices; any local copy stays.")) return;
-  const res = await ghAction(refreshBtn, () => api().sync_delete_chat(id), false);
-  if (!res) return;
-  loadSyncedChats(refreshBtn);
-}
 $("phoneapp-close").addEventListener("click", () => { $("phoneapp-backdrop").hidden = true; });
 $("phoneapp-backdrop").addEventListener("click", (e) => {
   if (e.target === $("phoneapp-backdrop")) $("phoneapp-backdrop").hidden = true;
@@ -4012,6 +3950,115 @@ const TRASH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 // session list (kept canonical in `sessions` -- renders during an active
 // search must not stomp the filtered view).
 let searchResults = null;
+
+/* ---- sidebar source tabs: this computer | GitHub ----------------------
+ * GitHub chats are browsed right here, next to local ones, instead of being
+ * buried in Settings. Clicking one downloads it and opens it like any other
+ * chat, so "continue on my computer" is a single click.
+ */
+let sidebarSource = "local";
+let githubChats = null;      // null = not loaded yet this session
+let githubListError = "";
+
+function setSidebarSource(src) {
+  sidebarSource = src;
+  for (const b of document.querySelectorAll(".sess-tab")) {
+    const on = b.dataset.src === src;
+    b.classList.toggle("on", on);
+    b.setAttribute("aria-selected", String(on));
+  }
+  $("session-list").hidden = src !== "local";
+  $("github-list").hidden = src !== "github";
+  $("chat-search").hidden = src !== "local";
+  if (src === "github") {
+    renderGithubSidebar();
+    if (githubChats === null) refreshGithubChats();
+  }
+}
+document.querySelectorAll(".sess-tab").forEach((b) =>
+  b.addEventListener("click", () => setSidebarSource(b.dataset.src)));
+
+async function refreshGithubChats(force) {
+  if (force) githubChats = null;
+  githubListError = "";
+  renderGithubSidebar(true);
+  let res;
+  try { res = await api().sync_list_chats(); }
+  catch (e) { res = { error: "Couldn't reach the app." }; }
+  if (res && res.error) { githubListError = res.error; githubChats = []; }
+  else { githubChats = (res && res.chats) || []; }
+  renderGithubSidebar();
+}
+
+function renderGithubSidebar(loading) {
+  const list = $("github-list");
+  if (!list) return;
+  if (loading && githubChats === null) {
+    list.innerHTML = '<div class="session-empty">Loading your synced chats…</div>';
+    return;
+  }
+  if (githubListError) {
+    list.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "session-empty";
+    box.textContent = githubListError;
+    const btn = document.createElement("button");
+    btn.className = "btn btn-ghost sess-empty-cta";
+    btn.textContent = "Set up sync";
+    btn.addEventListener("click", () => { openSettings(); showSettingsTab("github"); });
+    list.append(box, btn);
+    return;
+  }
+  const items = githubChats || [];
+  if (!items.length) {
+    list.innerHTML = '<div class="session-empty">No synced chats yet.<br>' +
+      'Chats upload themselves after each turn once sync is on.</div>';
+    return;
+  }
+  list.innerHTML = "";
+  for (const c of items) {
+    const row = document.createElement("div");
+    row.className = "sess-row" + (c.id === activeSessionId ? " active" : "");
+    row.tabIndex = 0;
+    row.setAttribute("role", "button");
+    const bits = [c.project, timeAgo(c.updated)].filter(Boolean).join(" · ");
+    // Only badge chats this machine doesn't have yet -- that's the useful signal.
+    const badge = c.local ? "" :
+      `<span class="sess-badge">${esc(c.device === "phone" ? "phone" : "other device")}</span>`;
+    row.innerHTML =
+      `<div class="sess-main"><div class="sess-title${badge ? " has-badge" : ""}">` +
+      `<span class="sess-title-text">${esc(c.title || "New chat")}</span>${badge}</div>` +
+      `<div class="sess-sub">${esc(bits)}</div>` +
+      (c.preview ? `<div class="sess-snippet">${esc(c.preview)}</div>` : "") + `</div>` +
+      `<button class="sess-del" aria-label="Delete synced chat: ${esc(c.title || "chat")}">${TRASH_ICON}</button>`;
+    const open = () => openGithubChat(c.id, row);
+    row.addEventListener("click", (e) => { if (!e.target.closest(".sess-del")) open(); });
+    row.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+    });
+    row.querySelector(".sess-del").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Remove "${c.title || "this chat"}" from your synced chats? ` +
+                   "It disappears from your other devices; any local copy stays.")) return;
+      const res = await api().sync_delete_chat(c.id);
+      if (res && res.error) { toast(res.error, "error", 5000); return; }
+      refreshGithubChats(true);
+    });
+    list.appendChild(row);
+  }
+}
+
+async function openGithubChat(id, row) {
+  if (row) row.classList.add("sess-loading");
+  let res;
+  try { res = await api().sync_pull_chat(id); }
+  catch (e) { res = { error: "Couldn't open that chat." }; }
+  if (row) row.classList.remove("sess-loading");
+  if (res && res.error) { toast(res.error, "error", 6000); return; }
+  applySession(res);
+  setSidebarSource("local");
+  input.focus();
+}
 
 function renderSidebar() {
   const list = $("session-list");

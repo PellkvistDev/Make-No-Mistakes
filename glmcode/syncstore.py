@@ -1,8 +1,16 @@
-"""Cross-device session sync -- the desktop half of the phone app's Phase 1.
+"""Cross-device session sync: one private GitHub repo holds every synced chat.
 
-The desktop reads and writes the SAME encrypted store the phone uses, on a
-private ORPHAN branch (``makenomistakes/state``) of a GitHub repo, so a chat
+The desktop and the phone read and write the SAME encrypted store, so a chat
 you start on your phone continues on your computer and vice versa.
+
+WHERE IT LIVES. A single dedicated private repo (SYNC_REPO_NAME), created
+automatically the first time you turn sync on. Chats from every project land
+there together, which is what makes the UI simple: one place to list, nothing
+to pick, and a chat syncs even when its project isn't a GitHub repo at all.
+(The first cut scoped the store to a branch of each connected repo; that
+scattered chats across repos and forced the user to choose one before they
+could see anything. STATE_BRANCH is kept only so an old per-repo store can
+still be opened.)
 
 Interop contract with the phone (mobile/agent-core.js) -- these MUST match byte
 for byte or the two sides can't read each other:
@@ -40,10 +48,22 @@ from .githubsync import _api as _github_api
 from .githubsync import load_token
 from .secretstore import encode_account, get_store
 
-# Kept in lockstep with mobile/agent-core.js (STATE_BRANCH / SYNC_CHECK / PBKDF2_ITERS).
-STATE_BRANCH = "makenomistakes/state"
+# Kept in lockstep with mobile/agent-core.js.
+SYNC_REPO_NAME = "makenomistakes-sync"   # the dedicated private data repo
+SYNC_REPO_BRANCH = "main"
+STATE_BRANCH = "makenomistakes/state"    # legacy per-repo store (read-only path)
 SYNC_CHECK = "mnm-sync-ok"
 PBKDF2_ITERS = 210000
+
+SYNC_REPO_README = (
+    "# Make No Mistakes — synced chats\n\n"
+    "This private repository stores your Make No Mistakes conversations so they\n"
+    "follow you between your phone and your computer.\n\n"
+    "**Everything here is encrypted on your devices** with a key derived from your\n"
+    "sync passphrase, which is never sent to GitHub. Nobody with access to this\n"
+    "repo — including GitHub — can read your chats without that passphrase.\n\n"
+    "It's managed by the app; there's nothing to edit by hand.\n"
+)
 
 
 class SyncError(Exception):
@@ -208,7 +228,9 @@ def open_sync(repo: StateRepo, passphrase: str) -> tuple[bytes, "SyncStore", boo
         if ok != SYNC_CHECK:
             raise SyncError("Wrong sync passphrase.")
         return key, SyncStore(repo, key), False
-    # First device for this repo: create the orphan branch + sync.json.
+    # First device: make sure the branch exists, then write sync.json. The
+    # dedicated repo is created with a README so `main` already exists; the
+    # orphan path only matters for the legacy per-repo store.
     if not repo.branch_sha():
         repo.create_orphan_branch()
     salt = os.urandom(16)
@@ -269,7 +291,9 @@ class SyncStore:
         data, sha = self._read_index()
         chats = [c for c in (data.get("chats") or []) if c.get("id") != chat["id"]]
         chats.append({"id": chat["id"], "title": chat.get("title") or "Untitled",
-                      "updated": chat["updated"], "preview": chat.get("preview") or ""})
+                      "updated": chat["updated"], "preview": chat.get("preview") or "",
+                      "project": chat.get("project") or "",
+                      "device": chat.get("device") or ""})
         self._write_index(chats, sha)
         return chat["updated"]
 
@@ -302,10 +326,65 @@ def forget_passphrase(host: str = "github.com") -> None:
     get_store().delete(_pass_account(host))
 
 
+def ensure_sync_repo(token: str, api=None) -> tuple[str, str]:
+    """(owner, name) of the dedicated private sync repo, creating it if needed.
+
+    Created with auto_init so `main` exists immediately, and with a README that
+    explains what the repo is -- someone browsing their GitHub shouldn't find an
+    unexplained repo full of ciphertext."""
+    api = api or _github_api
+    me = api("GET", "/user", token)
+    owner = (me or {}).get("login") or ""
+    if not owner:
+        raise SyncError("GitHub didn't return your account name.")
+    try:
+        api("GET", f"/repos/{owner}/{SYNC_REPO_NAME}", token)
+        return owner, SYNC_REPO_NAME      # already there
+    except GitHubError:
+        pass                               # 404 -> create it below
+    try:
+        api("POST", "/user/repos", token, {
+            "name": SYNC_REPO_NAME, "private": True, "auto_init": True,
+            "description": "Encrypted Make No Mistakes chat sync (managed by the app).",
+        })
+    except GitHubError as e:
+        raise SyncError(
+            f"Couldn't create the private sync repository '{SYNC_REPO_NAME}': {e} "
+            "Your token needs Administration: Read and write (to create repos) "
+            "and Contents: Read and write.")
+    # Make sure the README landed, so `main` exists before we write to it.
+    repo = StateRepo(token, owner, SYNC_REPO_NAME, branch=SYNC_REPO_BRANCH, api=api)
+    if not repo.branch_sha():
+        try:
+            repo.put_file("README.md", SYNC_REPO_README, "Add Make No Mistakes sync README")
+        except GitHubError:
+            pass
+    return owner, SYNC_REPO_NAME
+
+
+def open_central(passphrase: str | None = None, token: str | None = None,
+                 api=None) -> tuple[bytes, SyncStore, bool]:
+    """Open (creating if needed) the one private sync repo. This is what the app
+    uses -- no repo to pick, and it works even for projects that aren't on
+    GitHub at all."""
+    state, why = crypto_status()
+    if state != "ok":
+        raise SyncError(why)
+    token = token or load_token()
+    if not token:
+        raise SyncError("Connect a GitHub token first.")
+    passphrase = passphrase or load_passphrase()
+    if not passphrase:
+        raise SyncError("Set a sync passphrase first.")
+    owner, name = ensure_sync_repo(token, api=api)
+    repo = StateRepo(token, owner, name, branch=SYNC_REPO_BRANCH, api=api)
+    return open_sync(repo, passphrase)
+
+
 def open_for_repo(owner: str, repo: str, passphrase: str | None = None,
                   token: str | None = None, api=None) -> tuple[bytes, SyncStore, bool]:
-    """Convenience for the app layer: resolve the stored token + passphrase and
-    open the store for owner/repo."""
+    """Open the LEGACY per-repo store (a state branch inside a project repo).
+    Kept so chats written by the first version of sync are still reachable."""
     state, why = crypto_status()
     if state != "ok":
         raise SyncError(why)
@@ -343,6 +422,14 @@ def _messages_to_transcript(messages: list) -> list[dict]:
     return out
 
 
+def project_label(cwd: str) -> str:
+    """A short, human name for the project a chat belongs to (the folder name).
+    Shown in the synced-chat lists so chats from different projects are still
+    tellable apart now that they all share one repo."""
+    s = (cwd or "").replace("\\", "/").rstrip("/")
+    return s.rsplit("/", 1)[-1] if s else ""
+
+
 def session_to_chat(sess: dict) -> dict:
     """A desktop SessionStore record -> a sync chat object the phone can read.
 
@@ -352,10 +439,15 @@ def session_to_chat(sess: dict) -> dict:
     body = [m for m in (sess.get("messages") or []) if m.get("role") != "system"]
     messages = [{"role": "system", "content": ""}] + body
     transcript = _messages_to_transcript(body)
+    cwd = sess.get("cwd", "")
     return {
         "id": sess["id"],
         "title": sess.get("title") or "Untitled",
         "preview": (transcript[-1]["text"][:80] if transcript else ""),
+        # Which project this chat belongs to, as a short label. All chats now
+        # share one repo, so this is what tells them apart in the lists.
+        "project": project_label(cwd),
+        "device": "desktop",
         "messages": messages,
         "transcript": transcript,
         # Desktop-only extras, namespaced so the phone simply ignores them.

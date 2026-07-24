@@ -1846,37 +1846,36 @@ class Api:
         """What the UI needs to render the sync controls. When encryption is
         unavailable we return WHY plus the command that fixes it, so the panel
         can tell the user what to do instead of just switching itself off."""
-        coords = self._active_repo_coords()
         state, why = syncstore.crypto_status()
+        on = bool(syncstore.load_passphrase())
         return {
             "available": state == "ok",
             "crypto_state": state,
             "crypto_reason": why,
             "install_hint": syncstore.INSTALL_HINT,
-            "passphrase_set": bool(syncstore.load_passphrase()),
+            "passphrase_set": on,
             "token_present": bool(self._gh_token()),
-            "repo": f"{coords[1]}/{coords[2]}" if coords else "",
-            "branch": syncstore.STATE_BRANCH,
+            "enabled": bool(state == "ok" and on and self._gh_token()),
+            "repo": syncstore.SYNC_REPO_NAME,
         }
 
     def sync_set_passphrase(self, passphrase: str):
-        """Store the sync passphrase. If this chat is on a connected repo, the
-        passphrase is VERIFIED against any existing store first, so a mismatch
-        with your phone is caught here instead of silently forking history."""
+        """Turn sync on: create the private sync repo if it doesn't exist yet,
+        VERIFY the passphrase against it, then remember it. Verifying first means
+        a passphrase that disagrees with your phone is caught here instead of
+        silently forking your history into two unreadable halves."""
         passphrase = (passphrase or "").strip()
         if len(passphrase) < 6:
             return {"error": "Sync passphrase must be at least 6 characters."}
         state, why = syncstore.crypto_status()
         if state != "ok":
             return {"error": why}
-        coords = self._active_repo_coords()
-        token = self._gh_token()
-        if coords and token:
-            _, owner, repo, _ = coords
-            try:
-                syncstore.open_sync(syncstore.StateRepo(token, owner, repo), passphrase)
-            except (syncstore.SyncError, githubsync.GitHubError) as e:
-                return {"error": str(e)}
+        if not self._gh_token():
+            return {"error": "Connect a GitHub token first (Settings → GitHub)."}
+        try:
+            syncstore.open_central(passphrase, token=self._gh_token())
+        except (syncstore.SyncError, githubsync.GitHubError) as e:
+            return {"error": str(e)}
         syncstore.save_passphrase(passphrase)
         return {"ok": True, **self.sync_env()}
 
@@ -1885,21 +1884,17 @@ class Api:
         return {"ok": True, **self.sync_env()}
 
     def _open_sync_store(self):
-        """(store, error) for the active chat's repo."""
-        coords = self._active_repo_coords()
-        if coords is None:
-            return None, "This chat isn't a connected GitHub repository."
-        _, owner, repo, _ = coords
+        """(store, error) for the one central sync repo. No repo to pick, and it
+        works for projects that aren't on GitHub at all."""
         try:
-            _key, store, _created = syncstore.open_for_repo(owner, repo,
-                                                            token=self._gh_token())
+            _key, store, _created = syncstore.open_central(token=self._gh_token())
             return store, None
         except (syncstore.SyncError, githubsync.GitHubError) as e:
             return None, str(e)
 
     def sync_list_chats(self):
-        """Chats on the state branch (newest first) — including ones your phone
-        wrote. Marked `local` when this machine already has that session."""
+        """Every synced chat (newest first), from this computer and your phone.
+        Marked `local` when this machine already has that session."""
         store, err = self._open_sync_store()
         if err:
             return {"error": err}
@@ -1924,8 +1919,8 @@ class Api:
         sess = syncstore.chat_to_session(chat)
         if not sess.get("messages"):
             return {"error": "That chat has no messages yet."}
-        # Land it in the CURRENT workdir: a phone-written chat has no local
-        # folder, and a desktop cwd from another machine won't exist here.
+        # Land it in a folder that exists here: a phone-written chat has no
+        # local folder, and another machine's cwd won't resolve on this one.
         cs = self._active
         cwd = sess.get("cwd") or ""
         if not cwd or not Path(cwd).is_dir():
@@ -1939,7 +1934,7 @@ class Api:
         return res
 
     def sync_push_chat(self, sid: str = ""):
-        """Upload a chat (default: the active one) to the state branch."""
+        """Upload a chat (default: the active one) to the sync repo."""
         sid = sid or self.session_id or ""
         if not sid:
             return {"error": "Open a chat first."}
@@ -1968,6 +1963,23 @@ class Api:
         except (syncstore.SyncError, githubsync.GitHubError) as e:
             return {"error": str(e)}
         return {"ok": True}
+
+    def _maybe_autosync(self, sid: str) -> None:
+        """Push a finished turn to the sync repo, in the background.
+
+        Seamless means the user never presses Upload. This runs off the turn
+        thread and swallows everything: the local session is already saved, so a
+        failed push costs nothing but a retry next turn."""
+        if not sid or not syncstore.load_passphrase():
+            return
+
+        def push():
+            try:
+                self.sync_push_chat(sid)
+            except Exception:
+                pass  # offline / rate-limited / no token -- retried next turn
+
+        threading.Thread(target=push, daemon=True).start()
 
     def _maybe_autopull(self, workdir: Path) -> None:
         """Background best-effort pull when opening a connected session. Skips a
@@ -2152,6 +2164,7 @@ class Api:
                 self._save_chat(cs)
                 try:
                     self._maybe_autopush(cs)
+                    self._maybe_autosync(cs.sid)
                 except Exception:
                     pass
                 try:
@@ -2528,6 +2541,7 @@ class Api:
                         context=agent.context_estimate(),
                         title=cs.title, sessions=self.list_sessions())
             self._maybe_autopush(cs)  # background commit+push if connected
+            self._maybe_autosync(cs.sid)  # background push to the sync repo
             self._os_attention(cs.sid, "Done -- waiting for you."
                                if ok else "Stopped on an error -- waiting for you.")
 

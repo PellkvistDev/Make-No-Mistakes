@@ -19,6 +19,7 @@ import hashlib
 import io
 import json
 import sys
+import threading
 import time
 import types
 import urllib.error
@@ -425,14 +426,21 @@ def _bare_api(active=None, **attrs):
     return api
 
 
-def test_sync_endpoints_require_a_connected_repo(monkeypatch):
+def test_sync_works_without_a_connected_repo(monkeypatch):
+    """The whole point of the central store: chats sync even when the project
+    they belong to isn't a GitHub repo at all."""
+    class Store:
+        def list(self):
+            return [{"id": "a", "title": "A", "updated": 1}]
+
     api = _bare_api()
     monkeypatch.setattr(gui_app.Api, "_active_repo_coords", lambda self: None)
     monkeypatch.setattr(gui_app.Api, "_gh_token", lambda self: "T")
-    for call in (api.sync_list_chats, lambda: api.sync_pull_chat("x"),
-                 lambda: api.sync_delete_chat("x")):
-        res = call()
-        assert "error" in res and "connected GitHub repository" in res["error"]
+    monkeypatch.setattr(gui_app.syncstore, "open_central",
+                        lambda passphrase=None, token=None, api=None: (b"k", Store(), False))
+    res = api.sync_list_chats()
+    assert "error" not in res
+    assert [c["id"] for c in res["chats"]] == ["a"]
 
 
 def test_sync_set_passphrase_rejects_short_and_reports_verify_failure(monkeypatch):
@@ -444,11 +452,11 @@ def test_sync_set_passphrase_rejects_short_and_reports_verify_failure(monkeypatc
                         lambda self: ("github.com", "o", "r", None))
     monkeypatch.setattr(gui_app.Api, "_gh_token", lambda self: "T")
 
-    def boom(repo, passphrase):
+    def boom(passphrase=None, token=None, api=None):
         raise syncstore.SyncError("Wrong sync passphrase.")
 
     saved = []
-    monkeypatch.setattr(gui_app.syncstore, "open_sync", boom)
+    monkeypatch.setattr(gui_app.syncstore, "open_central", boom)
     monkeypatch.setattr(gui_app.syncstore, "save_passphrase", lambda p: saved.append(p))
     res = api.sync_set_passphrase("a good passphrase")
     assert res["error"] == "Wrong sync passphrase."
@@ -587,3 +595,138 @@ def test_sync_set_passphrase_reports_the_real_crypto_reason(monkeypatch):
                         lambda: ("missing", "Chat sync needs the 'cryptography' package"))
     res = api.sync_set_passphrase("a long enough passphrase")
     assert res["error"] == "Chat sync needs the 'cryptography' package"
+
+
+# ------------------------------------------------- the dedicated sync repo
+# One private repo holds every chat, created on demand. This is what lets the
+# UI be a single list with nothing to pick.
+
+class FakeAccount(FakeGitHub):
+    """FakeGitHub plus /user and repo create/exists, for ensure_sync_repo."""
+
+    def __init__(self, repo_exists=False, login="octo", create_fails=False):
+        super().__init__(has_branch=repo_exists)
+        self.login = login
+        self.repo_exists = repo_exists
+        self.create_fails = create_fails
+        self.created = []
+
+    def api(self, method, path, token, body=None):
+        p = path.split("?", 1)[0]
+        if p == "/user":
+            return {"login": self.login}
+        if p == f"/repos/{self.login}/{syncstore.SYNC_REPO_NAME}" and method == "GET":
+            if not self.repo_exists:
+                raise GitHubError("Not Found")
+            return {"full_name": f"{self.login}/{syncstore.SYNC_REPO_NAME}"}
+        if p == "/user/repos" and method == "POST":
+            if self.create_fails:
+                raise GitHubError("Resource not accessible by personal access token")
+            self.created.append(body)
+            self.repo_exists = True
+            self.branch_exists = True
+            return {"full_name": f"{self.login}/{body['name']}"}
+        return super().api(method, path, token, body)
+
+
+def test_ensure_sync_repo_creates_a_private_repo_once():
+    fake = FakeAccount(repo_exists=False)
+    owner, name = syncstore.ensure_sync_repo("T", api=fake.api)
+    assert (owner, name) == ("octo", syncstore.SYNC_REPO_NAME)
+    assert len(fake.created) == 1
+    body = fake.created[0]
+    assert body["private"] is True, "chat history must never land in a public repo"
+    assert body["auto_init"] is True, "auto_init so main exists to write to"
+
+    # second call finds it and does NOT create another
+    owner2, name2 = syncstore.ensure_sync_repo("T", api=fake.api)
+    assert (owner2, name2) == (owner, name)
+    assert len(fake.created) == 1
+
+
+def test_ensure_sync_repo_explains_a_permission_failure():
+    fake = FakeAccount(repo_exists=False, create_fails=True)
+    with pytest.raises(syncstore.SyncError, match="Administration"):
+        syncstore.ensure_sync_repo("T", api=fake.api)
+
+
+def test_open_central_uses_the_dedicated_repo(fake_codec, monkeypatch):
+    fake = FakeAccount(repo_exists=False)
+    monkeypatch.setattr(syncstore, "crypto_status", lambda: ("ok", ""))
+    key, store, created = syncstore.open_central("a good passphrase", token="T",
+                                                 api=fake.api)
+    assert created is True
+    assert store.repo.repo == syncstore.SYNC_REPO_NAME
+    assert store.repo.branch == syncstore.SYNC_REPO_BRANCH, "writes go to main"
+    store.save({"id": "x", "title": "T", "messages": []})
+    assert "chats/x.json" in fake.files
+
+
+def test_index_entries_carry_project_and_device(fake_codec):
+    """The sidebar shows which project a chat came from and which device wrote
+    it -- those live in the index so listing doesn't need to fetch every chat."""
+    fake = FakeGitHub()
+    _k, store, _c = open_sync(_repo(fake), "listing pass")
+    store.save({"id": "c1", "title": "T", "project": "my-app",
+                "device": "phone", "messages": []})
+    row = store.list()[0]
+    assert row["project"] == "my-app"
+    assert row["device"] == "phone"
+
+
+def test_project_label_is_the_folder_name():
+    assert syncstore.project_label(r"C:\Users\me\code\my-app") == "my-app"
+    assert syncstore.project_label("/home/me/code/my-app/") == "my-app"
+    assert syncstore.project_label("") == ""
+
+
+def test_session_to_chat_tags_project_and_device():
+    chat = syncstore.session_to_chat({
+        "id": "s1", "title": "T", "cwd": "/home/me/proj/widgets",
+        "messages": [{"role": "user", "content": "hi"}],
+    })
+    assert chat["project"] == "widgets"
+    assert chat["device"] == "desktop"
+
+
+def test_autosync_is_skipped_without_a_passphrase(monkeypatch):
+    """No passphrase = sync off; the background push must not fire at all."""
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: None)
+    pushed = []
+    monkeypatch.setattr(gui_app.Api, "sync_push_chat",
+                        lambda self, sid="": pushed.append(sid))
+    api._maybe_autosync("s1")
+    assert pushed == []
+
+
+def test_autosync_pushes_in_the_background(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pass")
+    done = threading.Event()
+    pushed = []
+
+    def fake_push(self, sid=""):
+        pushed.append(sid)
+        done.set()
+
+    monkeypatch.setattr(gui_app.Api, "sync_push_chat", fake_push)
+    api._maybe_autosync("s1")
+    assert done.wait(2), "auto-sync should push on a background thread"
+    assert pushed == ["s1"]
+
+
+def test_autosync_swallows_failures(monkeypatch):
+    """A failed push must never surface: the local session is already saved and
+    the next turn retries."""
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pass")
+    done = threading.Event()
+
+    def boom(self, sid=""):
+        done.set()
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr(gui_app.Api, "sync_push_chat", boom)
+    api._maybe_autosync("s1")          # must not raise
+    assert done.wait(2)

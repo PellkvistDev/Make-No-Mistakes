@@ -67,9 +67,14 @@
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
     New Chat
   </button>
+  <div class="sess-tabs" role="tablist" aria-label="Chat source">
+    <button id="tab-local" class="sess-tab on" role="tab" aria-selected="true" data-src="local">This computer</button>
+    <button id="tab-github" class="sess-tab" role="tab" aria-selected="false" data-src="github">GitHub</button>
+  </div>
   <input id="chat-search" class="chat-search" type="text"
          placeholder="Search all chats…" aria-label="Search chats">
   <div id="session-list" class="session-list"></div>
+  <div id="github-list" class="session-list" hidden></div>
 </nav>
 
 <!-- Chat -->
@@ -789,8 +794,10 @@
       </div>
 
       <h3 style="margin-top:22px">Sync chats across devices</h3>
-      <p class="row-sub">Keep your chats on a private <code>makenomistakes/state</code> branch of the
-        connected repo, so a conversation you start on your phone continues here — and vice versa.
+      <p class="row-sub">Your chats are kept in a single private repository
+        (<code id="sync-repo-name">makenomistakes-sync</code>), created for you automatically, so a
+        conversation you start on your phone continues here — and vice versa. They upload themselves
+        after each turn, and you browse them from the <strong>GitHub</strong> tab in the sidebar.
         Everything is encrypted on your device with a <strong>sync passphrase</strong> before it's
         uploaded: GitHub only ever stores ciphertext, and the passphrase never leaves this machine.
         Use the <em>same</em> passphrase on every device.</p>
@@ -804,25 +811,17 @@
       <div id="sync-noset">
         <div class="provider-form">
           <input id="sync-pass" class="text-input" type="password" placeholder="Sync passphrase (min 6 characters)">
-          <div class="sheet-actions"><button id="sync-pass-save" class="btn btn-primary">Enable sync</button></div>
+          <div class="sheet-actions"><button id="sync-pass-save" class="btn btn-primary">Turn on sync</button></div>
         </div>
       </div>
       <div id="sync-set" hidden>
-        <div class="row"><div class="row-text"><label>Sync passphrase</label>
-          <span class="row-sub">Stored in your OS credential store, like your GitHub token.</span></div>
+        <div class="row"><div class="row-text"><label>Sync is on</label>
+          <span class="row-sub" id="sync-repo-note">Chats upload automatically after each turn.</span></div>
           <div class="row-actions">
-            <button id="sync-pass-change" class="btn btn-ghost">Change</button>
-            <button id="sync-pass-forget" class="btn btn-danger-ghost">Forget</button>
+            <button id="sync-pass-change" class="btn btn-ghost">Change passphrase</button>
+            <button id="sync-pass-forget" class="btn btn-danger-ghost">Turn off</button>
           </div>
         </div>
-        <div class="row"><div class="row-text"><label>Synced chats</label>
-          <span class="row-sub" id="sync-repo-note">Chats stored for this repository</span></div>
-          <div class="row-actions">
-            <button id="sync-push" class="btn btn-ghost">Upload this chat</button>
-            <button id="sync-refresh" class="btn btn-primary">Load synced chats</button>
-          </div>
-        </div>
-        <div id="sync-chat-list" class="provider-list" hidden></div>
       </div>
     </section>
 
