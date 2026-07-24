@@ -21,6 +21,7 @@
   let session = null; // { secrets, gh, model, repo:{owner,repo,branch,full_name} }
   let currentRun = null; // { stop }
   let stopFlag = false;  // shared stop signal (main turn + sub-agents)
+  let composing = false; // true while building a message (may call the vision model)
 
   // ---------------------------------------------------------------- screens
   const SCREENS = ["screen-setup", "screen-unlock", "screen-repo", "screen-chat"];
@@ -278,16 +279,25 @@
       }
     }
     const ctx = parts.length ? "Attached files for context:\n\n" + parts.join("\n\n") + "\n\n---\n\n" : "";
-    let body = ctx + (text || (images.length ? "(see attached image)" : "(see attached files)"));
+    const body = ctx + (text || (images.length ? "" : "(see attached files)"));
     if (!images.length) return body;
-    // A vision model sees the images directly; a text model gets a note telling
-    // it to call view_image (which routes through the free vision model).
+    // A vision model sees the images directly.
     if (isVisionModel(getModelName())) {
-      return [{ type: "text", text: body }].concat(images.map((im) => ({ type: "image_url", image_url: { url: im.dataUrl } })));
+      return [{ type: "text", text: body || "(describe the attached image)" }]
+        .concat(images.map((im) => ({ type: "image_url", image_url: { url: im.dataUrl } })));
     }
-    body += "\n\n[Attached image(s): " + images.map((i) => i.name).join(", ") +
-      ". Call view_image(name, question) to look at them.]";
-    return body;
+    // Text/coding model: describe each uploaded image NOW via the free vision
+    // model and inject the writeup, so the model gets the content directly and
+    // never mistakes the upload for a file in the repo.
+    const blocks = [];
+    for (const im of images) {
+      const d = await viewImage(im.name, text || "");
+      if (/^(Couldn't analyze|No attached image)/.test(d)) addBubble("error", d);
+      blocks.push('The user uploaded an image "' + im.name + '" (it is NOT a file in the repo — do not ' +
+        'look for it with read_file/glob). Here is what it shows, described by the vision model:\n' + d);
+    }
+    setStatus("");
+    return blocks.join("\n\n---\n\n") + "\n\n===\n\n" + (body || "(Act on the uploaded image described above.)");
   }
 
   $("btn-attach").addEventListener("click", openFilePicker);
@@ -470,12 +480,17 @@
   }
 
   async function sendPrompt() {
-    if (currentRun) return;
+    if (currentRun || composing) return;
     const text = prompt.value.trim();
     if (!text && !attachments.length) return;
     prompt.value = ""; prompt.style.height = "auto";
     addBubble("user", (text || "(attached files)") + attachmentNote());
-    const content = await composeMessage(text);   // fetches + prepends any attachments
+    // composeMessage may call the vision model (to describe uploaded images), so
+    // guard against a second send and disable the composer while it runs.
+    composing = true; setRunning(true);
+    let content;
+    try { content = await composeMessage(text); }
+    finally { composing = false; setRunning(false); }
     clearAttachments();
     session.turnCommits = 0;
     session.messages.push({ role: "user", content });
