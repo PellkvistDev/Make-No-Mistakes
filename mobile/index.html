@@ -4,6 +4,12 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
   <meta name="theme-color" content="#0b0d10" />
+  <!-- Installed (standalone) on iOS: make the status bar transparent so the
+       wallpaper flows under the Dynamic Island instead of leaving a dark bar.
+       The top bar's own glass (with safe-area padding) sits behind the clock. -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <!--
     SECURITY: this Content-Security-Policy is the app's outer wall.
       default-src 'none'      — nothing loads unless explicitly allowed below.
