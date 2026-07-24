@@ -1640,6 +1640,34 @@ class Api:
         res["github"] = self.github_status()
         return res
 
+    def github_create_and_open(self, name: str, private: bool = True,
+                               auto_backup: bool = True):
+        """Create a brand-new repo and open it as a NEW chat.
+
+        This is the New-chat flow, so there's no folder to attach yet (that's
+        github_create_and_connect). The repo is created with an initial commit
+        so it has a branch, then cloned into the clone root like any other."""
+        if not githubsync.available():
+            return {"error": "git isn't installed or on PATH."}
+        token = self._gh_token()
+        if not token:
+            return {"error": "Connect a GitHub token first (Settings → GitHub)."}
+        name = (name or "").strip()
+        if not name:
+            return {"error": "Name the new repository."}
+        try:
+            created = githubsync.create_repo(token, name, private, auto_init=True)
+        except githubsync.GitHubError as e:
+            msg = str(e)
+            if "not accessible" in msg or "403" in msg or "rejected the token" in msg:
+                msg = ("Your token isn't allowed to create repositories. In its GitHub "
+                       "settings give it Repository access: All repositories, and "
+                       "Permissions → Administration: Read and write (keep Contents: "
+                       "Read and write).")
+            return {"error": msg}
+        full = created.get("full_name") or f"{created.get('owner','')}/{name}"
+        return self.github_clone(full, auto_backup=auto_backup)
+
     def github_connect(self, url: str):
         """Mid-session: attach the ACTIVE folder to an existing (often empty)
         repo and push everything up."""

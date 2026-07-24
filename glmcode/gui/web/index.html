@@ -343,6 +343,19 @@
       <input id="newchat-gh-url" class="text-input" placeholder="Clone a GitHub repo — owner/repo or URL">
       <button id="newchat-gh-go" class="btn btn-primary">Clone</button>
     </div>
+    <div class="newchat-gh-actions">
+      <button id="newchat-gh-pick" class="btn btn-ghost">Browse my repos…</button>
+      <button id="newchat-gh-new" class="btn btn-ghost">Create a new repo…</button>
+    </div>
+    <div id="newchat-repo-list" class="provider-list" hidden></div>
+    <div id="newchat-new-repo" class="newchat-new-repo" hidden>
+      <input id="newchat-new-name" class="text-input" placeholder="New repository name">
+      <div class="seg" id="newchat-new-vis" role="radiogroup" aria-label="Visibility">
+        <button data-v="private" role="radio" class="on">Private</button>
+        <button data-v="public" role="radio">Public</button>
+      </div>
+      <button id="newchat-new-go" class="btn btn-primary">Create &amp; open</button>
+    </div>
     <p class="row-sub" id="newchat-gh-hint" hidden>Connect a GitHub token in Settings → GitHub to clone private repositories.</p>
     <div class="sheet-actions">
       <button id="newchat-whiteboard" class="btn btn-ghost">Open whiteboard</button>

@@ -730,3 +730,71 @@ def test_autosync_swallows_failures(monkeypatch):
     monkeypatch.setattr(gui_app.Api, "sync_push_chat", boom)
     api._maybe_autosync("s1")          # must not raise
     assert done.wait(2)
+
+
+# ------------------------------------------- start a chat from a new GitHub repo
+# "New chat" can now create a repo and open it directly, so the create call has
+# to produce a repo that is actually clonable (an empty one has no branch).
+
+def test_create_repo_can_auto_init(monkeypatch):
+    sent = {}
+
+    def fake_api(method, path, token, body=None):
+        sent.update(method=method, path=path, body=body)
+        return {"full_name": "octo/thing", "owner": {"login": "octo"},
+                "name": "thing", "default_branch": "main"}
+
+    monkeypatch.setattr(githubsync, "_api", fake_api)
+    made = githubsync.create_repo("T", "thing", private=True, auto_init=True)
+    assert sent["body"]["auto_init"] is True, "a repo we clone needs an initial commit"
+    assert sent["body"]["private"] is True
+    assert made["full_name"] == "octo/thing"
+
+    githubsync.create_repo("T", "thing")          # default stays as it was
+    assert sent["body"]["auto_init"] is False
+
+
+def test_github_create_and_open_creates_then_clones(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.Api, "_gh_token", lambda self: "T")
+    monkeypatch.setattr(gui_app.githubsync, "available", lambda: True)
+    made = {}
+
+    def fake_create(token, name, private=True, description="", auto_init=False):
+        made.update(name=name, private=private, auto_init=auto_init)
+        return {"full_name": f"octo/{name}", "owner": "octo", "name": name,
+                "default_branch": "main"}
+
+    cloned = {}
+    monkeypatch.setattr(gui_app.githubsync, "create_repo", fake_create)
+    monkeypatch.setattr(gui_app.Api, "github_clone",
+                        lambda self, url, auto_backup=True: cloned.update(
+                            url=url, auto_backup=auto_backup) or {"ok": True})
+
+    res = api.github_create_and_open("widgets", True, False)
+    assert res == {"ok": True}
+    assert made == {"name": "widgets", "private": True, "auto_init": True}
+    assert cloned == {"url": "octo/widgets", "auto_backup": False}
+
+
+def test_github_create_and_open_explains_a_permission_failure(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.Api, "_gh_token", lambda self: "T")
+    monkeypatch.setattr(gui_app.githubsync, "available", lambda: True)
+
+    def boom(*a, **kw):
+        raise gui_app.githubsync.GitHubError("Resource not accessible by personal access token")
+
+    monkeypatch.setattr(gui_app.githubsync, "create_repo", boom)
+    err = api.github_create_and_open("widgets")["error"]
+    assert "Administration: Read and write" in err
+
+
+def test_github_create_and_open_needs_a_name_and_token(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.githubsync, "available", lambda: True)
+    monkeypatch.setattr(gui_app.Api, "_gh_token", lambda self: None)
+    assert "token" in api.github_create_and_open("x")["error"]
+
+    monkeypatch.setattr(gui_app.Api, "_gh_token", lambda self: "T")
+    assert "Name the new repository" in api.github_create_and_open("  ")["error"]

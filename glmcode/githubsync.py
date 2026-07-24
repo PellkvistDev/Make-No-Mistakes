@@ -606,13 +606,17 @@ def fetch_pr_branch(path: Path, token: str | None, number: int, head_ref: str = 
 
 
 def create_repo(token: str, name: str, private: bool = True,
-                description: str = "") -> dict:
-    """Create a new repo under the authenticated user; return its coords."""
+                description: str = "", auto_init: bool = False) -> dict:
+    """Create a new repo under the authenticated user; return its coords.
+
+    auto_init gives it an initial commit (and therefore a default branch), which
+    is what you want when the repo is going to be CLONED straight away -- an
+    empty repo clones into a branchless working copy."""
     if not _NAME_RE.match(name or ""):
         raise GitHubError("Repository names may use letters, numbers, . _ - only.")
     r = _api("POST", "/user/repos", token, {
         "name": name, "private": bool(private),
-        "description": description[:300], "auto_init": False,
+        "description": description[:300], "auto_init": bool(auto_init),
     })
     return {
         "full_name": r.get("full_name", ""),

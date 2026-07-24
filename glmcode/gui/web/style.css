@@ -1512,6 +1512,17 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 /* GitHub: new-chat clone row, repo picker, and the composer-foot sync chip */
 .newchat-gh { display: flex; gap: 8px; margin: 10px 0 4px; }
 .newchat-gh .text-input { flex: 1; }
+/* Browse / create, right where you start a project */
+.newchat-gh-actions { display: flex; gap: 8px; margin: 2px 0 4px; }
+.newchat-gh-actions .btn { flex: 1; }
+#newchat-repo-list { max-height: 190px; overflow-y: auto; margin: 4px 0; }
+.newchat-new-repo { display: flex; gap: 8px; align-items: center; margin: 4px 0; flex-wrap: wrap; }
+.newchat-new-repo .text-input { flex: 1; min-width: 150px; }
+/* the visibility segmented control must not be squeezed until its two labels
+   collide -- it sits in a flex row with an input that wants all the space */
+.newchat-new-repo .seg { flex: none; }
+.newchat-new-repo .seg button { padding: 6px 12px; white-space: nowrap; }
+.newchat-new-repo .btn { flex: none; }
 #gh-repo-list { max-height: 210px; overflow-y: auto; margin-top: 8px; }
 .gh-repo-row {
   display: flex; align-items: center; gap: 10px; width: 100%;

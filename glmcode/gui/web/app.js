@@ -4228,8 +4228,79 @@ async function openWhiteboard() {
 }
 function showNewChatChooser() {
   $("newchat-backup").setAttribute("aria-checked", "true"); // default on for every new chat
+  // Collapse the GitHub sub-panels so the sheet opens small every time.
+  $("newchat-repo-list").hidden = true;
+  $("newchat-new-repo").hidden = true;
+  $("newchat-new-name").value = "";
   $("newchat-backdrop").hidden = false;
 }
+
+/* ---- start a chat straight from GitHub -------------------------------
+ * Typing owner/repo was the only way in here; browsing your repos and
+ * creating a new one lived in Settings, which is the wrong place to be when
+ * you're starting a project. Both now happen right in this sheet.
+ */
+function newChatBackupOn() {
+  return $("newchat-backup").getAttribute("aria-checked") === "true";
+}
+
+$("newchat-gh-pick").addEventListener("click", async () => {
+  const list = $("newchat-repo-list");
+  $("newchat-new-repo").hidden = true;
+  if (!list.hidden) { list.hidden = true; return; }   // toggle closed
+  list.hidden = false;
+  list.innerHTML = '<div class="row-sub" style="padding:8px 2px">Loading your repositories…</div>';
+  const res = await ghAction($("newchat-gh-pick"), () => api().github_list_repos(), false);
+  if (!res) { list.hidden = true; return; }
+  list.innerHTML = "";
+  for (const r of res.repos || []) {
+    const row = document.createElement("button");
+    row.className = "gh-repo-row";
+    row.innerHTML = `<span class="gh-repo-name mono"></span>` +
+      `<span class="gh-repo-tag">${r.private ? "private" : "public"}${r.empty ? " · empty" : ""}</span>`;
+    row.querySelector(".gh-repo-name").textContent = r.full_name;
+    row.addEventListener("click", () => ghClone(r.full_name, row));
+    list.appendChild(row);
+  }
+  if (!list.children.length)
+    list.innerHTML = '<div class="row-sub" style="padding:8px 2px">No repositories found for this token.</div>';
+});
+
+$("newchat-gh-new").addEventListener("click", () => {
+  $("newchat-repo-list").hidden = true;
+  const box = $("newchat-new-repo");
+  box.hidden = !box.hidden;
+  if (!box.hidden) $("newchat-new-name").focus();
+});
+
+let newChatVisibility = "private";
+document.querySelectorAll("#newchat-new-vis button").forEach((b) =>
+  b.addEventListener("click", () => {
+    newChatVisibility = b.dataset.v;
+    document.querySelectorAll("#newchat-new-vis button").forEach((x) => {
+      x.classList.toggle("on", x === b);
+      x.setAttribute("aria-checked", String(x === b));
+    });
+  }));
+
+async function createRepoAndOpen() {
+  const name = $("newchat-new-name").value.trim();
+  if (!name) { toast("Name the new repository.", "error", 3000); return; }
+  const res = await ghAction($("newchat-new-go"),
+    () => api().github_create_and_open(name, newChatVisibility === "private",
+                                       newChatBackupOn()));
+  if (!res) return;
+  $("newchat-new-name").value = "";
+  $("newchat-backdrop").hidden = true;
+  $("settings-backdrop").hidden = true;
+  applySession(res);
+  input.focus();
+  toast(`Created ${name} and opened it.`, "info", 3500);
+}
+$("newchat-new-go").addEventListener("click", createRepoAndOpen);
+$("newchat-new-name").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); createRepoAndOpen(); }
+});
 $("newchat-backup").addEventListener("click", () => {
   const now = $("newchat-backup").getAttribute("aria-checked") === "true";
   $("newchat-backup").setAttribute("aria-checked", String(!now));
