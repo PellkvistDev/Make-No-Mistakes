@@ -120,7 +120,7 @@
       session.login = me.login;
     } catch (e) {
       $("repo-whoami").textContent = "";
-      $("repo-error").textContent = "GitHub token rejected: " + e.message;
+      $("repo-error").textContent = "GitHub token rejected: " + friendlyGhError(e, "auth");
       return;
     }
     await refreshRepos();
@@ -130,7 +130,7 @@
     try {
       repoCache = await tmpGh.listRepos();
       renderRepos();
-    } catch (e) { $("repo-error").textContent = e.message; }
+    } catch (e) { $("repo-error").textContent = friendlyGhError(e, "list"); }
   }
   function renderRepos() {
     const filter = $("in-repo-filter").value.toLowerCase();
@@ -154,8 +154,24 @@
     try {
       const created = await tmpGh.createRepo(name, $("in-new-private").checked);
       openRepo(created.full_name, created.default_branch || "main");
-    } catch (e) { $("repo-error").textContent = e.message; }
+    } catch (e) { $("repo-error").textContent = friendlyGhError(e, "create"); }
   });
+
+  // Turn raw GitHub API errors into something actionable on a phone.
+  function friendlyGhError(e, action) {
+    const m = (e && e.message) || String(e);
+    if (/not accessible by personal access token|Resource not accessible/i.test(m)) {
+      if (action === "create") {
+        return "Your token isn't allowed to create repos. In its GitHub settings give it " +
+          "Repository access: All repositories, and Permissions → Administration: Read and write " +
+          "(keep Contents: Read and write). Or create the repo on GitHub and open it from the list above.";
+      }
+      return "Your token doesn't have permission for that. Check its repository access and permissions in GitHub settings.";
+    }
+    if (/^GitHub 401/.test(m)) return "GitHub rejected the token (401). It may be expired — create a new fine-grained token.";
+    if (/^GitHub 404/.test(m)) return "Not found (404). The token may not have access to that repository.";
+    return m;
+  }
 
   function openRepo(fullName, branch) {
     const [owner, repo] = fullName.split("/");
