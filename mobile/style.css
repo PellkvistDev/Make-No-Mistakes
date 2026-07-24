@@ -31,6 +31,14 @@ html, body {
   font-family: var(--font); font-size: 16px; line-height: 1.5;
   overscroll-behavior: none;
 }
+/* iOS installed PWA with a black-translucent status bar shifts the document up
+   under the status bar, so height:100% stops short of the screen bottom and a
+   bar appears there. Grow the document by the top inset to cover it.
+   Scoped to iOS WebKit so other browsers are unaffected.
+   Ref: danielpietzsch.com / itnext "Make your PWAs look handsome on iOS". */
+@supports (-webkit-touch-callout: none) {
+  html { min-height: calc(100% + env(safe-area-inset-top)); }
+}
 /* Fill the whole screen (incl. both safe areas under black-translucent) by
    pinning the app to the viewport exactly like #bg-layer — height:100% doesn't
    cover the bottom inset in an installed iOS PWA, which left a dark band. */
