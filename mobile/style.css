@@ -191,7 +191,14 @@ button.link.danger { color: var(--danger); }
 #composer-dock {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
   padding-bottom: env(safe-area-inset-bottom);
-  background: linear-gradient(to top, rgba(6,8,12,.6) 0, rgba(6,8,12,.34) 45%, rgba(6,8,12,.12) 78%, transparent 100%);
+}
+/* Scrim only behind the input row — it STOPS at the top of the home-indicator
+   inset, so that area stays pure wallpaper (no bar at the very bottom). */
+#composer-dock::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0;
+  bottom: env(safe-area-inset-bottom); z-index: -1;
+  background: linear-gradient(to top, rgba(6,8,12,.5), rgba(6,8,12,.28) 55%, transparent);
+  pointer-events: none;
 }
 .bubble { border-radius: var(--radius); padding: 11px 14px; max-width: 92%; word-wrap: break-word; animation: rise .18s ease; box-shadow: var(--glass-hi); }
 .bubble.user { align-self: flex-end; background: linear-gradient(180deg, rgba(64,90,158,.62), rgba(46,64,116,.58)); border: 1px solid rgba(120,150,230,.4); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); }
