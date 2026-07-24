@@ -192,6 +192,24 @@
         <h3 id="settings-title">Settings</h3>
         <div class="settings-scroll">
           <div class="setting-block">
+            <label class="setting-label" for="set-autolock">Auto-lock</label>
+            <select id="set-autolock" class="setting-input">
+              <option value="0">Never</option>
+              <option value="1">After 1 minute</option>
+              <option value="5">After 5 minutes</option>
+              <option value="15">After 15 minutes</option>
+              <option value="60">After 1 hour</option>
+            </select>
+            <span class="setting-hint">Locks and asks for your PIN after this much inactivity. Leaving to the Home Screen no longer locks instantly, and your conversation is saved.</span>
+          </div>
+
+          <div class="setting-block toggle-row">
+            <div><label class="setting-label" for="set-keepsignedin">Keep me signed in</label>
+              <span class="setting-hint">Skip the PIN on this device. Convenient, but anyone who can unlock your phone can open the app. Your keys stay encrypted at rest.</span></div>
+            <input id="set-keepsignedin" type="checkbox" class="toggle" />
+          </div>
+
+          <div class="setting-block">
             <label class="setting-label" for="set-model">Model</label>
             <input id="set-model" class="setting-input" list="model-list" spellcheck="false" autocapitalize="off" placeholder="glm-4.7-flash" />
             <datalist id="model-list">

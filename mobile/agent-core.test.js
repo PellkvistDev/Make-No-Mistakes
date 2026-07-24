@@ -52,6 +52,31 @@ test("vault: PBKDF2 iterations meet the security floor", () => {
   assert.ok(C.PBKDF2_ITERS >= 210000);
 });
 
+test("session crypto: aesEncrypt/aesDecrypt round-trips under a derived key", async () => {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await C.deriveKey("1234", salt, false);
+  const data = { repo: { full_name: "a/b" }, messages: [{ role: "user", content: "hi" }] };
+  const blob = await C.aesEncrypt(data, key);
+  assert.ok(blob.iv && blob.ct);
+  assert.deepEqual(await C.aesDecrypt(blob, key), data);
+});
+
+test("session crypto: an exported/imported key still decrypts (keep-signed-in)", async () => {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const key = await C.deriveKey("correcthorse", salt, true); // extractable
+  const blob = await C.aesEncrypt({ x: 42 }, key);
+  const raw = await C.exportRawKey(key);
+  const restored = await C.importRawKey(raw, false);
+  assert.deepEqual(await C.aesDecrypt(blob, restored), { x: 42 });
+});
+
+test("session crypto: a different key can't decrypt", async () => {
+  const k1 = await C.deriveKey("pin-one", crypto.getRandomValues(new Uint8Array(16)), false);
+  const k2 = await C.deriveKey("pin-two", crypto.getRandomValues(new Uint8Array(16)), false);
+  const blob = await C.aesEncrypt({ secret: 1 }, k1);
+  await assert.rejects(() => C.aesDecrypt(blob, k2));
+});
+
 // --------------------------------------------------------------- GitHub --
 
 function fakeFetch(routes) {

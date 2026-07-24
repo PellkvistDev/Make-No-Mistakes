@@ -15,10 +15,12 @@
   const AC = window.AgentCore;
   const $ = (id) => document.getElementById(id);
   const VAULT_KEY = "mnm.vault.v1";
-  const IDLE_MS = 5 * 60 * 1000; // lock after 5 min idle
+  const SESSION_KEY = "mnm.session.v1";  // encrypted conversation (under the vault key)
+  const KEEPKEY_KEY = "mnm.key.v1";      // remembered key for "keep me signed in"
 
-  // In-memory session (cleared on lock). Never persisted.
-  let session = null; // { secrets, gh, model, repo:{owner,repo,branch,full_name} }
+  // In-memory session (cleared on lock). Secrets/keys never persisted unless
+  // "keep me signed in" is on; the conversation is persisted encrypted.
+  let session = null; // { secrets, cryptoKey, pin, vaultSalt, gh, model, repo, messages, transcript }
   let currentRun = null; // { stop }
   let stopFlag = false;  // shared stop signal (main turn + sub-agents)
   let composing = false; // true while building a message (may call the vision model)
@@ -38,10 +40,21 @@
   function clearVault() { localStorage.removeItem(VAULT_KEY); }
 
   // ------------------------------------------------------------- auto-lock
+  // Auto-lock is time-based and configurable (0 = never). We deliberately do
+  // NOT lock the moment the app is backgrounded — a quick trip to the Home
+  // Screen shouldn't kick you out. We save the session on hide (in case iOS
+  // discards the page) and, on return, lock only if we've been idle too long.
   let idleTimer = null;
+  let lastActive = Date.now();
+  function autolockMs() {
+    const m = parseInt(pref("mnm.autolock", "15"), 10);   // minutes; 0/NaN = never
+    return (isNaN(m) || m <= 0) ? 0 : m * 60000;
+  }
   function armIdle() {
+    lastActive = Date.now();
     clearTimeout(idleTimer);
-    if (session) idleTimer = setTimeout(lock, IDLE_MS);
+    const ms = autolockMs();
+    if (session && ms) idleTimer = setTimeout(lock, ms);
   }
   function lock() {
     if (currentRun) { try { currentRun.stop(); } catch {} currentRun = null; }
@@ -50,9 +63,11 @@
     $("in-unlock-pin").value = "";
     show("screen-unlock");
   }
-  // Lock the moment we lose focus/visibility — a phone set down shouldn't stay open.
-  document.addEventListener("visibilitychange", () => { if (document.hidden && session) lock(); });
-  window.addEventListener("pagehide", () => { if (session) lock(); });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { if (session) persistSession(); return; }
+    const ms = autolockMs();
+    if (session && ms && Date.now() - lastActive > ms) lock(); else armIdle();
+  });
   ["pointerdown", "keydown"].forEach((ev) => document.addEventListener(ev, armIdle, { passive: true }));
 
   // ---------------------------------------------------------------- toast
@@ -79,7 +94,10 @@
       const secrets = { modelKey, model, baseUrl, githubToken };
       const blob = await AC.encryptVault(secrets, pin);
       storeVault(blob);
-      await unlockWith(secrets, pin);
+      clearSession();  // a fresh setup starts a fresh session
+      const salt = AC._b64.b64ToBytes(blob.salt);
+      const key = await AC.deriveKey(pin, salt, keepSignedIn());
+      await finishUnlock(secrets, key, pin, salt);
     } catch (e) { err.textContent = e.message || String(e); }
   });
 
@@ -92,21 +110,66 @@
     const blob = loadVault();
     if (!blob) return show("screen-setup");
     try {
-      const secrets = await AC.decryptVault(blob, pin);
-      await unlockWith(secrets, pin);
+      const secrets = await AC.decryptVault(blob, pin);   // verifies the PIN
+      const salt = AC._b64.b64ToBytes(blob.salt);
+      const key = await AC.deriveKey(pin, salt, keepSignedIn());
+      await finishUnlock(secrets, key, pin, salt);
     } catch (e) { err.textContent = "Wrong PIN."; }
   }
   $("btn-reset").addEventListener("click", () => {
-    if (confirm("Erase your encrypted keys from this device? You'll re-enter them.")) {
-      clearVault(); session = null; show("screen-setup");
+    if (confirm("Erase your encrypted keys and saved session from this device? You'll re-enter your keys.")) {
+      clearVault(); clearSession(); localStorage.removeItem(KEEPKEY_KEY); session = null; show("screen-setup");
     }
   });
 
-  async function unlockWith(secrets, pin) {
-    session = { secrets, pin };
+  // Finish unlocking: cache the key, honour "keep me signed in", and resume the
+  // saved conversation if there is one (otherwise go to the repo picker).
+  async function finishUnlock(secrets, key, pin, salt) {
+    session = { secrets, cryptoKey: key, pin: pin || null, vaultSalt: salt || null };
     session.model = AC.makeModel({ apiKey: secrets.modelKey, model: getModelName(), baseUrl: secrets.baseUrl });
     armIdle();
-    await enterRepoPicker();
+    if (keepSignedIn()) { try { localStorage.setItem(KEEPKEY_KEY, await AC.exportRawKey(key)); } catch {} }
+    else localStorage.removeItem(KEEPKEY_KEY);
+    if (!(await tryRestoreSession())) await enterRepoPicker();
+  }
+
+  // ------------------------------------------------------- session persistence
+  function keepSignedIn() { return pref("mnm.keepsignedin", "0") === "1"; }
+  function clearSession() { localStorage.removeItem(SESSION_KEY); }
+  // Drop bulky image data URLs from saved history (keep the flow, not the bytes).
+  function stripImages(messages) {
+    return messages.map((m) => Array.isArray(m.content)
+      ? Object.assign({}, m, { content: m.content.map((c) => c.type === "image_url" ? { type: "text", text: "[image omitted from saved history]" } : c) })
+      : m);
+  }
+  async function persistSession() {
+    if (!session || !session.repo || !session.cryptoKey) return;
+    try {
+      const blob = await AC.aesEncrypt({
+        repo: session.repo, baseSystem: session.baseSystem,
+        messages: stripImages(session.messages || []), transcript: session.transcript || [],
+      }, session.cryptoKey);
+      localStorage.setItem(SESSION_KEY, JSON.stringify(blob));
+    } catch (e) { /* quota / crypto — skip silently */ }
+  }
+  async function tryRestoreSession() {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return false;
+    let data;
+    try { data = await AC.aesDecrypt(JSON.parse(raw), session.cryptoKey); }
+    catch { return false; }
+    if (!data || !data.repo || !Array.isArray(data.messages)) return false;
+    const r = data.repo;
+    connectRepo(r.owner, r.repo, r.branch, r.full_name);
+    if (data.baseSystem) session.baseSystem = data.baseSystem;
+    session.messages = data.messages;
+    session.transcript = data.transcript || [];
+    $("chat-repo-name").textContent = r.full_name;
+    $("messages").innerHTML = "";
+    for (const b of session.transcript) addBubble(b.role, b.text, false);
+    addBubble("system", "Resumed your session in " + r.full_name + ".", false);
+    show("screen-chat");
+    return true;
   }
 
   // ================================================================ REPO PICKER
@@ -175,28 +238,33 @@
     return m;
   }
 
-  function openRepo(fullName, branch) {
-    const [owner, repo] = fullName.split("/");
+  // Wire up the GitHub client + tools for a repo (shared by open and resume).
+  function connectRepo(owner, repo, branch, fullName) {
     session.repo = { owner, repo, branch, full_name: fullName };
     session.gh = AC.makeGitHub({ token: session.secrets.githubToken, owner, repo, branch });
     session.baseSystem = AC.SYSTEM_PROMPT + "\n\nRepository: " + fullName + " (branch " + branch + ").";
-    session.messages = [{ role: "system", content: session.baseSystem }];
     session.turnCommits = 0;
-    const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); };
     session.images = {};   // name -> data URL, for view_image
+    session.transcript = [];
+    const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); };
     // Sub-agent tools have NO spawn (depth 1); the main tools add spawn_agent.
-    // Both can view images (via the vision model).
     session.subTools = AC.makeTools(session.gh, { confirmWrite, onCommit, viewImage });
     session.tools = AC.makeTools(session.gh, { confirmWrite, onCommit, spawn: runSubAgent, viewImage });
-    // Read-only subset for plan mode.
     session.readTools = {};
     for (const n of READ_TOOL_NAMES) session.readTools[n] = session.tools[n];
     session.readTools.view_image = session.tools.view_image;   // let planning look at images too
     clearAttachments();
+  }
+
+  function openRepo(fullName, branch) {
+    const [owner, repo] = fullName.split("/");
+    connectRepo(owner, repo, branch, fullName);
+    session.messages = [{ role: "system", content: session.baseSystem }];
     $("chat-repo-name").textContent = fullName;
     $("messages").innerHTML = "";
     addBubble("system", "Connected to " + fullName + ". I can read, search, and edit files here — each edit is committed. I can't run code on the phone; that happens when your desktop syncs or via CI.");
     show("screen-chat");
+    persistSession();
   }
   $("btn-back-repo").addEventListener("click", () => { if (!currentRun) enterRepoPicker(); });
   $("btn-chat-lock").addEventListener("click", lock);
@@ -476,7 +544,7 @@
     setRunning(true);
     try { await fn(() => stopFlag); }
     catch (e) { addBubble("error", e.message || String(e)); }
-    finally { setRunning(false); currentRun = null; }
+    finally { setRunning(false); currentRun = null; persistSession(); }
   }
 
   async function sendPrompt() {
@@ -539,13 +607,19 @@
   const messages = $("messages");
   function atBottom() { return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80; }
   function scroll() { messages.scrollTop = messages.scrollHeight; }
-  function addBubble(role, text) {
+  function addBubble(role, text, record) {
     const near = atBottom();
     const div = document.createElement("div");
     div.className = "bubble " + role;
     renderText(div, text);
     messages.appendChild(div);
     if (near) scroll();
+    // Record durable bubbles so the conversation can be re-rendered on resume.
+    // (record defaults to true; the transcript replay passes false.)
+    if (record !== false && session && (role === "user" || role === "assistant" || role === "system")) {
+      session.transcript = session.transcript || [];
+      session.transcript.push({ role, text });
+    }
     return div;
   }
   // Minimal, safe markdown-ish rendering. Everything goes through textContent /
@@ -733,6 +807,8 @@
     $("set-plan").checked = planMode();
     $("set-subagents").checked = subagentsOn();
     $("set-confirm").checked = confirmCommits();
+    $("set-autolock").value = String(parseInt(pref("mnm.autolock", "15"), 10) || 0);
+    $("set-keepsignedin").checked = keepSignedIn();
     $("settings-backdrop").hidden = false;
   }
   function closeSettings() { $("settings-backdrop").hidden = true; }
@@ -759,27 +835,55 @@
   $("set-confirm").addEventListener("change", () => {
     localStorage.setItem("mnm.confirm", $("set-confirm").checked ? "1" : "0");
   });
+  $("set-autolock").addEventListener("change", () => {
+    localStorage.setItem("mnm.autolock", $("set-autolock").value);
+    armIdle();
+  });
+  $("set-keepsignedin").addEventListener("change", async () => {
+    const on = $("set-keepsignedin").checked;
+    localStorage.setItem("mnm.keepsignedin", on ? "1" : "0");
+    if (!on) { localStorage.removeItem(KEEPKEY_KEY); return; }
+    // Turning it on: remember the key so future launches skip the PIN. Re-derive
+    // an extractable key from the PIN we still hold if needed.
+    try {
+      let key = session && session.cryptoKey;
+      if (session && session.pin && session.vaultSalt) key = await AC.deriveKey(session.pin, session.vaultSalt, true);
+      if (key) { session.cryptoKey = key; localStorage.setItem(KEEPKEY_KEY, await AC.exportRawKey(key)); }
+    } catch { toast("Couldn't enable — lock and unlock once, then try again."); }
+  });
+
+  function registerSW() {
+    if (!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+    // When a new SW takes control (a fresh deploy), reload once so the page runs
+    // the new code. Guarded on an existing controller so a first install doesn't loop.
+    if (navigator.serviceWorker.controller) {
+      let refreshing = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (refreshing) return;
+        refreshing = true;
+        location.reload();
+      });
+    }
+  }
 
   // ================================================================ BOOT
-  function boot() {
+  async function boot() {
     applyBg(loadBg());
     renderBgPicker($("setup-bg"));
-    if (loadVault()) show("screen-unlock");
-    else show("screen-setup");
-    if ("serviceWorker" in navigator) {
-      navigator.serviceWorker.register("sw.js").catch(() => {});
-      // When a new SW takes control (a fresh deploy), reload once so the page
-      // runs the new code instead of whatever the old SW already handed us.
-      // Guarded on an existing controller so a first-ever install doesn't loop.
-      if (navigator.serviceWorker.controller) {
-        let refreshing = false;
-        navigator.serviceWorker.addEventListener("controllerchange", () => {
-          if (refreshing) return;
-          refreshing = true;
-          location.reload();
-        });
-      }
+    registerSW();
+    const blob = loadVault();
+    const rawKey = localStorage.getItem(KEEPKEY_KEY);
+    // "Keep me signed in": use the remembered key to unlock without the PIN.
+    if (blob && rawKey) {
+      try {
+        const key = await AC.importRawKey(rawKey, true);
+        const secrets = await AC.aesDecrypt(blob, key);
+        await finishUnlock(secrets, key, null, AC._b64.b64ToBytes(blob.salt));
+        return;
+      } catch { localStorage.removeItem(KEEPKEY_KEY); }
     }
+    if (blob) show("screen-unlock"); else show("screen-setup");
   }
   boot();
 })();
