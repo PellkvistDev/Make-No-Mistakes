@@ -18,6 +18,7 @@
   const VAULT_KEY = "mnm.vault.v1";
   const SESSION_KEY = "mnm.session.v1";  // encrypted conversation (under the vault key)
   const KEEPKEY_KEY = "mnm.key.v1";      // remembered key for "keep me signed in"
+  const SYNCPASS_KEY = "mnm.syncpass.v1"; // sync passphrase, encrypted under the vault key
 
   // In-memory session (cleared on lock). Secrets/keys never persisted unless
   // "keep me signed in" is on; the conversation is persisted encrypted.
@@ -27,7 +28,7 @@
   let composing = false; // true while building a message (may call the vision model)
 
   // ---------------------------------------------------------------- screens
-  const SCREENS = ["screen-setup", "screen-unlock", "screen-repo", "screen-chat"];
+  const SCREENS = ["screen-setup", "screen-unlock", "screen-repo", "screen-chats", "screen-chat"];
   function show(id) {
     for (const s of SCREENS) $(s).hidden = s !== id;
     if (id === "screen-chat") requestAnimationFrame(fitMessages);
@@ -171,6 +172,7 @@
     try {
       const blob = await AC.aesEncrypt({
         repo: session.repo, baseSystem: session.baseSystem,
+        chatId: session.chatId || null, chatTitle: session.chatTitle || "",
         messages: stripImages(session.messages || []), transcript: session.transcript || [],
       }, session.cryptoKey);
       localStorage.setItem(SESSION_KEY, JSON.stringify(blob));
@@ -186,9 +188,12 @@
     const r = data.repo;
     connectRepo(r.owner, r.repo, r.branch, r.full_name);
     if (data.baseSystem) session.baseSystem = data.baseSystem;
+    session.chatId = data.chatId || newChatId();
+    session.chatTitle = data.chatTitle || "";
     session.messages = data.messages;
     session.transcript = data.transcript || [];
     $("chat-repo-name").textContent = r.full_name;
+    updateChatListBtn();
     $("messages").innerHTML = "";
     for (const b of session.transcript) addBubble(b.role, b.text, false);
     addBubble("system", "Resumed your session in " + r.full_name + ".", false);
@@ -280,18 +285,182 @@
     clearAttachments();
   }
 
-  function openRepo(fullName, branch) {
+  async function openRepo(fullName, branch) {
     const [owner, repo] = fullName.split("/");
     connectRepo(owner, repo, branch, fullName);
-    session.messages = [{ role: "system", content: session.baseSystem }];
-    $("chat-repo-name").textContent = fullName;
-    $("messages").innerHTML = "";
-    addBubble("system", "Connected to " + fullName + ". I can read, search, and edit files here — each edit is committed. I can't run code on the phone; that happens when your desktop syncs or via CI.");
-    show("screen-chat");
-    persistSession();
+    session.syncStore = null; session.syncRepo = null;   // new repo → re-open its store
+    if (syncOn() && hasSyncPass()) await enterChatList();
+    else startNewChat();
   }
   $("btn-back-repo").addEventListener("click", () => { if (!currentRun) enterRepoPicker(); });
   $("btn-chat-lock").addEventListener("click", lock);
+  $("btn-chat-list").addEventListener("click", () => { if (!currentRun) enterChatList(); });
+
+  // Start a brand-new chat in the connected repo.
+  function startNewChat() {
+    session.chatId = newChatId();
+    session.chatTitle = "";
+    session.messages = [{ role: "system", content: session.baseSystem }];
+    session.transcript = [];
+    session.images = {};
+    clearAttachments();
+    $("chat-repo-name").textContent = session.repo.full_name;
+    updateChatListBtn();
+    $("messages").innerHTML = "";
+    addBubble("system", "Connected to " + session.repo.full_name + ". I can read, search, and edit files here — each edit is committed. I can't run code on the phone; that happens when your desktop syncs or via CI.");
+    show("screen-chat");
+    persistSession();
+    // Don't sync an empty chat — the first real save happens after a turn, so
+    // the history list never fills with blank "New chat" entries.
+  }
+  function newChatId() {
+    try { if (crypto.randomUUID) return crypto.randomUUID(); } catch {}
+    return "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+  function updateChatListBtn() { $("btn-chat-list").hidden = !(syncOn() && hasSyncPass()); }
+
+  // ================================================================ SESSION SYNC
+  // Opt-in cross-device sync. Chats live encrypted on the repo's orphan state
+  // branch (AgentCore.openSync / makeSyncStore), keyed by a SYNC PASSPHRASE that
+  // is separate from the PIN. The passphrase is stored on-device only as
+  // ciphertext under the vault key, so it survives launches (behind the PIN)
+  // without ever being written in plain text or sent to GitHub.
+  function syncOn() { return pref("mnm.sync", "0") === "1"; }
+  function hasSyncPass() { return !!localStorage.getItem(SYNCPASS_KEY); }
+  async function getSyncPass() {
+    const raw = localStorage.getItem(SYNCPASS_KEY);
+    if (!raw || !session || !session.cryptoKey) return null;
+    try { return await AC.aesDecrypt(JSON.parse(raw), session.cryptoKey); }
+    catch { return null; }
+  }
+  async function storeSyncPass(pass) {
+    const blob = await AC.aesEncrypt(pass, session.cryptoKey);
+    localStorage.setItem(SYNCPASS_KEY, JSON.stringify(blob));
+  }
+  // Lazily open (and cache) the sync store for the connected repo.
+  async function ensureSyncStore() {
+    if (!syncOn() || !session || !session.repo) return null;
+    if (session.syncStore && session.syncRepo === session.repo.full_name) return session.syncStore;
+    const pass = await getSyncPass();
+    if (!pass) return null;
+    const syncGh = AC.makeGitHub({ token: session.secrets.githubToken,
+      owner: session.repo.owner, repo: session.repo.repo, branch: AC.STATE_BRANCH });
+    const { store } = await AC.openSync(syncGh, pass);
+    session.syncStore = store; session.syncRepo = session.repo.full_name;
+    return store;
+  }
+  function deriveTitle() {
+    const firstUser = (session.transcript || []).find((b) => b.role === "user");
+    const t = ((firstUser && firstUser.text) || "").replace(/\n+/g, " ").trim();
+    return t ? t.slice(0, 48) : "New chat";
+  }
+  function lastPreview() {
+    const t = session.transcript || [];
+    const last = t[t.length - 1];
+    return ((last && last.text) || "").replace(/\n+/g, " ").trim().slice(0, 80);
+  }
+  // Persist the current chat to the sync store (best-effort; the local copy is
+  // always saved regardless, so an offline/rate-limited push loses nothing).
+  async function syncSave() {
+    if (!syncOn() || !session || !session.chatId) return;
+    let store;
+    try { store = await ensureSyncStore(); } catch (e) { return; }
+    if (!store) return;
+    try {
+      session.chatTitle = session.chatTitle || deriveTitle();
+      await store.save({
+        id: session.chatId, title: session.chatTitle, preview: lastPreview(),
+        repo: session.repo,
+        messages: stripImages(session.messages || []),
+        transcript: session.transcript || [],
+      });
+    } catch (e) { /* offline / rate-limited — keep the local copy */ }
+  }
+
+  // ---- chat history screen ----
+  function relTime(ms) {
+    if (!ms) return "";
+    const s = Math.max(0, (Date.now() - ms) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+  async function enterChatList() {
+    show("screen-chats");
+    $("chats-repo-name").textContent = session.repo.full_name;
+    $("chats-error").textContent = "";
+    $("chats-list").innerHTML = "<li class='muted'>Loading…</li>";
+    let store;
+    try { store = await ensureSyncStore(); }
+    catch (e) {
+      $("chats-list").innerHTML = "";
+      $("chats-error").textContent = "Couldn't open sync: " + friendlyGhError(e, "list");
+      return;
+    }
+    if (!store) { startNewChat(); return; }  // sync not actually configured
+    let list;
+    try { list = await store.list(); }
+    catch (e) { $("chats-list").innerHTML = ""; $("chats-error").textContent = friendlyGhError(e, "list"); return; }
+    renderChatList(list);
+  }
+  function renderChatList(list) {
+    const ul = $("chats-list");
+    ul.innerHTML = "";
+    for (const c of list) {
+      const li = document.createElement("li");
+      li.className = "chat-row";
+      const main = document.createElement("div");
+      main.className = "chat-row-main";
+      const title = document.createElement("div");
+      title.className = "chat-row-title";
+      title.textContent = c.title || "Untitled";
+      const meta = document.createElement("div");
+      meta.className = "chat-row-meta";
+      meta.textContent = [relTime(c.updated), c.preview].filter(Boolean).join(" · ");
+      main.append(title, meta);
+      main.addEventListener("click", () => openSyncChat(c.id));
+      const del = document.createElement("button");
+      del.className = "chat-row-del"; del.type = "button"; del.title = "Delete"; del.textContent = "🗑";
+      del.addEventListener("click", (e) => { e.stopPropagation(); deleteSyncChat(c.id, c.title); });
+      li.append(main, del);
+      ul.appendChild(li);
+    }
+    if (!list.length) ul.innerHTML = "<li class='muted'>No saved chats yet — start a new one.</li>";
+  }
+  async function openSyncChat(id) {
+    let data;
+    try {
+      const store = await ensureSyncStore();
+      data = await store.load(id);
+    } catch (e) { toast("Couldn't open that chat: " + friendlyGhError(e, "list")); return; }
+    if (!data || !Array.isArray(data.messages)) { toast("That chat looks empty."); return; }
+    session.chatId = data.id || id;
+    session.chatTitle = data.title || "";
+    session.messages = data.messages;
+    session.transcript = data.transcript || [];
+    session.images = {};
+    session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
+    clearAttachments();
+    $("chat-repo-name").textContent = session.repo.full_name;
+    updateChatListBtn();
+    $("messages").innerHTML = "";
+    for (const b of session.transcript) addBubble(b.role, b.text, false);
+    addBubble("system", "Resumed “" + (session.chatTitle || "chat") + "”.", false);
+    show("screen-chat");
+    persistSession();
+  }
+  async function deleteSyncChat(id, title) {
+    if (!confirm("Delete “" + (title || "this chat") + "” from all your devices?")) return;
+    try {
+      const store = await ensureSyncStore();
+      await store.remove(id);
+      if (session.chatId === id) session.chatId = null;
+      await enterChatList();
+    } catch (e) { toast("Couldn't delete: " + friendlyGhError(e, "list")); }
+  }
+  $("btn-chats-back").addEventListener("click", () => { if (!currentRun) enterRepoPicker(); });
+  $("btn-chats-new").addEventListener("click", () => { if (!currentRun) startNewChat(); });
 
   // ================================================================ CONFIRM DIALOG
   function confirmWrite(kind, path, content) {
@@ -570,7 +739,7 @@
     setRunning(true);
     try { await fn(() => stopFlag); }
     catch (e) { addBubble("error", e.message || String(e)); }
-    finally { setRunning(false); currentRun = null; persistSession(); }
+    finally { setRunning(false); currentRun = null; persistSession(); await syncSave(); }
   }
 
   async function sendPrompt() {
@@ -874,6 +1043,8 @@
     $("set-confirm").checked = confirmCommits();
     $("set-autolock").value = String(parseInt(pref("mnm.autolock", "15"), 10) || 0);
     $("set-keepsignedin").checked = keepSignedIn();
+    $("set-sync").checked = syncOn();
+    $("set-sync-pass-row").hidden = !syncOn();
     $("settings-backdrop").hidden = false;
   }
   function closeSettings() { $("settings-backdrop").hidden = true; }
@@ -915,6 +1086,53 @@
       if (session && session.pin && session.vaultSalt) key = await AC.deriveKey(session.pin, session.vaultSalt, true);
       if (key) { session.cryptoKey = key; localStorage.setItem(KEEPKEY_KEY, await AC.exportRawKey(key)); }
     } catch { toast("Couldn't enable — lock and unlock once, then try again."); }
+  });
+
+  // ---- sync settings + passphrase sheet ----
+  $("set-sync").addEventListener("change", () => {
+    const on = $("set-sync").checked;
+    if (on && !hasSyncPass()) { $("set-sync").checked = false; openSyncPass(); return; }
+    localStorage.setItem("mnm.sync", on ? "1" : "0");
+    $("set-sync-pass-row").hidden = !on;
+    if (!on && session) { session.syncStore = null; session.syncRepo = null; }
+    updateChatListBtn();
+  });
+  $("btn-change-syncpass").addEventListener("click", openSyncPass);
+  function openSyncPass() {
+    $("in-syncpass").value = ""; $("in-syncpass2").value = "";
+    $("syncpass-error").textContent = "";
+    $("syncpass-backdrop").hidden = false;
+  }
+  function closeSyncPass() { $("syncpass-backdrop").hidden = true; }
+  $("btn-syncpass-cancel").addEventListener("click", closeSyncPass);
+  $("syncpass-backdrop").addEventListener("click", (e) => { if (e.target === $("syncpass-backdrop")) closeSyncPass(); });
+  $("btn-syncpass-save").addEventListener("click", async () => {
+    const err = $("syncpass-error"); err.textContent = "";
+    const p1 = $("in-syncpass").value, p2 = $("in-syncpass2").value;
+    if (p1.length < 6) return (err.textContent = "Passphrase must be at least 6 characters.");
+    if (p1 !== p2) return (err.textContent = "Passphrases don't match.");
+    if (!session || !session.cryptoKey) return (err.textContent = "Unlock first.");
+    $("btn-syncpass-save").disabled = true;
+    try {
+      // If we're connected, verify the passphrase against any existing store on
+      // the branch BEFORE storing it — so a mismatch with another device is
+      // caught here rather than silently forking the history.
+      if (session.repo) {
+        const syncGh = AC.makeGitHub({ token: session.secrets.githubToken,
+          owner: session.repo.owner, repo: session.repo.repo, branch: AC.STATE_BRANCH });
+        await AC.openSync(syncGh, p1);
+      }
+      await storeSyncPass(p1);
+      localStorage.setItem("mnm.sync", "1");
+      session.syncStore = null; session.syncRepo = null;   // re-open with the new key
+      if (session.repo) { await ensureSyncStore(); await syncSave(); }
+      closeSyncPass();
+      $("set-sync").checked = true;
+      $("set-sync-pass-row").hidden = false;
+      updateChatListBtn();
+      toast("Sync enabled.");
+    } catch (e) { err.textContent = friendlyGhError(e, "list"); }
+    finally { $("btn-syncpass-save").disabled = false; }
   });
 
   function registerSW() {

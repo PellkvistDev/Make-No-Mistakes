@@ -139,11 +139,27 @@
       </div>
     </section>
 
+    <!-- ===================== CHAT HISTORY (synced) ===================== -->
+    <section id="screen-chats" class="screen" hidden>
+      <header class="bar">
+        <button id="btn-chats-back" class="icon-btn" title="Switch repo">‹</button>
+        <span class="bar-title" id="chats-repo-name">repo</span>
+        <button id="btn-chats-new" class="icon-btn" title="New chat">＋</button>
+      </header>
+      <div class="pane scroll">
+        <p class="sub">Your synced chats for this repo. They're stored encrypted on a private
+          <code>makenomistakes/state</code> branch, so you can pick any of them up on another device.</p>
+        <ul id="chats-list" class="repo-list"></ul>
+        <p id="chats-error" class="error" role="alert"></p>
+      </div>
+    </section>
+
     <!-- ===================== CHAT ===================== -->
     <section id="screen-chat" class="screen" hidden>
       <header class="bar">
         <button id="btn-back-repo" class="icon-btn" title="Switch repo">‹</button>
         <span class="bar-title" id="chat-repo-name">repo</span>
+        <button id="btn-chat-list" class="icon-btn" title="Chats" hidden>🗂</button>
         <button id="btn-chat-settings" class="icon-btn" title="Settings">⚙</button>
         <button id="btn-chat-lock" class="icon-btn" title="Lock">🔒</button>
       </header>
@@ -255,6 +271,17 @@
             <input id="set-confirm" type="checkbox" class="toggle" checked />
           </div>
 
+          <div class="setting-block toggle-row">
+            <div><label class="setting-label" for="set-sync">Sync chats across devices</label>
+              <span class="setting-hint">Store your chats encrypted on a private <code>makenomistakes/state</code>
+                branch, protected by a sync passphrase, so you can continue them on your phone, computer, or
+                any device. GitHub only ever sees ciphertext.</span></div>
+            <input id="set-sync" type="checkbox" class="toggle" />
+          </div>
+          <div class="setting-block" id="set-sync-pass-row" hidden>
+            <button id="btn-change-syncpass" class="ghost" type="button" style="width:100%">Change sync passphrase</button>
+          </div>
+
           <div class="setting-block">
             <label class="setting-label">Background</label>
             <div id="settings-bg" class="bg-picker"></div>
@@ -263,6 +290,29 @@
         <div class="dialog-actions">
           <button id="btn-settings-lock" class="ghost">Lock</button>
           <button id="btn-settings-done" class="primary">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SYNC PASSPHRASE SHEET ===================== -->
+    <div id="syncpass-backdrop" class="backdrop" hidden>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="syncpass-title">
+        <h3 id="syncpass-title">Sync passphrase</h3>
+        <p class="hint">This passphrase encrypts your synced chats. Enter the <b>same</b> passphrase on
+          every device you want to sync. It's never sent to GitHub or stored in plain text — if you
+          forget it, you can set a new one, but existing synced chats stay locked.</p>
+        <label class="field">
+          <span>Sync passphrase (min 6)</span>
+          <input id="in-syncpass" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="passphrase" />
+        </label>
+        <label class="field">
+          <span>Confirm passphrase</span>
+          <input id="in-syncpass2" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="repeat passphrase" />
+        </label>
+        <p id="syncpass-error" class="error" role="alert"></p>
+        <div class="dialog-actions">
+          <button id="btn-syncpass-cancel" class="ghost">Cancel</button>
+          <button id="btn-syncpass-save" class="primary">Save</button>
         </div>
       </div>
     </div>
