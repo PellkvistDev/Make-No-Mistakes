@@ -742,12 +742,24 @@
   }
   function applyBg(bg) {
     const layer = $("bg-layer");
+    const root = document.documentElement;   // also paint <html> so the bottom
+                                             // safe-area strip matches (not #0b0d10)
     layer.classList.remove("image");
     document.body.classList.toggle("light-bg", bgIsLight(bg));
-    if (!bg || bg.type === "default") { document.body.classList.remove("has-bg"); layer.style.background = ""; return; }
+    const set = (el, css, img) => { el.style.background = css; el.style.backgroundImage = img || ""; };
+    if (!bg || bg.type === "default") {
+      document.body.classList.remove("has-bg");
+      set(layer, ""); set(root, "");
+      return;
+    }
     document.body.classList.add("has-bg");
-    if (bg.type === "image") { layer.classList.add("image"); layer.style.background = "#0b0d10 center/cover no-repeat"; layer.style.backgroundImage = 'url("' + bg.value + '")'; }
-    else { layer.style.background = bg.value; }
+    if (bg.type === "image") {
+      layer.classList.add("image");
+      set(layer, "#0b0d10 center/cover no-repeat", 'url("' + bg.value + '")');
+      set(root, "#0b0d10 center/cover no-repeat", 'url("' + bg.value + '")');
+    } else {
+      set(layer, bg.value); set(root, bg.value);
+    }
   }
   function sameBg(a, b) {
     if (!a) return b.type === "default";
