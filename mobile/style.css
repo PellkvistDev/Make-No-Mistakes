@@ -54,6 +54,47 @@ button { cursor: pointer; border: none; background: none; }
   -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
 }
 
+/* ---------- light background: adapt for contrast ---------- */
+/* When the chosen wallpaper/colour is light, flip to dark text + light glass
+   so everything stays readable (JS adds body.light-bg). */
+body.light-bg {
+  --text: #12151b;
+  --muted: #495264;
+  --glass: rgba(255, 255, 255, 0.52);
+  --glass-strong: rgba(255, 255, 255, 0.76);
+  --glass-brd: rgba(0, 0, 0, 0.12);
+  --glass-hi: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+body.light-bg .brand {
+  background: linear-gradient(120deg, #1a2233, #3b62c4);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+body.light-bg ::placeholder { color: rgba(0, 0, 0, 0.42); }
+body.light-bg .icon-btn { color: #12151b; }
+body.light-bg .icon-btn:active { background: rgba(0, 0, 0, 0.08); }
+body.light-bg .bubble.assistant, body.light-bg .tool-head { color: #12151b; }
+body.light-bg .tool-head { color: #495264; }
+body.light-bg pre.code, body.light-bg pre.tool-out, body.light-bg .preview {
+  background: rgba(255, 255, 255, 0.62); color: #12151b;
+}
+body.light-bg .toggle { background: rgba(0, 0, 0, 0.18); }
+body.light-bg .chip button { background: rgba(0, 0, 0, 0.1); color: #333; }
+body.light-bg .status { color: #274690; }
+body.light-bg .error { color: #b3261e; }
+/* bare-on-wallpaper text: swap the dark halo for a light one */
+body.light-bg .sub, body.light-bg .hint, body.light-bg .section-label,
+body.light-bg .bar-title, body.light-bg .field > span, body.light-bg .setting-label,
+body.light-bg .setting-hint, body.light-bg .new-repo h3, body.light-bg .bubble.system,
+body.light-bg .status, body.light-bg .auto-commit, body.light-bg .error {
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.7);
+}
+body.light-bg .bar {
+  background: linear-gradient(to bottom, rgba(244,246,250,.72), rgba(244,246,250,.3) 55%, transparent);
+}
+body.light-bg #composer-dock::before {
+  background: linear-gradient(to top, rgba(244,246,250,.66), rgba(244,246,250,.32) 55%, transparent);
+}
+
 /* ---------- panes / setup / unlock ---------- */
 .pane {
   flex: 1; overflow-y: auto;

@@ -725,9 +725,25 @@
     try { if (bg) localStorage.setItem(BG_KEY, JSON.stringify(bg)); else localStorage.removeItem(BG_KEY); return true; }
     catch { return false; }
   }
+  // Relative luminance of a #rrggbb colour (0 = black … 1 = white).
+  function hexLuminance(hex) {
+    const m = /^#?([0-9a-fA-F]{6})$/.exec(String(hex || "").trim());
+    if (!m) return null;
+    const n = parseInt(m[1], 16);
+    const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    return 0.2126 * lin(n >> 16 & 255) + 0.7152 * lin(n >> 8 & 255) + 0.0722 * lin(n & 255);
+  }
+  // Is the background light enough that we should switch to dark text?
+  function bgIsLight(bg) {
+    if (!bg || bg.type === "default") return false;      // default is dark
+    if (bg.type === "image") return !!bg.light;          // sampled when chosen
+    if (bg.type === "color") { const L = hexLuminance(bg.value); return L != null && L > 0.6; } // gradients (not hex) are dark presets
+    return false;
+  }
   function applyBg(bg) {
     const layer = $("bg-layer");
     layer.classList.remove("image");
+    document.body.classList.toggle("light-bg", bgIsLight(bg));
     if (!bg || bg.type === "default") { document.body.classList.remove("has-bg"); layer.style.background = ""; return; }
     document.body.classList.add("has-bg");
     if (bg.type === "image") { layer.classList.add("image"); layer.style.background = "#0b0d10 center/cover no-repeat"; layer.style.backgroundImage = 'url("' + bg.value + '")'; }
@@ -772,6 +788,17 @@
     fi.addEventListener("change", () => handleBgFile(fi));
     up.appendChild(fi); container.appendChild(up);
   }
+  // Average luminance of a canvas (sampled tiny) → true if it's a light image.
+  function canvasIsLight(canvas) {
+    try {
+      const s = document.createElement("canvas"); s.width = 16; s.height = 16;
+      const sc = s.getContext("2d"); sc.drawImage(canvas, 0, 0, 16, 16);
+      const d = sc.getImageData(0, 0, 16, 16).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) sum += (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
+      return sum / (d.length / 4) > 0.6;
+    } catch { return false; }
+  }
   function handleBgFile(input) {
     const f = input.files && input.files[0];
     input.value = "";
@@ -787,7 +814,7 @@
         const c = document.createElement("canvas"); c.width = w; c.height = h;
         c.getContext("2d").drawImage(img, 0, 0, w, h);
         let data; try { data = c.toDataURL("image/jpeg", 0.82); } catch { data = reader.result; }
-        setBg({ type: "image", value: data });
+        setBg({ type: "image", value: data, light: canvasIsLight(c) });
       };
       img.onerror = () => toast("Couldn't read that image.");
       img.src = reader.result;
