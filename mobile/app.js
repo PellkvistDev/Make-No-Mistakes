@@ -102,7 +102,7 @@
 
   async function unlockWith(secrets, pin) {
     session = { secrets, pin };
-    session.model = AC.makeModel({ apiKey: secrets.modelKey, model: secrets.model, baseUrl: secrets.baseUrl });
+    session.model = AC.makeModel({ apiKey: secrets.modelKey, model: getModelName(), baseUrl: secrets.baseUrl });
     armIdle();
     await enterRepoPicker();
   }
@@ -177,10 +177,12 @@
     const [owner, repo] = fullName.split("/");
     session.repo = { owner, repo, branch, full_name: fullName };
     session.gh = AC.makeGitHub({ token: session.secrets.githubToken, owner, repo, branch });
-    session.messages = [{ role: "system", content: AC.SYSTEM_PROMPT + "\n\nRepository: " + fullName + " (branch " + branch + ")." }];
+    session.baseSystem = AC.SYSTEM_PROMPT + "\n\nRepository: " + fullName + " (branch " + branch + ").";
+    session.messages = [{ role: "system", content: session.baseSystem }];
+    session.turnCommits = 0;
     session.tools = AC.makeTools(session.gh, {
       confirmWrite: confirmWrite,
-      onCommit: (p) => toast("committed " + p),
+      onCommit: (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); },
     });
     $("chat-repo-name").textContent = fullName;
     $("messages").innerHTML = "";
@@ -192,7 +194,7 @@
 
   // ================================================================ CONFIRM DIALOG
   function confirmWrite(kind, path, content) {
-    if (!$("in-confirm-writes").checked) return Promise.resolve(true);
+    if (!confirmCommits()) return Promise.resolve(true);
     return new Promise((resolve) => {
       $("confirm-title").textContent = (kind === "edit" ? "Commit edit?" : "Commit new file?");
       $("confirm-path").textContent = path;
@@ -221,34 +223,48 @@
   composer.addEventListener("submit", (e) => { e.preventDefault(); sendPrompt(); });
   $("btn-stop").addEventListener("click", () => { if (currentRun) currentRun.stop(); });
 
+  function runTurn(shouldStop) {
+    let liveTool = null;
+    return AC.runAgent({
+      model: session.model,
+      tools: session.tools,
+      messages: session.messages,
+      shouldStop,
+      onEvent: (ev) => {
+        armIdle();
+        if (ev.type === "thinking") setStatus("thinking…");
+        else if (ev.type === "tool") { liveTool = addTool(ev.name, ev.args); setStatus(ev.name + "…"); }
+        else if (ev.type === "tool_result") { if (liveTool) finishTool(liveTool, ev.out); }
+        else if (ev.type === "answer") { setStatus(""); if (ev.text) addBubble("assistant", ev.text); }
+        else if (ev.type === "error") { setStatus(""); addBubble("error", ev.text); }
+        else if (ev.type === "stopped") { setStatus(""); addBubble("system", "Stopped."); }
+      },
+    });
+  }
+
   async function sendPrompt() {
     if (currentRun) return;
     const text = prompt.value.trim();
     if (!text) return;
     prompt.value = ""; prompt.style.height = "auto";
     addBubble("user", text);
+    // apply the current thinking mode to the system prompt for this turn
+    session.messages[0].content = session.baseSystem + thinkingDirective(getThinking());
+    session.turnCommits = 0;
     session.messages.push({ role: "user", content: text });
     setRunning(true);
 
     let stopped = false;
     currentRun = { stop: () => { stopped = true; $("btn-stop").disabled = true; } };
-    let liveTool = null;
     try {
-      await AC.runAgent({
-        model: session.model,
-        tools: session.tools,
-        messages: session.messages,
-        shouldStop: () => stopped,
-        onEvent: (ev) => {
-          armIdle();
-          if (ev.type === "thinking") setStatus("thinking…");
-          else if (ev.type === "tool") { liveTool = addTool(ev.name, ev.args); setStatus(ev.name + "…"); }
-          else if (ev.type === "tool_result") { if (liveTool) finishTool(liveTool, ev.out); }
-          else if (ev.type === "answer") { setStatus(""); if (ev.text) addBubble("assistant", ev.text); }
-          else if (ev.type === "error") { setStatus(""); addBubble("error", ev.text); }
-          else if (ev.type === "stopped") { setStatus(""); addBubble("system", "Stopped."); }
-        },
-      });
+      await runTurn(() => stopped);
+      // Max thinking: one fresh-eyes self-review pass, but only if it actually
+      // changed files (no busywork on a question). Bounded to a single pass.
+      if (!stopped && getThinking() === "max" && session.turnCommits > 0) {
+        setStatus("reviewing…");
+        session.messages.push({ role: "user", content: REVIEW_NUDGE });
+        await runTurn(() => stopped);
+      }
     } catch (e) {
       addBubble("error", e.message || String(e));
     } finally {
@@ -425,14 +441,54 @@
     reader.readAsDataURL(f);
   }
 
+  // ================================================================ PREFERENCES
+  // Non-secret settings live in plain localStorage. The model NAME isn't a
+  // secret (the key is), so it can live here and override what setup stored.
+  function pref(k, def) { const v = localStorage.getItem(k); return v === null ? def : v; }
+  function getModelName() { return pref("mnm.model", "") || (session && session.secrets && session.secrets.model) || "glm-4.6"; }
+  function getThinking() { return pref("mnm.thinking", "medium"); }
+  function confirmCommits() { return pref("mnm.confirm", "1") === "1"; }
+  function buildModel() {
+    session.model = AC.makeModel({ apiKey: session.secrets.modelKey, model: getModelName(), baseUrl: session.secrets.baseUrl });
+  }
+  function thinkingDirective(mode) {
+    if (mode === "low") return "\n\nBe fast and direct: minimal deliberation, short answers.";
+    if (mode === "high") return "\n\nThink carefully, step by step, before acting; after each edit re-read it to check correctness.";
+    if (mode === "max") return "\n\nThink rigorously and be exhaustive: plan before acting, verify every change against the request, and prefer correctness over speed.";
+    return ""; // medium
+  }
+  const REVIEW_NUDGE = "Now review the change(s) you just made with fresh eyes. If anything is incorrect, " +
+    "incomplete, or doesn't match my request, fix it now. If it's all correct, reply APPROVED.";
+  function setSegOn(seg, val) {
+    for (const b of seg.querySelectorAll("button[data-v]")) b.classList.toggle("on", b.dataset.v === val);
+  }
+
   // ================================================================ SETTINGS SHEET
-  function openSettings() { renderBgPicker($("settings-bg")); $("settings-backdrop").hidden = false; }
+  function openSettings() {
+    renderBgPicker($("settings-bg"));
+    $("set-model").value = getModelName();
+    setSegOn($("set-thinking"), getThinking());
+    $("set-confirm").checked = confirmCommits();
+    $("settings-backdrop").hidden = false;
+  }
   function closeSettings() { $("settings-backdrop").hidden = true; }
   $("btn-repo-settings").addEventListener("click", openSettings);
   $("btn-chat-settings").addEventListener("click", openSettings);
   $("btn-settings-done").addEventListener("click", closeSettings);
   $("settings-backdrop").addEventListener("click", (e) => { if (e.target === $("settings-backdrop")) closeSettings(); });
   $("btn-settings-lock").addEventListener("click", () => { closeSettings(); lock(); });
+  $("set-model").addEventListener("change", () => {
+    localStorage.setItem("mnm.model", $("set-model").value.trim() || "glm-4.6");
+    if (session) buildModel();
+  });
+  $("set-thinking").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-v]"); if (!b) return;
+    localStorage.setItem("mnm.thinking", b.dataset.v);
+    setSegOn($("set-thinking"), b.dataset.v);
+  });
+  $("set-confirm").addEventListener("change", () => {
+    localStorage.setItem("mnm.confirm", $("set-confirm").checked ? "1" : "0");
+  });
 
   // ================================================================ BOOT
   function boot() {
