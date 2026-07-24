@@ -1,11 +1,15 @@
 /* Service worker — makes the app installable and available offline.
  *
- * SECURITY: this SW only ever caches the static app shell (our own same-origin
- * files). It NEVER touches requests to the model API or GitHub — those are
- * network-only and their responses (which carry your code and would carry auth)
- * are never stored. Cross-origin and non-GET requests bypass the cache entirely.
+ * Strategy: NETWORK-FIRST for our own same-origin files, with a cache fallback.
+ * A new deploy is therefore picked up on the next load when online, while the
+ * app still opens offline from the last-cached shell. (The previous cache-first
+ * version could pin a phone to a stale build indefinitely.)
+ *
+ * SECURITY: only same-origin GETs are ever cached — our own static shell. Calls
+ * to the model API and GitHub (cross-origin, and/or non-GET) bypass the SW
+ * entirely and are never stored.
  */
-const CACHE = "mnm-shell-v1";
+const CACHE = "mnm-shell-v2";
 const SHELL = [
   "./index.html",
   "./app.js",
@@ -20,7 +24,8 @@ self.addEventListener("install", (e) => {
 
 self.addEventListener("activate", (e) => {
   e.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -28,10 +33,19 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const req = e.request;
   const url = new URL(req.url);
-  // Only serve our own same-origin GETs from cache. Everything else — every API
-  // call — goes straight to the network and is never cached.
-  if (req.method !== "GET" || url.origin !== self.location.origin) return;
+  if (req.method !== "GET" || url.origin !== self.location.origin) return; // API traffic bypasses the SW
   e.respondWith(
-    caches.match(req, { ignoreSearch: true }).then((hit) => hit || fetch(req))
+    fetch(req)
+      .then((res) => {
+        if (res && res.ok) {
+          const copy = res.clone();
+          caches.open(CACHE).then((c) => c.put(req, copy));
+        }
+        return res;
+      })
+      .catch(() =>
+        caches.match(req, { ignoreSearch: true })
+          .then((hit) => hit || caches.match("./index.html")) // offline: fall back to the app shell
+      )
   );
 });

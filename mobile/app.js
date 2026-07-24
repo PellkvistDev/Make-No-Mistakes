@@ -422,6 +422,17 @@
     else show("screen-setup");
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("sw.js").catch(() => {});
+      // When a new SW takes control (a fresh deploy), reload once so the page
+      // runs the new code instead of whatever the old SW already handed us.
+      // Guarded on an existing controller so a first-ever install doesn't loop.
+      if (navigator.serviceWorker.controller) {
+        let refreshing = false;
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+          if (refreshing) return;
+          refreshing = true;
+          location.reload();
+        });
+      }
     }
   }
   boot();
