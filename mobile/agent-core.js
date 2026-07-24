@@ -163,7 +163,7 @@
     }
     const BIN = /\.(png|jpg|jpeg|gif|webp|ico|pdf|zip|gz|woff2?|ttf|mp4|mp3|wasm|lock)$/i;
 
-    return {
+    const api = {
       async list_dir(a) {
         const dir = (a.path || "").replace(/^\.?\/*/, "").replace(/\/$/, "");
         const t = await tree();
@@ -241,6 +241,12 @@
         return "Edited and committed " + a.path;
       },
     };
+    // Delegation: only exposed when the host wires a spawner (main agent only,
+    // so sub-agents can't spawn further sub-agents).
+    if (opts.spawn) {
+      api.spawn_agent = async (a) => String(await opts.spawn(a.task || "", a.context || ""));
+    }
+    return api;
   }
 
   const TOOL_SCHEMAS = [
@@ -257,6 +263,14 @@
   }
   function str(d) { return { type: "string", description: d }; }
   function bool(d) { return { type: "boolean", description: d }; }
+
+  // Advertised only on the main agent's turn (never to sub-agents).
+  const SPAWN_SCHEMA = tool("spawn_agent",
+    "Delegate one self-contained sub-task to a fresh sub-agent that works on its own and reports back " +
+    "(e.g. 'add tests for X', 'refactor Y'). It can read and edit files but cannot spawn further sub-agents. " +
+    "Use it to keep big tasks organised; do the work yourself for small ones.",
+    { task: str("The self-contained task for the sub-agent"), context: str("Anything it should know: constraints, files, goals") },
+    ["task"]);
 
   // --- the agent loop ------------------------------------------------------
   async function runAgent(cfg) {
@@ -296,9 +310,17 @@
     "prefer search_code/grep to find things; and in your final reply note anything that still needs to " +
     "be run or verified on a real machine. Be concise.";
 
+  const SUBAGENT_PROMPT =
+    "You are a focused sub-agent of Make No Mistakes, working on the user's PHONE against a GitHub repo " +
+    "(your filesystem, via the API). You were handed ONE self-contained task. Do it fully: read what you " +
+    "need, make correct, minimal edits (each write is committed), then reply with a SHORT report of what " +
+    "you changed and anything still to verify on a real machine. You cannot run code or spawn further " +
+    "sub-agents. Be concise.";
+
   const CoreAPI = {
     encryptVault, decryptVault, deriveKey, PBKDF2_ITERS,
-    makeGitHub, makeModel, makeTools, runAgent, TOOL_SCHEMAS, SYSTEM_PROMPT,
+    makeGitHub, makeModel, makeTools, runAgent, TOOL_SCHEMAS, SPAWN_SCHEMA,
+    SYSTEM_PROMPT, SUBAGENT_PROMPT,
     _b64: { bytesToB64, b64ToBytes },
   };
   if (typeof module !== "undefined" && module.exports) module.exports = CoreAPI;

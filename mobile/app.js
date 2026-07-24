@@ -20,6 +20,7 @@
   // In-memory session (cleared on lock). Never persisted.
   let session = null; // { secrets, gh, model, repo:{owner,repo,branch,full_name} }
   let currentRun = null; // { stop }
+  let stopFlag = false;  // shared stop signal (main turn + sub-agents)
 
   // ---------------------------------------------------------------- screens
   const SCREENS = ["screen-setup", "screen-unlock", "screen-repo", "screen-chat"];
@@ -180,11 +181,11 @@
     session.baseSystem = AC.SYSTEM_PROMPT + "\n\nRepository: " + fullName + " (branch " + branch + ").";
     session.messages = [{ role: "system", content: session.baseSystem }];
     session.turnCommits = 0;
-    session.tools = AC.makeTools(session.gh, {
-      confirmWrite: confirmWrite,
-      onCommit: (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); },
-    });
-    // Read-only subset for plan mode (same instances, so the fetch cache is shared).
+    const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); };
+    // Sub-agent tools have NO spawn (depth 1); the main tools add spawn_agent.
+    session.subTools = AC.makeTools(session.gh, { confirmWrite, onCommit });
+    session.tools = AC.makeTools(session.gh, { confirmWrite, onCommit, spawn: runSubAgent });
+    // Read-only subset for plan mode.
     session.readTools = {};
     for (const n of READ_TOOL_NAMES) session.readTools[n] = session.tools[n];
     clearAttachments();
@@ -314,24 +315,50 @@
     });
   }
 
+  // Advertise spawn_agent on the main turn only when sub-agents are enabled.
+  function mainSchemas() { return subagentsOn() ? AC.TOOL_SCHEMAS.concat([AC.SPAWN_SCHEMA]) : AC.TOOL_SCHEMAS; }
+
   // A normal build turn, plus one Max self-review pass when it changed files.
   async function runBuild(getStopped) {
     session.messages[0].content = session.baseSystem + thinkingDirective(getThinking());
-    await runTurn(getStopped, session.tools);
+    await runTurn(getStopped, session.tools, mainSchemas());
     if (!getStopped() && getThinking() === "max" && session.turnCommits > 0) {
       setStatus("reviewing…");
       session.messages.push({ role: "user", content: REVIEW_NUDGE });
-      await runTurn(getStopped, session.tools);
+      await runTurn(getStopped, session.tools, mainSchemas());
     }
+  }
+
+  // A delegated sub-agent: its own history + tools (no spawn), reported inline.
+  async function runSubAgent(task, context) {
+    addBubble("system", "🧬 Sub-agent: " + task);
+    const messages = [
+      { role: "system", content: AC.SUBAGENT_PROMPT + "\n\nRepository: " + session.repo.full_name + " (branch " + session.repo.branch + ")." },
+      { role: "user", content: task + (context ? "\n\nContext: " + context : "") },
+    ];
+    let liveTool = null, report = "";
+    await AC.runAgent({
+      model: session.model, tools: session.subTools, messages,
+      toolSchemas: AC.TOOL_SCHEMAS, maxSteps: 16, shouldStop: () => stopFlag,
+      onEvent: (ev) => {
+        armIdle();
+        if (ev.type === "tool") { liveTool = addTool("↳ " + ev.name, ev.args); setStatus("sub · " + ev.name + "…"); }
+        else if (ev.type === "tool_result") { if (liveTool) finishTool(liveTool, ev.out); }
+        else if (ev.type === "answer") { report = ev.text || ""; }
+        else if (ev.type === "error") { report = "Sub-agent error: " + ev.text; }
+      },
+    });
+    if (report) addBubble("assistant", "🧬 " + report);
+    return report || "(the sub-agent finished without a report)";
   }
 
   // Wrap a run: manage the running state, stop control, and errors.
   async function withRun(fn) {
     if (currentRun) return;
-    let stopped = false;
-    currentRun = { stop: () => { stopped = true; $("btn-stop").disabled = true; } };
+    stopFlag = false;
+    currentRun = { stop: () => { stopFlag = true; $("btn-stop").disabled = true; } };
     setRunning(true);
-    try { await fn(() => stopped); }
+    try { await fn(() => stopFlag); }
     catch (e) { addBubble("error", e.message || String(e)); }
     finally { setRunning(false); currentRun = null; }
   }
@@ -557,6 +584,7 @@
   function getThinking() { return pref("mnm.thinking", "medium"); }
   function confirmCommits() { return pref("mnm.confirm", "1") === "1"; }
   function planMode() { return pref("mnm.plan", "0") === "1"; }
+  function subagentsOn() { return pref("mnm.subagents", "1") === "1"; }
   const READ_TOOL_NAMES = ["list_dir", "glob", "read_file", "grep", "search_code"];
   const READ_SCHEMAS = AC.TOOL_SCHEMAS.filter((s) => READ_TOOL_NAMES.includes(s.function.name));
   const PLAN_DIRECTIVE = "\n\nPLAN MODE: do NOT edit or commit anything. Use the read/search tools to " +
@@ -583,6 +611,7 @@
     $("set-model").value = getModelName();
     setSegOn($("set-thinking"), getThinking());
     $("set-plan").checked = planMode();
+    $("set-subagents").checked = subagentsOn();
     $("set-confirm").checked = confirmCommits();
     $("settings-backdrop").hidden = false;
   }
@@ -603,6 +632,9 @@
   });
   $("set-plan").addEventListener("change", () => {
     localStorage.setItem("mnm.plan", $("set-plan").checked ? "1" : "0");
+  });
+  $("set-subagents").addEventListener("change", () => {
+    localStorage.setItem("mnm.subagents", $("set-subagents").checked ? "1" : "0");
   });
   $("set-confirm").addEventListener("change", () => {
     localStorage.setItem("mnm.confirm", $("set-confirm").checked ? "1" : "0");

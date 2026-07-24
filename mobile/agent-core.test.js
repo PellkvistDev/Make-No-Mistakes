@@ -188,6 +188,20 @@ test("tools: edit_file refuses ambiguous old_string without replace_all", async 
   assert.match(out, /appears 3/);
 });
 
+test("tools: spawn_agent exists only when a spawner is wired, and forwards args", async () => {
+  const plain = toolsOverFiles({ "a.txt": "x" });
+  assert.equal(typeof plain.spawn_agent, "undefined", "no spawn tool without opts.spawn");
+
+  let got = null;
+  const withSpawn = toolsOverFiles({ "a.txt": "x" }, {
+    spawn: async (task, context) => { got = { task, context }; return "sub done: " + task; },
+  });
+  assert.equal(typeof withSpawn.spawn_agent, "function");
+  const out = await withSpawn.spawn_agent({ task: "add tests", context: "for auth" });
+  assert.deepEqual(got, { task: "add tests", context: "for auth" });
+  assert.equal(out, "sub done: add tests");
+});
+
 // ------------------------------------------------------------- agent loop --
 
 test("runAgent: executes a tool call then returns the final answer", async () => {
