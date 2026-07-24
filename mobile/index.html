@@ -174,6 +174,10 @@
     <div id="filepick-backdrop" class="backdrop" hidden>
       <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="filepick-title">
         <h3 id="filepick-title">Attach files</h3>
+        <button id="filepick-upload" class="ghost" type="button" style="width:100%">📷 Upload from phone</button>
+        <input id="filepick-input" type="file" multiple hidden
+          accept="image/*,text/*,.md,.js,.ts,.jsx,.tsx,.json,.py,.css,.html,.yml,.yaml,.go,.rs,.java,.c,.cpp,.h,.sh,.txt,.csv" />
+        <div class="section-label" style="margin:14px 0 6px">Or from this repo</div>
         <input id="filepick-search" class="setting-input" placeholder="Search files…" spellcheck="false" autocapitalize="off" autocomplete="off" />
         <div id="filepick-list" class="filepick-list"></div>
         <div class="dialog-actions">

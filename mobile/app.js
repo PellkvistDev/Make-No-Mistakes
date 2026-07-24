@@ -229,42 +229,62 @@
   $("btn-stop").addEventListener("click", () => { if (currentRun) currentRun.stop(); });
 
   // ---------------------------------------------------------- attachments
-  let pendingAttachments = [];
-  function clearAttachments() { pendingAttachments = []; renderChips(); }
+  // Each item is one of:
+  //   { kind:"repo", path }            — a file already in the GitHub repo
+  //   { kind:"text", name, text }      — a text/code file uploaded from the phone
+  //   { kind:"image", name, dataUrl }  — an image uploaded from the phone (vision)
+  let attachments = [];
+  function clearAttachments() { attachments = []; renderChips(); }
+  function attLabel(a) { return a.path ? a.path.split("/").pop() : a.name; }
   function renderChips() {
     const box = $("attach-chips");
     box.innerHTML = "";
-    box.hidden = pendingAttachments.length === 0;
-    for (const p of pendingAttachments) {
+    box.hidden = attachments.length === 0;
+    attachments.forEach((a, i) => {
       const chip = document.createElement("div");
       chip.className = "chip";
       const label = document.createElement("span");
-      label.textContent = p.split("/").pop();
+      label.textContent = (a.kind === "image" ? "🖼 " : "") + attLabel(a);
       const x = document.createElement("button");
       x.type = "button"; x.textContent = "✕";
-      x.onclick = () => { pendingAttachments = pendingAttachments.filter((q) => q !== p); renderChips(); };
+      x.onclick = () => { attachments.splice(i, 1); renderChips(); };
       chip.append(label, x);
       box.appendChild(chip);
-    }
+    });
   }
   function attachmentNote() {
-    return pendingAttachments.length ? "\n\n📎 " + pendingAttachments.map((p) => p.split("/").pop()).join(", ") : "";
+    return attachments.length ? "\n\n📎 " + attachments.map(attLabel).join(", ") : "";
   }
-  // Fetch each attached file and prepend its contents as context.
+  function isVisionModel(m) { return /v-flash|vision|4\.\dv/i.test(m || ""); }
+
+  // Build the message: text/code files are prepended as context; images become
+  // an OpenAI-style multimodal content array (for a vision model to see).
   async function composeMessage(text) {
-    if (!pendingAttachments.length) return text;
-    const parts = [];
-    for (const p of pendingAttachments) {
-      try { const f = await session.gh.getFile(p); parts.push("=== " + p + " ===\n" + f.text); }
-      catch { parts.push("=== " + p + " (couldn't read) ==="); }
+    if (!attachments.length) return text;
+    const parts = [], images = [];
+    for (const a of attachments) {
+      if (a.kind === "repo") {
+        try { const f = await session.gh.getFile(a.path); parts.push("=== " + a.path + " ===\n" + f.text); }
+        catch { parts.push("=== " + a.path + " (couldn't read) ==="); }
+      } else if (a.kind === "text") {
+        parts.push("=== " + a.name + " ===\n" + a.text);
+      } else if (a.kind === "image") {
+        images.push(a);
+      }
     }
-    return "Attached files for context:\n\n" + parts.join("\n\n") + "\n\n---\n\n" + (text || "(see attached files)");
+    const ctx = parts.length ? "Attached files for context:\n\n" + parts.join("\n\n") + "\n\n---\n\n" : "";
+    const body = ctx + (text || (images.length ? "(see attached image)" : "(see attached files)"));
+    if (!images.length) return body;
+    return [{ type: "text", text: body }].concat(images.map((im) => ({ type: "image_url", image_url: { url: im.dataUrl } })));
   }
 
   $("btn-attach").addEventListener("click", openFilePicker);
   $("filepick-done").addEventListener("click", () => { $("filepick-backdrop").hidden = true; });
   $("filepick-backdrop").addEventListener("click", (e) => { if (e.target === $("filepick-backdrop")) $("filepick-backdrop").hidden = true; });
   $("filepick-search").addEventListener("input", renderFileList);
+  $("filepick-upload").addEventListener("click", () => $("filepick-input").click());
+  $("filepick-input").addEventListener("change", () => handleUploads($("filepick-input")));
+
   let fileTree = [];
   async function openFilePicker() {
     if (!session || !session.gh) return;
@@ -283,16 +303,53 @@
     if (!matches.length) { list.innerHTML = "<div class='muted' style='padding:10px'>no files</div>"; return; }
     for (const p of matches) {
       const item = document.createElement("div");
-      item.className = "fp-item" + (pendingAttachments.includes(p) ? " picked" : "");
+      const picked = attachments.some((a) => a.kind === "repo" && a.path === p);
+      item.className = "fp-item" + (picked ? " picked" : "");
       item.textContent = p;
       item.onclick = () => {
-        if (pendingAttachments.includes(p)) pendingAttachments = pendingAttachments.filter((q) => q !== p);
-        else pendingAttachments.push(p);
+        const idx = attachments.findIndex((a) => a.kind === "repo" && a.path === p);
+        if (idx >= 0) attachments.splice(idx, 1); else attachments.push({ kind: "repo", path: p });
         item.classList.toggle("picked");
         renderChips();
       };
       list.appendChild(item);
     }
+  }
+
+  // Local uploads from the phone: images are downscaled; other files read as text.
+  async function handleUploads(input) {
+    const files = [...(input.files || [])];
+    input.value = "";
+    for (const f of files) {
+      try {
+        if (f.type.startsWith("image/")) {
+          attachments.push({ kind: "image", name: f.name, dataUrl: await downscaleImage(f, 1024) });
+        } else {
+          const text = await f.text();
+          attachments.push({ kind: "text", name: f.name, text: text.slice(0, 100000) });
+        }
+      } catch { toast("Couldn't read " + f.name); }
+    }
+    renderChips();
+    $("filepick-backdrop").hidden = true;
+  }
+  function downscaleImage(file, max) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          let w = img.width, h = img.height;
+          const s = Math.min(1, max / Math.max(w, h));
+          w = Math.round(w * s); h = Math.round(h * s);
+          const c = document.createElement("canvas"); c.width = w; c.height = h;
+          c.getContext("2d").drawImage(img, 0, 0, w, h);
+          try { resolve(c.toDataURL("image/jpeg", 0.85)); } catch { resolve(reader.result); }
+        };
+        img.onerror = reject; img.src = reader.result;
+      };
+      reader.onerror = reject; reader.readAsDataURL(file);
+    });
   }
 
   function runTurn(shouldStop, tools, toolSchemas) {
@@ -366,9 +423,11 @@
   async function sendPrompt() {
     if (currentRun) return;
     const text = prompt.value.trim();
-    if (!text && !pendingAttachments.length) return;
+    if (!text && !attachments.length) return;
     prompt.value = ""; prompt.style.height = "auto";
-
+    if (attachments.some((a) => a.kind === "image") && !isVisionModel(getModelName())) {
+      toast("Images need a vision model — set glm-4.6v-flash in Settings.");
+    }
     addBubble("user", (text || "(attached files)") + attachmentNote());
     const content = await composeMessage(text);   // fetches + prepends any attachments
     clearAttachments();
