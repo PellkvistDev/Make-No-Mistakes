@@ -787,6 +787,38 @@
           nothing leaves the phone except calls to the model and GitHub.</span></div>
         <div class="row-actions"><button id="gh-get-app" class="btn btn-primary">Show QR code</button></div>
       </div>
+
+      <h3 style="margin-top:22px">Sync chats across devices</h3>
+      <p class="row-sub">Keep your chats on a private <code>makenomistakes/state</code> branch of the
+        connected repo, so a conversation you start on your phone continues here — and vice versa.
+        Everything is encrypted on your device with a <strong>sync passphrase</strong> before it's
+        uploaded: GitHub only ever stores ciphertext, and the passphrase never leaves this machine.
+        Use the <em>same</em> passphrase on every device.</p>
+      <p class="row-sub" id="sync-unavailable" hidden>Encryption isn't available in this build, so
+        chat sync is turned off.</p>
+      <div id="sync-noset">
+        <div class="provider-form">
+          <input id="sync-pass" class="text-input" type="password" placeholder="Sync passphrase (min 6 characters)">
+          <div class="sheet-actions"><button id="sync-pass-save" class="btn btn-primary">Enable sync</button></div>
+        </div>
+      </div>
+      <div id="sync-set" hidden>
+        <div class="row"><div class="row-text"><label>Sync passphrase</label>
+          <span class="row-sub">Stored in your OS credential store, like your GitHub token.</span></div>
+          <div class="row-actions">
+            <button id="sync-pass-change" class="btn btn-ghost">Change</button>
+            <button id="sync-pass-forget" class="btn btn-danger-ghost">Forget</button>
+          </div>
+        </div>
+        <div class="row"><div class="row-text"><label>Synced chats</label>
+          <span class="row-sub" id="sync-repo-note">Chats stored for this repository</span></div>
+          <div class="row-actions">
+            <button id="sync-push" class="btn btn-ghost">Upload this chat</button>
+            <button id="sync-refresh" class="btn btn-primary">Load synced chats</button>
+          </div>
+        </div>
+        <div id="sync-chat-list" class="provider-list" hidden></div>
+      </div>
     </section>
 
     <section data-tab="tasks">

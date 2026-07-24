@@ -31,6 +31,7 @@ from ..config import (BUILTIN_PROVIDER_NAME, CONFIG_DIR, PERMISSION_MODES, Confi
 from ..events import AgentEvents
 from .. import githubsync
 from .. import qrcode_util
+from .. import syncstore
 from ..notify import APP_NAME, notify
 from ..prompts import EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT
 from ..sessions import SessionStore, new_id, to_display
@@ -1833,6 +1834,134 @@ class Api:
         except Exception as e:
             return {"url": url, "error": str(e)}
         return {"url": url, "svg": svg}
+
+    # -- Cross-device session sync (shared with the phone app) --------------- #
+    #
+    # Chats live encrypted on the repo's orphan `makenomistakes/state` branch,
+    # under a key derived from a SYNC PASSPHRASE that is separate from the
+    # GitHub token and never leaves this machine (stored via the same secure
+    # secretstore). GitHub only ever sees ciphertext. See glmcode/syncstore.py.
+
+    def sync_env(self):
+        """What the UI needs to render the sync controls."""
+        coords = self._active_repo_coords()
+        return {
+            "available": syncstore.crypto_available(),
+            "passphrase_set": bool(syncstore.load_passphrase()),
+            "token_present": bool(self._gh_token()),
+            "repo": f"{coords[1]}/{coords[2]}" if coords else "",
+            "branch": syncstore.STATE_BRANCH,
+        }
+
+    def sync_set_passphrase(self, passphrase: str):
+        """Store the sync passphrase. If this chat is on a connected repo, the
+        passphrase is VERIFIED against any existing store first, so a mismatch
+        with your phone is caught here instead of silently forking history."""
+        passphrase = (passphrase or "").strip()
+        if len(passphrase) < 6:
+            return {"error": "Sync passphrase must be at least 6 characters."}
+        if not syncstore.crypto_available():
+            return {"error": "Encryption isn't available in this build "
+                             "(the 'cryptography' package is required for sync)."}
+        coords = self._active_repo_coords()
+        token = self._gh_token()
+        if coords and token:
+            _, owner, repo, _ = coords
+            try:
+                syncstore.open_sync(syncstore.StateRepo(token, owner, repo), passphrase)
+            except (syncstore.SyncError, githubsync.GitHubError) as e:
+                return {"error": str(e)}
+        syncstore.save_passphrase(passphrase)
+        return {"ok": True, **self.sync_env()}
+
+    def sync_forget_passphrase(self):
+        syncstore.forget_passphrase()
+        return {"ok": True, **self.sync_env()}
+
+    def _open_sync_store(self):
+        """(store, error) for the active chat's repo."""
+        coords = self._active_repo_coords()
+        if coords is None:
+            return None, "This chat isn't a connected GitHub repository."
+        _, owner, repo, _ = coords
+        try:
+            _key, store, _created = syncstore.open_for_repo(owner, repo,
+                                                            token=self._gh_token())
+            return store, None
+        except (syncstore.SyncError, githubsync.GitHubError) as e:
+            return None, str(e)
+
+    def sync_list_chats(self):
+        """Chats on the state branch (newest first) — including ones your phone
+        wrote. Marked `local` when this machine already has that session."""
+        store, err = self._open_sync_store()
+        if err:
+            return {"error": err}
+        try:
+            rows = store.list()
+        except (syncstore.SyncError, githubsync.GitHubError) as e:
+            return {"error": str(e)}
+        local_ids = {s["id"] for s in self._store.list()}
+        for r in rows:
+            r["local"] = r.get("id") in local_ids
+        return {"chats": rows}
+
+    def sync_pull_chat(self, chat_id: str):
+        """Download one synced chat into the local session store and open it."""
+        store, err = self._open_sync_store()
+        if err:
+            return {"error": err}
+        try:
+            chat = store.load(chat_id)
+        except (syncstore.SyncError, githubsync.GitHubError) as e:
+            return {"error": str(e)}
+        sess = syncstore.chat_to_session(chat)
+        if not sess.get("messages"):
+            return {"error": "That chat has no messages yet."}
+        # Land it in the CURRENT workdir: a phone-written chat has no local
+        # folder, and a desktop cwd from another machine won't exist here.
+        cs = self._active
+        cwd = sess.get("cwd") or ""
+        if not cwd or not Path(cwd).is_dir():
+            cwd = str(cs.agent.workdir) if cs else str(self._clone_root())
+        res = self._activate_session(sess["id"], sess["messages"], cwd, 0, 0,
+                                     sess.get("todos", []), sess.get("title", ""),
+                                     model_provider=sess.get("model_provider", ""),
+                                     model=sess.get("model", ""))
+        self._save_current()
+        res["sessions"] = self.list_sessions()
+        return res
+
+    def sync_push_chat(self, sid: str = ""):
+        """Upload a chat (default: the active one) to the state branch."""
+        sid = sid or self.session_id or ""
+        if not sid:
+            return {"error": "Open a chat first."}
+        live = self._chats.get(sid)
+        if live:
+            self._save_chat(live)  # flush the newest turn before uploading
+        data = self._store.load(sid)
+        if not data:
+            return {"error": "session not found"}
+        store, err = self._open_sync_store()
+        if err:
+            return {"error": err}
+        try:
+            store.save(syncstore.session_to_chat(data))
+        except (syncstore.SyncError, githubsync.GitHubError) as e:
+            return {"error": str(e)}
+        return {"ok": True, "id": sid}
+
+    def sync_delete_chat(self, chat_id: str):
+        """Remove a chat from the shared store (all devices). Local copy stays."""
+        store, err = self._open_sync_store()
+        if err:
+            return {"error": err}
+        try:
+            store.remove(chat_id)
+        except (syncstore.SyncError, githubsync.GitHubError) as e:
+            return {"error": str(e)}
+        return {"ok": True}
 
     def _maybe_autopull(self, workdir: Path) -> None:
         """Background best-effort pull when opening a connected session. Skips a

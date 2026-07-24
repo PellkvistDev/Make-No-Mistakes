@@ -5,3 +5,6 @@ pywebview>=5.0
 pillow>=10.0
 duckduckgo-search>=6.0
 segno>=1.5
+# AES-GCM for cross-device chat sync (and the encrypted-file secret store
+# fallback). Without it the app still runs; chat sync reports itself off.
+cryptography>=42.0

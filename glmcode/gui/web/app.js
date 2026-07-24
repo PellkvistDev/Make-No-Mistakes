@@ -3394,6 +3394,7 @@ async function openSettings() {
   renderPathRules();
   refreshGithubEnv();
   refreshGithubRepo();
+  refreshSyncEnv();
   populateTasks();
   try {
     const u = await api().usage();
@@ -3723,6 +3724,124 @@ async function openPhoneApp() {
   else { err.textContent = res.error || "Couldn't build the QR code."; err.hidden = false; }
 }
 $("gh-get-app").addEventListener("click", openPhoneApp);
+
+// --- Cross-device chat sync (shared encrypted store with the phone app) ---
+// The passphrase is typed here and handed straight to the backend, which
+// verifies it against the repo's state branch and stores it in the OS
+// credential store. It is never kept in this page's state.
+let syncEnv = {};
+
+async function refreshSyncEnv() {
+  try { syncEnv = await api().sync_env(); } catch (e) { syncEnv = { available: false }; }
+  renderSyncSettings();
+}
+
+function renderSyncSettings() {
+  const e = syncEnv || {};
+  const usable = e.available !== false;
+  const set = usable && !!e.passphrase_set;
+  if ($("sync-unavailable")) $("sync-unavailable").hidden = usable;
+  if ($("sync-noset")) $("sync-noset").hidden = !usable || set;
+  if ($("sync-set")) $("sync-set").hidden = !set;
+  const note = $("sync-repo-note");
+  if (note) {
+    note.textContent = e.repo
+      ? `Chats stored on ${e.branch} in ${e.repo}`
+      : "Open a chat in a connected GitHub repository to sync it.";
+  }
+}
+
+async function saveSyncPassphrase(btn) {
+  const p = $("sync-pass").value.trim();
+  if (p.length < 6) { toast("Use at least 6 characters.", "error", 3000); return; }
+  const res = await ghAction(btn, () => api().sync_set_passphrase(p));
+  if (!res) return;
+  $("sync-pass").value = "";
+  syncEnv = res; renderSyncSettings();
+  toast("Chat sync enabled — use the same passphrase on your phone.", "info", 5000);
+}
+
+$("sync-pass-save").addEventListener("click", () => saveSyncPassphrase($("sync-pass-save")));
+$("sync-pass").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") saveSyncPassphrase($("sync-pass-save"));
+});
+$("sync-pass-change").addEventListener("click", () => {
+  $("sync-set").hidden = true;
+  $("sync-noset").hidden = false;
+  $("sync-pass").focus();
+});
+$("sync-pass-forget").addEventListener("click", async () => {
+  if (!confirm("Forget the sync passphrase on this computer? Your synced chats stay on GitHub " +
+               "(still encrypted), and you can re-enter the passphrase to read them again.")) return;
+  syncEnv = await api().sync_forget_passphrase();
+  $("sync-chat-list").hidden = true;
+  renderSyncSettings();
+  toast("Sync passphrase removed from this computer.", "info", 3000);
+});
+
+$("sync-push").addEventListener("click", async () => {
+  if (await ghAction($("sync-push"), () => api().sync_push_chat("")))
+    toast("This chat is now on your other devices.", "info", 3000);
+});
+
+$("sync-refresh").addEventListener("click", () => loadSyncedChats($("sync-refresh")));
+
+async function loadSyncedChats(btn) {
+  const list = $("sync-chat-list");
+  const res = await ghAction(btn, () => api().sync_list_chats(), false);
+  if (!res) return;
+  list.hidden = false;
+  list.innerHTML = "";
+  for (const c of res.chats || []) {
+    const row = document.createElement("div");
+    row.className = "gh-repo-row sync-chat-row";
+    const name = document.createElement("span");
+    name.className = "gh-repo-name";
+    name.textContent = c.title || "Untitled";
+    const tag = document.createElement("span");
+    tag.className = "gh-repo-tag";
+    tag.textContent = [relTimeShort(c.updated), c.local ? "on this computer" : "from another device"]
+      .filter(Boolean).join(" · ");
+    const open = document.createElement("button");
+    open.className = "btn btn-ghost mini";
+    open.textContent = c.local ? "Open" : "Download";
+    open.addEventListener("click", () => pullSyncedChat(c.id, open));
+    const del = document.createElement("button");
+    del.className = "btn btn-danger-ghost mini";
+    del.textContent = "Delete";
+    del.addEventListener("click", () => deleteSyncedChat(c.id, c.title, btn));
+    row.append(name, tag, open, del);
+    list.appendChild(row);
+  }
+  if (!list.children.length)
+    list.innerHTML = '<div class="row-sub">No synced chats yet — upload this one to get started.</div>';
+}
+
+function relTimeShort(ms) {
+  if (!ms) return "";
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.floor(s / 60) + "m ago";
+  if (s < 86400) return Math.floor(s / 3600) + "h ago";
+  return Math.floor(s / 86400) + "d ago";
+}
+
+async function pullSyncedChat(id, btn) {
+  const res = await ghAction(btn, () => api().sync_pull_chat(id));
+  if (!res) return;
+  $("settings-backdrop").hidden = true;
+  applySession(res);
+  input.focus();
+  toast("Opened the synced chat.", "info", 2500);
+}
+
+async function deleteSyncedChat(id, title, refreshBtn) {
+  if (!confirm(`Delete “${title || "this chat"}” from your synced chats? ` +
+               "It's removed from all your devices; any local copy stays.")) return;
+  const res = await ghAction(refreshBtn, () => api().sync_delete_chat(id), false);
+  if (!res) return;
+  loadSyncedChats(refreshBtn);
+}
 $("phoneapp-close").addEventListener("click", () => { $("phoneapp-backdrop").hidden = true; });
 $("phoneapp-backdrop").addEventListener("click", (e) => {
   if (e.target === $("phoneapp-backdrop")) $("phoneapp-backdrop").hidden = true;
