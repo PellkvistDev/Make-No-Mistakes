@@ -23,8 +23,14 @@ html, body {
   overscroll-behavior: none;
 }
 #app, .screen { height: 100%; }
+#app { position: relative; z-index: 1; }
 .screen { display: flex; flex-direction: column; }
 .screen[hidden] { display: none; }
+
+/* Custom background sits above the base body colour, below the app content. */
+#bg-layer { position: fixed; inset: 0; z-index: 0; pointer-events: none; background-size: cover; background-position: center; }
+#bg-layer.image::after { content: ""; position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(11,13,16,.42), rgba(11,13,16,.66)); }
 button, input, textarea, select { font: inherit; color: inherit; }
 button { cursor: pointer; border: none; background: none; }
 
@@ -99,8 +105,25 @@ button.link.danger { color: var(--danger); }
 }
 .repo-list li:active { background: var(--bg-elev2); border-color: var(--accent-dim); }
 .repo-list li.muted, .muted { color: var(--muted); }
-.new-repo { margin-top: 10px; padding-top: 14px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 10px; }
+.new-repo { margin-top: 4px; display: flex; flex-direction: column; gap: 10px; }
 .new-repo h3 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; }
+.repo-list-head { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); display: flex; flex-direction: column; gap: 8px; }
+.section-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+/* ---------- background picker ---------- */
+.bg-picker { display: flex; flex-wrap: wrap; gap: 10px; }
+.swatch {
+  width: 46px; height: 46px; border-radius: 11px; border: 2px solid var(--line);
+  cursor: pointer; position: relative; overflow: hidden; padding: 0;
+  display: grid; place-items: center; transition: border-color .12s, box-shadow .12s, transform .1s;
+}
+.swatch:active { transform: scale(.94); }
+.swatch.sel { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122,162,255,.22); }
+.swatch.color-pick { background: conic-gradient(from 210deg, #ff6b6b, #ffd166, #58d68d, #7aa2ff, #b48cff, #ff6b6b); }
+.swatch.color-pick input[type="color"] { position: absolute; inset: -4px; width: calc(100% + 8px); height: calc(100% + 8px); border: none; padding: 0; background: none; opacity: 0; cursor: pointer; }
+.swatch.upload { background: var(--bg-elev); color: var(--muted); font-size: 22px; line-height: 1; }
+.setting-block { margin: 2px 0; }
+.setting-label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 12px; }
 
 /* ---------- messages ---------- */
 .messages {

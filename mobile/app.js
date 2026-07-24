@@ -320,8 +320,104 @@
     if (atBottom()) scroll();
   }
 
+  // ================================================================ BACKGROUND
+  // The background choice is a cosmetic preference, not a secret, so it lives in
+  // plain localStorage (unencrypted) and is applied at boot regardless of lock
+  // state. Uploaded images are downscaled and stored as a data URL on-device.
+  const BG_KEY = "mnm.bg.v1";
+  const BG_PRESETS = [
+    { label: "Default", type: "default", css: "#0b0d10" },
+    { label: "Midnight", type: "color", value: "linear-gradient(160deg,#0d1526,#0b0d10 70%)" },
+    { label: "Plum", type: "color", value: "linear-gradient(160deg,#1c1030,#0b0d10 70%)" },
+    { label: "Pine", type: "color", value: "linear-gradient(160deg,#052622,#0b0d10 70%)" },
+    { label: "Ember", type: "color", value: "linear-gradient(160deg,#2a1206,#0b0d10 70%)" },
+    { label: "Nebula", type: "color", value: "radial-gradient(120% 90% at 28% 12%,#26407a,#0b0d10 60%)" },
+  ];
+  function loadBg() { try { return JSON.parse(localStorage.getItem(BG_KEY) || "null"); } catch { return null; } }
+  function saveBg(bg) {
+    try { if (bg) localStorage.setItem(BG_KEY, JSON.stringify(bg)); else localStorage.removeItem(BG_KEY); return true; }
+    catch { toast("Couldn't save that background (too large)."); return false; }
+  }
+  function applyBg(bg) {
+    const layer = $("bg-layer");
+    layer.classList.remove("image");
+    if (!bg || bg.type === "default") { document.body.classList.remove("has-bg"); layer.style.background = ""; return; }
+    document.body.classList.add("has-bg");
+    if (bg.type === "image") { layer.classList.add("image"); layer.style.background = "#0b0d10 center/cover no-repeat"; layer.style.backgroundImage = 'url("' + bg.value + '")'; }
+    else { layer.style.background = bg.value; }
+  }
+  function sameBg(a, b) {
+    if (!a) return b.type === "default";
+    if (a.type !== b.type) return false;
+    return a.type === "default" || a.value === b.value;
+  }
+  function setBg(bg) { if (saveBg(bg)) applyBg(bg); renderAllBgPickers(); }
+  function renderAllBgPickers() { ["setup-bg", "settings-bg"].forEach((id) => { const el = $(id); if (el) renderBgPicker(el); }); }
+  function renderBgPicker(container) {
+    const cur = loadBg();
+    container.innerHTML = "";
+    for (const p of BG_PRESETS) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "swatch"; b.title = p.label;
+      b.style.background = p.type === "default" ? p.css : p.value;
+      if (sameBg(cur, p)) b.classList.add("sel");
+      b.addEventListener("click", () => setBg(p.type === "default" ? null : { type: "color", value: p.value }));
+      container.appendChild(b);
+    }
+    // custom colour
+    const color = document.createElement("label");
+    color.className = "swatch color-pick" + (cur && cur.type === "color" && /^#/.test(cur.value) ? " sel" : "");
+    color.title = "Custom colour";
+    const ci = document.createElement("input");
+    ci.type = "color"; ci.value = (cur && cur.type === "color" && /^#/.test(cur.value)) ? cur.value : "#0b0d10";
+    ci.addEventListener("input", () => setBg({ type: "color", value: ci.value }));
+    color.appendChild(ci); container.appendChild(color);
+    // image upload
+    const up = document.createElement("label");
+    up.className = "swatch upload" + (cur && cur.type === "image" ? " sel" : "");
+    up.title = "Upload an image"; up.textContent = "＋";
+    const fi = document.createElement("input");
+    fi.type = "file"; fi.accept = "image/*"; fi.hidden = true;
+    fi.addEventListener("change", () => handleBgFile(fi));
+    up.appendChild(fi); container.appendChild(up);
+  }
+  function handleBgFile(input) {
+    const f = input.files && input.files[0];
+    input.value = "";
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const max = 1600;
+        let w = img.width, h = img.height;
+        const scale = Math.min(1, max / Math.max(w, h));
+        w = Math.round(w * scale); h = Math.round(h * scale);
+        const c = document.createElement("canvas"); c.width = w; c.height = h;
+        c.getContext("2d").drawImage(img, 0, 0, w, h);
+        let data; try { data = c.toDataURL("image/jpeg", 0.82); } catch { data = reader.result; }
+        setBg({ type: "image", value: data });
+      };
+      img.onerror = () => toast("Couldn't read that image.");
+      img.src = reader.result;
+    };
+    reader.onerror = () => toast("Couldn't read that image.");
+    reader.readAsDataURL(f);
+  }
+
+  // ================================================================ SETTINGS SHEET
+  function openSettings() { renderBgPicker($("settings-bg")); $("settings-backdrop").hidden = false; }
+  function closeSettings() { $("settings-backdrop").hidden = true; }
+  $("btn-repo-settings").addEventListener("click", openSettings);
+  $("btn-chat-settings").addEventListener("click", openSettings);
+  $("btn-settings-done").addEventListener("click", closeSettings);
+  $("settings-backdrop").addEventListener("click", (e) => { if (e.target === $("settings-backdrop")) closeSettings(); });
+  $("btn-settings-lock").addEventListener("click", () => { closeSettings(); lock(); });
+
   // ================================================================ BOOT
   function boot() {
+    applyBg(loadBg());
+    renderBgPicker($("setup-bg"));
     if (loadVault()) show("screen-unlock");
     else show("screen-setup");
     if ("serviceWorker" in navigator) {
