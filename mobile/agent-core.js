@@ -260,12 +260,13 @@
 
   // --- the agent loop ------------------------------------------------------
   async function runAgent(cfg) {
-    const { model, tools, messages, onEvent = () => {}, maxSteps = 24, shouldStop = () => false } = cfg;
+    const { model, tools, messages, onEvent = () => {}, maxSteps = 24, shouldStop = () => false,
+      toolSchemas = TOOL_SCHEMAS } = cfg;
     for (let step = 0; step < maxSteps; step++) {
       if (shouldStop()) { onEvent({ type: "stopped" }); return messages; }
       onEvent({ type: "thinking" });
       let msg;
-      try { msg = await model.chat(messages, TOOL_SCHEMAS); }
+      try { msg = await model.chat(messages, toolSchemas); }
       catch (e) { onEvent({ type: "error", text: e.message }); return messages; }
       messages.push(msg);
       if (!msg.tool_calls || !msg.tool_calls.length) {

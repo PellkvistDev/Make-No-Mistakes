@@ -216,6 +216,15 @@ test("runAgent: executes a tool call then returns the final answer", async () =>
   assert.equal(messages[messages.length - 1].content, "The file says hello.");
 });
 
+test("runAgent: advertises only the given toolSchemas (read-only plan mode)", async () => {
+  let seenTools = null;
+  const model = { async chat(messages, tools) { seenTools = tools; return { role: "assistant", content: "plan" }; } };
+  const readOnly = C.TOOL_SCHEMAS.filter((s) => ["read_file", "grep", "search_code"].includes(s.function.name));
+  await C.runAgent({ model, tools: {}, messages: [{ role: "user", content: "plan it" }], toolSchemas: readOnly });
+  assert.equal(seenTools.length, 3);
+  assert.ok(!seenTools.some((s) => s.function.name === "write_file"), "write tools must not be advertised");
+});
+
 test("runAgent: shouldStop halts before calling the model", async () => {
   let called = false;
   const model = { async chat() { called = true; return { role: "assistant", content: "x" }; } };

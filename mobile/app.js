@@ -184,6 +184,10 @@
       confirmWrite: confirmWrite,
       onCommit: (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); },
     });
+    // Read-only subset for plan mode (same instances, so the fetch cache is shared).
+    session.readTools = {};
+    for (const n of READ_TOOL_NAMES) session.readTools[n] = session.tools[n];
+    clearAttachments();
     $("chat-repo-name").textContent = fullName;
     $("messages").innerHTML = "";
     addBubble("system", "Connected to " + fullName + ". I can read, search, and edit files here — each edit is committed. I can't run code on the phone; that happens when your desktop syncs or via CI.");
@@ -223,13 +227,81 @@
   composer.addEventListener("submit", (e) => { e.preventDefault(); sendPrompt(); });
   $("btn-stop").addEventListener("click", () => { if (currentRun) currentRun.stop(); });
 
-  function runTurn(shouldStop) {
+  // ---------------------------------------------------------- attachments
+  let pendingAttachments = [];
+  function clearAttachments() { pendingAttachments = []; renderChips(); }
+  function renderChips() {
+    const box = $("attach-chips");
+    box.innerHTML = "";
+    box.hidden = pendingAttachments.length === 0;
+    for (const p of pendingAttachments) {
+      const chip = document.createElement("div");
+      chip.className = "chip";
+      const label = document.createElement("span");
+      label.textContent = p.split("/").pop();
+      const x = document.createElement("button");
+      x.type = "button"; x.textContent = "✕";
+      x.onclick = () => { pendingAttachments = pendingAttachments.filter((q) => q !== p); renderChips(); };
+      chip.append(label, x);
+      box.appendChild(chip);
+    }
+  }
+  function attachmentNote() {
+    return pendingAttachments.length ? "\n\n📎 " + pendingAttachments.map((p) => p.split("/").pop()).join(", ") : "";
+  }
+  // Fetch each attached file and prepend its contents as context.
+  async function composeMessage(text) {
+    if (!pendingAttachments.length) return text;
+    const parts = [];
+    for (const p of pendingAttachments) {
+      try { const f = await session.gh.getFile(p); parts.push("=== " + p + " ===\n" + f.text); }
+      catch { parts.push("=== " + p + " (couldn't read) ==="); }
+    }
+    return "Attached files for context:\n\n" + parts.join("\n\n") + "\n\n---\n\n" + (text || "(see attached files)");
+  }
+
+  $("btn-attach").addEventListener("click", openFilePicker);
+  $("filepick-done").addEventListener("click", () => { $("filepick-backdrop").hidden = true; });
+  $("filepick-backdrop").addEventListener("click", (e) => { if (e.target === $("filepick-backdrop")) $("filepick-backdrop").hidden = true; });
+  $("filepick-search").addEventListener("input", renderFileList);
+  let fileTree = [];
+  async function openFilePicker() {
+    if (!session || !session.gh) return;
+    $("filepick-search").value = "";
+    $("filepick-list").innerHTML = "<div class='muted' style='padding:10px'>Loading…</div>";
+    $("filepick-backdrop").hidden = false;
+    try { fileTree = (await session.gh.tree()).map((e) => e.path); }
+    catch (e) { $("filepick-list").innerHTML = ""; toast(friendlyGhError(e, "list")); return; }
+    renderFileList();
+  }
+  function renderFileList() {
+    const q = $("filepick-search").value.toLowerCase();
+    const list = $("filepick-list");
+    list.innerHTML = "";
+    const matches = fileTree.filter((p) => p.toLowerCase().includes(q)).slice(0, 200);
+    if (!matches.length) { list.innerHTML = "<div class='muted' style='padding:10px'>no files</div>"; return; }
+    for (const p of matches) {
+      const item = document.createElement("div");
+      item.className = "fp-item" + (pendingAttachments.includes(p) ? " picked" : "");
+      item.textContent = p;
+      item.onclick = () => {
+        if (pendingAttachments.includes(p)) pendingAttachments = pendingAttachments.filter((q) => q !== p);
+        else pendingAttachments.push(p);
+        item.classList.toggle("picked");
+        renderChips();
+      };
+      list.appendChild(item);
+    }
+  }
+
+  function runTurn(shouldStop, tools, toolSchemas) {
     let liveTool = null;
     return AC.runAgent({
       model: session.model,
-      tools: session.tools,
+      tools: tools || session.tools,
       messages: session.messages,
       shouldStop,
+      toolSchemas,
       onEvent: (ev) => {
         armIdle();
         if (ev.type === "thinking") setStatus("thinking…");
@@ -242,41 +314,77 @@
     });
   }
 
+  // A normal build turn, plus one Max self-review pass when it changed files.
+  async function runBuild(getStopped) {
+    session.messages[0].content = session.baseSystem + thinkingDirective(getThinking());
+    await runTurn(getStopped, session.tools);
+    if (!getStopped() && getThinking() === "max" && session.turnCommits > 0) {
+      setStatus("reviewing…");
+      session.messages.push({ role: "user", content: REVIEW_NUDGE });
+      await runTurn(getStopped, session.tools);
+    }
+  }
+
+  // Wrap a run: manage the running state, stop control, and errors.
+  async function withRun(fn) {
+    if (currentRun) return;
+    let stopped = false;
+    currentRun = { stop: () => { stopped = true; $("btn-stop").disabled = true; } };
+    setRunning(true);
+    try { await fn(() => stopped); }
+    catch (e) { addBubble("error", e.message || String(e)); }
+    finally { setRunning(false); currentRun = null; }
+  }
+
   async function sendPrompt() {
     if (currentRun) return;
     const text = prompt.value.trim();
-    if (!text) return;
+    if (!text && !pendingAttachments.length) return;
     prompt.value = ""; prompt.style.height = "auto";
-    addBubble("user", text);
-    // apply the current thinking mode to the system prompt for this turn
-    session.messages[0].content = session.baseSystem + thinkingDirective(getThinking());
-    session.turnCommits = 0;
-    session.messages.push({ role: "user", content: text });
-    setRunning(true);
 
-    let stopped = false;
-    currentRun = { stop: () => { stopped = true; $("btn-stop").disabled = true; } };
-    try {
-      await runTurn(() => stopped);
-      // Max thinking: one fresh-eyes self-review pass, but only if it actually
-      // changed files (no busywork on a question). Bounded to a single pass.
-      if (!stopped && getThinking() === "max" && session.turnCommits > 0) {
-        setStatus("reviewing…");
-        session.messages.push({ role: "user", content: REVIEW_NUDGE });
-        await runTurn(() => stopped);
+    addBubble("user", (text || "(attached files)") + attachmentNote());
+    const content = await composeMessage(text);   // fetches + prepends any attachments
+    clearAttachments();
+    session.turnCommits = 0;
+    session.messages.push({ role: "user", content });
+
+    await withRun(async (getStopped) => {
+      if (planMode()) {
+        session.messages[0].content = session.baseSystem + PLAN_DIRECTIVE;
+        await runTurn(getStopped, session.readTools, READ_SCHEMAS);
+        if (!getStopped()) showApproveBar();
+      } else {
+        await runBuild(getStopped);
       }
-    } catch (e) {
-      addBubble("error", e.message || String(e));
-    } finally {
-      setRunning(false);
-      currentRun = null;
-    }
+    });
+  }
+
+  function showApproveBar() {
+    const bar = document.createElement("div");
+    bar.className = "approve-bar";
+    const discard = document.createElement("button");
+    discard.className = "ghost"; discard.textContent = "Discard";
+    const build = document.createElement("button");
+    build.className = "primary"; build.textContent = "Approve & build";
+    discard.onclick = () => { bar.remove(); addBubble("system", "Plan discarded."); };
+    build.onclick = () => { bar.remove(); executePlan(); };
+    bar.append(discard, build);
+    messages.appendChild(bar);
+    if (atBottom()) scroll();
+  }
+
+  async function executePlan() {
+    addBubble("user", "Approved — build it.");
+    session.turnCommits = 0;
+    session.messages.push({ role: "user", content: "Approved. Implement that plan now: make the edits and commit them." });
+    await withRun((getStopped) => runBuild(getStopped));
   }
 
   function setRunning(on) {
     $("btn-send").hidden = on;
     $("btn-stop").hidden = !on;
     $("btn-stop").disabled = false;
+    $("btn-attach").disabled = on;
     prompt.disabled = on;
   }
 
@@ -448,6 +556,12 @@
   function getModelName() { return pref("mnm.model", "") || (session && session.secrets && session.secrets.model) || "glm-4.6"; }
   function getThinking() { return pref("mnm.thinking", "medium"); }
   function confirmCommits() { return pref("mnm.confirm", "1") === "1"; }
+  function planMode() { return pref("mnm.plan", "0") === "1"; }
+  const READ_TOOL_NAMES = ["list_dir", "glob", "read_file", "grep", "search_code"];
+  const READ_SCHEMAS = AC.TOOL_SCHEMAS.filter((s) => READ_TOOL_NAMES.includes(s.function.name));
+  const PLAN_DIRECTIVE = "\n\nPLAN MODE: do NOT edit or commit anything. Use the read/search tools to " +
+    "investigate, then reply with a short, concrete numbered plan of the exact changes you'd make " +
+    "(which files, and what changes in each). Stop after the plan and wait for approval.";
   function buildModel() {
     session.model = AC.makeModel({ apiKey: session.secrets.modelKey, model: getModelName(), baseUrl: session.secrets.baseUrl });
   }
@@ -468,6 +582,7 @@
     renderBgPicker($("settings-bg"));
     $("set-model").value = getModelName();
     setSegOn($("set-thinking"), getThinking());
+    $("set-plan").checked = planMode();
     $("set-confirm").checked = confirmCommits();
     $("settings-backdrop").hidden = false;
   }
@@ -485,6 +600,9 @@
     const b = e.target.closest("button[data-v]"); if (!b) return;
     localStorage.setItem("mnm.thinking", b.dataset.v);
     setSegOn($("set-thinking"), b.dataset.v);
+  });
+  $("set-plan").addEventListener("change", () => {
+    localStorage.setItem("mnm.plan", $("set-plan").checked ? "1" : "0");
   });
   $("set-confirm").addEventListener("change", () => {
     localStorage.setItem("mnm.confirm", $("set-confirm").checked ? "1" : "0");

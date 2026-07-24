@@ -230,6 +230,43 @@ pre.code, pre.tool-out, .preview {
 .send.stop { background: linear-gradient(180deg, #ff8a8a, var(--danger)); }
 .send:disabled { opacity: .5; }
 
+/* ---------- attach files ---------- */
+.attach-btn {
+  width: 42px; height: 42px; flex: none; border-radius: 50%; font-size: 22px; line-height: 1;
+  background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi);
+  color: var(--text); display: grid; place-items: center;
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+}
+.attach-btn:active { transform: scale(.94); }
+.attach-chips {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 14px 0;
+  width: 100%; max-width: 720px; margin: 0 auto;
+}
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  border-radius: 999px; padding: 5px 6px 5px 11px; font-size: 12.5px; font-family: var(--mono);
+}
+.chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip button { width: 18px; height: 18px; flex: none; border-radius: 50%; color: var(--muted); background: rgba(255,255,255,.1); font-size: 12px; line-height: 1; display: grid; place-items: center; }
+.filepick-list { max-height: min(48vh, 420px); overflow-y: auto; margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.filepick-list .fp-item { padding: 11px 12px; border-radius: var(--radius-sm); font-family: var(--mono); font-size: 13px;
+  border: 1px solid transparent; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filepick-list .fp-item:active { background: var(--glass); border-color: var(--glass-brd); }
+.filepick-list .fp-item.picked { background: var(--glass); border-color: var(--accent); }
+.filepick-list .fp-item.picked::before { content: "✓ "; color: var(--accent); }
+
+/* ---------- plan approval bar ---------- */
+.approve-bar {
+  align-self: stretch; max-width: 720px; width: 100%; margin: 4px auto 0;
+  display: flex; gap: 10px; animation: rise .18s ease;
+}
+.approve-bar button { flex: 1; border-radius: var(--radius-sm); padding: 12px; font-weight: 650; }
+.approve-bar .primary { background: linear-gradient(180deg, var(--accent), #6690f0); color: #0a0d14; }
+.approve-bar .ghost { background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi); color: var(--text);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); }
+
 /* ---------- sheets / dialogs ---------- */
 .backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,.4);
