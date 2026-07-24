@@ -336,7 +336,7 @@
   function loadBg() { try { return JSON.parse(localStorage.getItem(BG_KEY) || "null"); } catch { return null; } }
   function saveBg(bg) {
     try { if (bg) localStorage.setItem(BG_KEY, JSON.stringify(bg)); else localStorage.removeItem(BG_KEY); return true; }
-    catch { toast("Couldn't save that background (too large)."); return false; }
+    catch { return false; }
   }
   function applyBg(bg) {
     const layer = $("bg-layer");
@@ -351,7 +351,11 @@
     if (a.type !== b.type) return false;
     return a.type === "default" || a.value === b.value;
   }
-  function setBg(bg) { if (saveBg(bg)) applyBg(bg); renderAllBgPickers(); }
+  function setBg(bg) {
+    applyBg(bg);                       // always apply for this session
+    if (!saveBg(bg) && bg) toast("Applied — but too large to remember next launch.");
+    renderAllBgPickers();
+  }
   function renderAllBgPickers() { ["setup-bg", "settings-bg"].forEach((id) => { const el = $(id); if (el) renderBgPicker(el); }); }
   function renderBgPicker(container) {
     const cur = loadBg();
@@ -389,7 +393,7 @@
     reader.onload = () => {
       const img = new Image();
       img.onload = () => {
-        const max = 1600;
+        const max = 2560; // keep wallpaper sharp on high-DPI phones
         let w = img.width, h = img.height;
         const scale = Math.min(1, max / Math.max(w, h));
         w = Math.round(w * scale); h = Math.round(h * scale);
