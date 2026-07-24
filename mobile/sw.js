@@ -9,7 +9,7 @@
  * to the model API and GitHub (cross-origin, and/or non-GET) bypass the SW
  * entirely and are never stored.
  */
-const CACHE = "mnm-shell-v2";
+const CACHE = "mnm-shell-v3";
 const SHELL = [
   "./index.html",
   "./app.js",

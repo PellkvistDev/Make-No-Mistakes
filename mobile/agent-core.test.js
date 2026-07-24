@@ -333,3 +333,103 @@ test("runAgent: a throwing tool is reported back to the model, loop continues", 
   await C.runAgent({ model, tools, messages });
   assert.equal(messages[messages.length - 1].content, "recovered");
 });
+
+// -------------------------------------------------------------- sync store --
+
+// An in-memory stand-in for a sync gh-client (branch=STATE_BRANCH). Models the
+// orphan branch as a flat {path: text} filesystem so we can exercise the
+// encrypted store without a network. Returns { gh, files, branchCreated }.
+function fakeSyncGh(initial) {
+  const files = Object.assign({}, initial);
+  const state = { branch: initial ? "sha0" : null, orphanCalls: 0 };
+  const gh = {
+    async getFile(path) {
+      if (!(path in files)) throw new Error("GitHub 404: not found " + path);
+      return { text: files[path], sha: "sha-" + path + "-" + files[path].length };
+    },
+    async putFile(path, text, message, sha) { files[path] = text; return { commit: { sha: "c" } }; },
+    async deleteFile(path, message, sha) { delete files[path]; return null; },
+    async branchSha() { return state.branch; },
+    async createOrphanBranch() { state.orphanCalls++; state.branch = "sha-orphan"; return state.branch; },
+  };
+  return { gh, files, state };
+}
+
+test("sync: openSync bootstraps a brand-new store (creates branch + sync.json)", async () => {
+  const { gh, files, state } = fakeSyncGh(null);
+  const { key, store, created } = await C.openSync(gh, "correct horse battery");
+  assert.equal(created, true);
+  assert.equal(state.orphanCalls, 1, "orphan branch created on first device");
+  assert.ok(files["sync.json"], "sync.json written");
+  const meta = JSON.parse(files["sync.json"]);
+  assert.equal(meta.v, 1);
+  assert.ok(meta.salt && meta.check, "salt + check-blob present");
+  // check-blob must be encrypted, not the plaintext sentinel
+  assert.ok(!JSON.stringify(meta.check).includes("mnm-sync-ok"));
+  assert.ok(key && store, "returns a usable key + store");
+});
+
+test("sync: a second device with the RIGHT passphrase re-derives the same key", async () => {
+  const { gh } = fakeSyncGh(null);
+  const first = await C.openSync(gh, "shared secret 1");
+  await first.store.save({ id: "c1", title: "Hello", messages: [{ role: "user", content: "hi" }] });
+  // second device: same files, fresh open
+  const again = await C.openSync(gh, "shared secret 1");
+  assert.equal(again.created, false);
+  const loaded = await again.store.load("c1");
+  assert.equal(loaded.title, "Hello");
+  assert.equal(loaded.messages[0].content, "hi");
+});
+
+test("sync: the WRONG passphrase is rejected (never returns garbage)", async () => {
+  const { gh } = fakeSyncGh(null);
+  await C.openSync(gh, "the real passphrase");
+  await assert.rejects(() => C.openSync(gh, "an impostor phrase"), /Wrong sync passphrase/);
+});
+
+test("sync: openSync rejects too-short passphrases", async () => {
+  const { gh } = fakeSyncGh(null);
+  await assert.rejects(() => C.openSync(gh, "short"), /at least 6/);
+});
+
+test("sync: stored chat + index files contain no plaintext", async () => {
+  const { gh, files } = fakeSyncGh(null);
+  const { store } = await C.openSync(gh, "passphrase here");
+  await store.save({ id: "c9", title: "Secret Project", preview: "TOP SECRET text",
+    messages: [{ role: "user", content: "launch codes 0000" }] });
+  const dump = JSON.stringify(files);
+  assert.ok(!dump.includes("Secret Project"), "title leaked");
+  assert.ok(!dump.includes("TOP SECRET"), "preview leaked");
+  assert.ok(!dump.includes("launch codes"), "message leaked");
+});
+
+test("sync: save→list→load→remove lifecycle keeps the index in step", async () => {
+  const { gh } = fakeSyncGh(null);
+  const { store } = await C.openSync(gh, "lifecycle pass");
+  await store.save({ id: "a", title: "Alpha", messages: [] });
+  await new Promise((r) => setTimeout(r, 2)); // ensure a later timestamp
+  await store.save({ id: "b", title: "Beta", messages: [] });
+
+  const list = await store.list();
+  assert.equal(list.length, 2);
+  assert.equal(list[0].id, "b", "newest chat is first");
+  assert.ok(list[0].updated >= list[1].updated);
+
+  // re-saving updates the entry in place, not duplicates it
+  await store.save({ id: "a", title: "Alpha renamed", messages: [] });
+  const list2 = await store.list();
+  assert.equal(list2.length, 2);
+  assert.equal(list2.find((c) => c.id === "a").title, "Alpha renamed");
+
+  await store.remove("a");
+  const list3 = await store.list();
+  assert.equal(list3.length, 1);
+  assert.equal(list3[0].id, "b");
+  await assert.rejects(() => store.load("a"), /404/);
+});
+
+test("sync: list on an empty store returns [] (no index yet)", async () => {
+  const { gh } = fakeSyncGh(null);
+  const { store } = await C.openSync(gh, "empty store pass");
+  assert.deepEqual(await store.list(), []);
+});

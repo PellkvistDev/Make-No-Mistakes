@@ -122,6 +122,24 @@
         return gh("PUT", `/repos/${owner}/${repo}/contents/${path}`,
           { message, content: bytesToB64(utf8(text)), branch, sha: sha || undefined });
       },
+      async deleteFile(path, message, sha) {
+        return gh("DELETE", `/repos/${owner}/${repo}/contents/${path}`, { message, sha, branch });
+      },
+      // Does the current branch exist? Returns its commit SHA or null.
+      async branchSha() {
+        try { const r = await gh("GET", `/repos/${owner}/${repo}/git/ref/heads/${branch}`); return r.object.sha; }
+        catch { return null; }
+      },
+      // Create the branch as an ORPHAN (no code history) with a single marker
+      // file, so session data lives here without touching main/PRs.
+      async createOrphanBranch() {
+        const tree = await gh("POST", `/repos/${owner}/${repo}/git/trees`,
+          { tree: [{ path: ".mnm", mode: "100644", type: "blob", content: "Make No Mistakes — session state. Do not merge.\n" }] });
+        const commit = await gh("POST", `/repos/${owner}/${repo}/git/commits`,
+          { message: "Initialize Make No Mistakes state", tree: tree.sha, parents: [] });
+        await gh("POST", `/repos/${owner}/${repo}/git/refs`, { ref: `refs/heads/${branch}`, sha: commit.sha });
+        return commit.sha;
+      },
       async listRepos() {
         const rows = await gh("GET", "/user/repos?per_page=50&sort=pushed&affiliation=owner");
         return (rows || []).map((r) => ({ full_name: r.full_name, default_branch: r.default_branch }));
@@ -132,6 +150,93 @@
                  default_branch: r.default_branch || "main" };
       },
       async me() { return gh("GET", "/user"); },
+    };
+  }
+
+  // --- cross-device session sync ------------------------------------------
+  // Sessions are stored on an ORPHAN branch (STATE_BRANCH) in the same repo,
+  // so they sync across the user's devices without ever touching main or PRs.
+  // Everything is AES-GCM encrypted under a key derived (PBKDF2) from a SYNC
+  // PASSPHRASE that is separate from the on-device PIN — GitHub only ever sees
+  // ciphertext, and the passphrase is never stored server-side. sync.json holds
+  // the shared salt + a check-blob so any device can derive the same key and
+  // verify the passphrase; index.json (encrypted) lists the chats; each chat
+  // lives in its own encrypted chats/<id>.json.
+  const STATE_BRANCH = "makenomistakes/state";
+  const SYNC_CHECK = "mnm-sync-ok";
+
+  // Connect a sync gh-client (branch=STATE_BRANCH) to a passphrase: verifies an
+  // existing store or bootstraps a new one. Returns { key, store, created }.
+  async function openSync(gh, passphrase) {
+    if (!passphrase || String(passphrase).length < 6)
+      throw new Error("Sync passphrase must be at least 6 characters");
+    let meta = null;
+    try { meta = JSON.parse((await gh.getFile("sync.json")).text); } catch (e) { meta = null; }
+    if (meta && meta.v === 1) {
+      const key = await deriveKey(passphrase, b64ToBytes(meta.salt));
+      try {
+        if ((await aesDecrypt(meta.check, key)) !== SYNC_CHECK) throw new Error("bad");
+      } catch (e) { throw new Error("Wrong sync passphrase"); }
+      return { key, store: makeSyncStore(gh, key), created: false };
+    }
+    // First device for this repo: create the orphan branch + sync.json.
+    if (!(await gh.branchSha())) await gh.createOrphanBranch();
+    const salt = getRandom(16);
+    const key = await deriveKey(passphrase, salt);
+    const check = await aesEncrypt(SYNC_CHECK, key);
+    await gh.putFile("sync.json", JSON.stringify({ v: 1, salt: bytesToB64(salt), check }),
+      "Set up Make No Mistakes sync");
+    return { key, store: makeSyncStore(gh, key), created: true };
+  }
+
+  // The encrypted session store over a sync gh-client + derived key.
+  function makeSyncStore(gh, key) {
+    async function readIndex() {
+      try {
+        const f = await gh.getFile("index.json");
+        return { data: await aesDecrypt(JSON.parse(f.text), key), sha: f.sha };
+      } catch (e) { return { data: { v: 1, chats: [] }, sha: null }; }
+    }
+    async function writeIndex(chats, sha) {
+      const blob = await aesEncrypt({ v: 1, chats }, key);
+      return gh.putFile("index.json", JSON.stringify(blob), "Update session index", sha);
+    }
+    async function fileSha(path) {
+      try { return (await gh.getFile(path)).sha; } catch (e) { return null; }
+    }
+    return {
+      // Newest-first list of chat summaries (id, title, updated, preview).
+      async list() {
+        const { data } = await readIndex();
+        return (data.chats || []).slice().sort((a, b) => (b.updated || 0) - (a.updated || 0));
+      },
+      // Full chat object (messages etc.).
+      async load(id) {
+        const f = await gh.getFile(`chats/${id}.json`);
+        return aesDecrypt(JSON.parse(f.text), key);
+      },
+      // Persist a chat and refresh its index entry. Stamps chat.updated.
+      async save(chat) {
+        if (!chat || !chat.id) throw new Error("chat needs an id");
+        chat.updated = Date.now();
+        const path = `chats/${chat.id}.json`;
+        const blob = await aesEncrypt(chat, key);
+        await gh.putFile(path, JSON.stringify(blob), `Save session ${chat.id}`, await fileSha(path));
+        const { data, sha } = await readIndex();
+        const chats = (data.chats || []).filter((c) => c.id !== chat.id);
+        chats.push({ id: chat.id, title: chat.title || "Untitled",
+          updated: chat.updated, preview: chat.preview || "" });
+        await writeIndex(chats, sha);
+        return chat.updated;
+      },
+      // Delete a chat file and its index entry.
+      async remove(id) {
+        const path = `chats/${id}.json`;
+        const sha = await fileSha(path);
+        if (sha) await gh.deleteFile(path, `Delete session ${id}`, sha);
+        const { data, sha: isha } = await readIndex();
+        await writeIndex((data.chats || []).filter((c) => c.id !== id), isha);
+      },
     };
   }
 
@@ -373,6 +478,7 @@
     aesEncrypt, aesDecrypt, exportRawKey, importRawKey,
     makeGitHub, makeModel, makeTools, runAgent, TOOL_SCHEMAS, SPAWN_SCHEMA, VIEW_IMAGE_SCHEMA,
     SYSTEM_PROMPT, SUBAGENT_PROMPT,
+    openSync, makeSyncStore, STATE_BRANCH,
     _b64: { bytesToB64, b64ToBytes },
   };
   if (typeof module !== "undefined" && module.exports) module.exports = CoreAPI;
