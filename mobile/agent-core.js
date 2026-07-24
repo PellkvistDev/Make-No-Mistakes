@@ -43,11 +43,29 @@
   // --- encrypted secret vault ---------------------------------------------
   const PBKDF2_ITERS = 210000;
 
-  async function deriveKey(pin, salt) {
+  async function deriveKey(pin, salt, extractable) {
     const base = await subtle().importKey("raw", utf8(String(pin)), "PBKDF2", false, ["deriveKey"]);
     return subtle().deriveKey(
       { name: "PBKDF2", salt, iterations: PBKDF2_ITERS, hash: "SHA-256" },
-      base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+      base, { name: "AES-GCM", length: 256 }, !!extractable, ["encrypt", "decrypt"]);
+  }
+
+  // General AES-GCM helpers (used to persist the session under the vault key,
+  // and to remember the key for "keep me signed in").
+  async function aesEncrypt(obj, key) {
+    const iv = getRandom(12);
+    const ct = await subtle().encrypt({ name: "AES-GCM", iv }, key, utf8(JSON.stringify(obj)));
+    return { v: 1, iv: bytesToB64(iv), ct: bytesToB64(new Uint8Array(ct)) };
+  }
+  async function aesDecrypt(blob, key) {
+    const pt = await subtle().decrypt({ name: "AES-GCM", iv: b64ToBytes(blob.iv) }, key, b64ToBytes(blob.ct));
+    return JSON.parse(fromUtf8(pt));
+  }
+  async function exportRawKey(key) {
+    return bytesToB64(new Uint8Array(await subtle().exportKey("raw", key)));
+  }
+  async function importRawKey(b64, extractable) {
+    return subtle().importKey("raw", b64ToBytes(b64), { name: "AES-GCM" }, !!extractable, ["encrypt", "decrypt"]);
   }
 
   async function encryptVault(secretsObj, pin) {
@@ -332,6 +350,7 @@
 
   const CoreAPI = {
     encryptVault, decryptVault, deriveKey, PBKDF2_ITERS,
+    aesEncrypt, aesDecrypt, exportRawKey, importRawKey,
     makeGitHub, makeModel, makeTools, runAgent, TOOL_SCHEMAS, SPAWN_SCHEMA, VIEW_IMAGE_SCHEMA,
     SYSTEM_PROMPT, SUBAGENT_PROMPT,
     _b64: { bytesToB64, b64ToBytes },
