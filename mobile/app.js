@@ -4,10 +4,11 @@
  * logic lives in agent-core.js (AgentCore), which is unit-tested in Node.
  *
  * SECURITY posture enforced here:
- *  - Only the encrypted vault blob is persisted (localStorage). The PIN and the
- *    decrypted secrets live in JS memory (`session`) and only while unlocked.
- *  - The app auto-locks — dropping the decrypted secrets — when it goes to the
- *    background or after an idle timeout.
+ *  - The vault (keys) is persisted only as ciphertext; the decrypted secrets
+ *    live in memory while unlocked. The conversation is persisted encrypted
+ *    under the vault key. "Keep me signed in" (opt-in) remembers the key.
+ *  - The app auto-locks after a configurable idle timeout (not on every
+ *    backgrounding); it saves the session when hidden.
  *  - Every write is routed through a modal confirm dialog by default.
  */
 (function () {
@@ -79,6 +80,14 @@
     toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
   }
 
+  // Build a model client that shows a status while the free model is rate-limited.
+  function onModelRetry(attempt, waitMs) {
+    setStatus("model busy — retrying in " + Math.round(waitMs / 1000) + "s… (" + attempt + "/3)");
+  }
+  function newModel(modelName) {
+    return AC.makeModel({ apiKey: session.secrets.modelKey, model: modelName, baseUrl: session.secrets.baseUrl, onRetry: onModelRetry });
+  }
+
   // ================================================================ SETUP
   $("btn-save-setup").addEventListener("click", async () => {
     const err = $("setup-error"); err.textContent = "";
@@ -126,7 +135,7 @@
   // saved conversation if there is one (otherwise go to the repo picker).
   async function finishUnlock(secrets, key, pin, salt) {
     session = { secrets, cryptoKey: key, pin: pin || null, vaultSalt: salt || null };
-    session.model = AC.makeModel({ apiKey: secrets.modelKey, model: getModelName(), baseUrl: secrets.baseUrl });
+    session.model = newModel(getModelName());
     armIdle();
     if (keepSignedIn()) { try { localStorage.setItem(KEEPKEY_KEY, await AC.exportRawKey(key)); } catch {} }
     else localStorage.removeItem(KEEPKEY_KEY);
@@ -488,7 +497,7 @@
     }
     if (!url) return "No attached image matches '" + name + "'. Available: " + (keys.join(", ") || "none");
     if (!session.visionModel) {
-      session.visionModel = AC.makeModel({ apiKey: session.secrets.modelKey, model: VISION_MODEL, baseUrl: session.secrets.baseUrl });
+      session.visionModel = newModel(VISION_MODEL);
     }
     const focus = (question && question.trim()) ? "Focus on: " + question.trim() : "Describe the image in detail.";
     setStatus("looking with " + VISION_MODEL + "…");
@@ -785,7 +794,7 @@
     "investigate, then reply with a short, concrete numbered plan of the exact changes you'd make " +
     "(which files, and what changes in each). Stop after the plan and wait for approval.";
   function buildModel() {
-    session.model = AC.makeModel({ apiKey: session.secrets.modelKey, model: getModelName(), baseUrl: session.secrets.baseUrl });
+    session.model = newModel(getModelName());
   }
   function thinkingDirective(mode) {
     if (mode === "low") return "\n\nBe fast and direct: minimal deliberation, short answers.";

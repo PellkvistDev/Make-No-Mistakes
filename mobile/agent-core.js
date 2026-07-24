@@ -136,22 +136,42 @@
   }
 
   // --- model client (the "brain") -----------------------------------------
+  // The free GLM models are rate-limited, so a "busy" response (HTTP 429, or
+  // z.ai's 1305 / 访问量过大) is retried with exponential backoff before failing
+  // with a plain-language message.
   function makeModel(opts) {
     const fetchFn = opts.fetch || global.fetch;
     const baseUrl = opts.baseUrl || "https://api.z.ai/api/paas/v4";
+    const onRetry = opts.onRetry || (() => {});
+    const maxRetries = opts.maxRetries != null ? opts.maxRetries : 3;
+    const baseMs = opts.retryBaseMs || 2000;
+    const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     return {
       async chat(messages, tools) {
-        const r = await fetchFn(baseUrl + "/chat/completions", {
-          method: "POST",
-          headers: { Authorization: "Bearer " + opts.apiKey, "Content-Type": "application/json" },
-          body: JSON.stringify({
-            model: opts.model, messages, tools: tools && tools.length ? tools : undefined,
-            temperature: 0.6, max_tokens: 4096,
-          }),
-        });
-        if (!r.ok) throw new Error("Model " + r.status + ": " + (await r.text().catch(() => "")).slice(0, 200));
-        const j = await r.json();
-        return (j.choices && j.choices[0] && j.choices[0].message) || { role: "assistant", content: "" };
+        for (let attempt = 0; ; attempt++) {
+          const r = await fetchFn(baseUrl + "/chat/completions", {
+            method: "POST",
+            headers: { Authorization: "Bearer " + opts.apiKey, "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: opts.model, messages, tools: tools && tools.length ? tools : undefined,
+              temperature: 0.6, max_tokens: 4096,
+            }),
+          });
+          if (r.ok) {
+            const j = await r.json();
+            return (j.choices && j.choices[0] && j.choices[0].message) || { role: "assistant", content: "" };
+          }
+          const body = await r.text().catch(() => "");
+          const busy = r.status === 429 || /"1305"|访问量过大|rate.?limit/i.test(body);
+          if (busy && attempt < maxRetries) {
+            const wait = baseMs * Math.pow(2, attempt);   // 2s, 4s, 8s…
+            onRetry(attempt + 1, wait);
+            await sleep(wait);
+            continue;
+          }
+          if (busy) throw new Error("The free model is busy right now (rate-limited). Wait a few seconds and try again.");
+          throw new Error("Model " + r.status + ": " + body.slice(0, 200));
+        }
       },
     };
   }

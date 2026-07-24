@@ -143,6 +143,28 @@ test("github: non-2xx throws with status", async () => {
   await assert.rejects(() => gh.me(), /GitHub 401/);
 });
 
+// ---------------------------------------------------------------- model --
+
+test("model: retries on a 429 (rate limit) then succeeds", async () => {
+  let calls = 0;
+  const fetch = async () => {
+    calls++;
+    if (calls < 3) return { ok: false, status: 429, text: async () => '{"error":{"code":"1305"}}' };
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { role: "assistant", content: "done" } }] }) };
+  };
+  const retries = [];
+  const m = C.makeModel({ apiKey: "k", model: "glm-4.7-flash", fetch, retryBaseMs: 1, onRetry: (n) => retries.push(n) });
+  const msg = await m.chat([{ role: "user", content: "hi" }]);
+  assert.equal(msg.content, "done");
+  assert.deepEqual(retries, [1, 2]);
+});
+
+test("model: a persistent rate limit throws a friendly message", async () => {
+  const fetch = async () => ({ ok: false, status: 429, text: async () => "访问量过大" });
+  const m = C.makeModel({ apiKey: "k", model: "glm-4.7-flash", fetch, retryBaseMs: 1, maxRetries: 2 });
+  await assert.rejects(() => m.chat([{ role: "user", content: "hi" }]), /busy right now .rate-limited/);
+});
+
 // ---------------------------------------------------------------- tools --
 
 function toolsOverFiles(files, hooks) {

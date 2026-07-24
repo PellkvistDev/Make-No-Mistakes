@@ -31,9 +31,11 @@ html, body {
   font-family: var(--font); font-size: 16px; line-height: 1.5;
   overscroll-behavior: none;
 }
-#app, .screen { height: 100%; }
-#app { position: relative; z-index: 1; }
-.screen { display: flex; flex-direction: column; }
+/* Fill the whole screen (incl. both safe areas under black-translucent) by
+   pinning the app to the viewport exactly like #bg-layer — height:100% doesn't
+   cover the bottom inset in an installed iOS PWA, which left a dark band. */
+#app { position: fixed; inset: 0; z-index: 1; }
+.screen { height: 100%; display: flex; flex-direction: column; }
 .screen[hidden] { display: none; }
 button, input, textarea, select { font: inherit; color: inherit; }
 button { cursor: pointer; border: none; background: none; }
