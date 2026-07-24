@@ -33,6 +33,7 @@
   <title>Make No Mistakes</title>
 </head>
 <body>
+  <div id="bg-layer" aria-hidden="true"></div>
   <div id="app">
 
     <!-- ===================== SETUP (first run) ===================== -->
@@ -75,6 +76,11 @@
         </div>
         <p class="hint">This PIN encrypts your keys (AES-GCM, PBKDF2 210k). We never store the PIN — if you forget it you'll re-enter your keys.</p>
 
+        <div class="field">
+          <span>Background</span>
+          <div id="setup-bg" class="bg-picker"></div>
+        </div>
+
         <button id="btn-save-setup" class="primary">Encrypt &amp; continue</button>
         <p id="setup-error" class="error" role="alert"></p>
       </div>
@@ -98,24 +104,29 @@
     <section id="screen-repo" class="screen" hidden>
       <header class="bar">
         <span class="bar-title">Choose a repository</span>
+        <button id="btn-repo-settings" class="icon-btn" title="Settings">⚙</button>
         <button id="btn-repo-lock" class="icon-btn" title="Lock">🔒</button>
       </header>
       <div class="pane scroll">
         <p class="sub" id="repo-whoami"></p>
-        <div class="row">
-          <input id="in-repo-filter" type="text" placeholder="filter repos…" spellcheck="false" />
-          <button id="btn-repo-refresh" class="ghost">Refresh</button>
-        </div>
-        <ul id="repo-list" class="repo-list"></ul>
 
         <div class="new-repo">
-          <h3>Or start a fresh repo</h3>
+          <h3>Start a fresh repo</h3>
           <div class="row">
             <input id="in-new-repo" type="text" placeholder="new-repo-name" spellcheck="false" />
             <label class="chk"><input id="in-new-private" type="checkbox" checked /> private</label>
           </div>
           <button id="btn-create-repo" class="ghost">Create &amp; open</button>
         </div>
+
+        <div class="repo-list-head">
+          <span class="section-label">Or open an existing one</span>
+          <div class="row">
+            <input id="in-repo-filter" type="text" placeholder="filter repos…" spellcheck="false" />
+            <button id="btn-repo-refresh" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <ul id="repo-list" class="repo-list"></ul>
         <p id="repo-error" class="error" role="alert"></p>
       </div>
     </section>
@@ -128,6 +139,7 @@
         <label class="chk auto-commit" title="Ask before every write">
           <input id="in-confirm-writes" type="checkbox" checked /> confirm
         </label>
+        <button id="btn-chat-settings" class="icon-btn" title="Settings">⚙</button>
         <button id="btn-chat-lock" class="icon-btn" title="Lock">🔒</button>
       </header>
 
@@ -149,6 +161,21 @@
         <div class="dialog-actions">
           <button id="btn-confirm-no" class="ghost">Cancel</button>
           <button id="btn-confirm-yes" class="primary">Commit</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SETTINGS SHEET ===================== -->
+    <div id="settings-backdrop" class="backdrop" hidden>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <h3 id="settings-title">Settings</h3>
+        <div class="setting-block">
+          <label class="setting-label">Background</label>
+          <div id="settings-bg" class="bg-picker"></div>
+        </div>
+        <div class="dialog-actions">
+          <button id="btn-settings-lock" class="ghost">Lock</button>
+          <button id="btn-settings-done" class="primary">Done</button>
         </div>
       </div>
     </div>
