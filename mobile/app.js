@@ -30,7 +30,22 @@
   const SCREENS = ["screen-setup", "screen-unlock", "screen-repo", "screen-chat"];
   function show(id) {
     for (const s of SCREENS) $(s).hidden = s !== id;
+    if (id === "screen-chat") requestAnimationFrame(fitMessages);
   }
+  // Pad the scroll area so content clears the (overlaid) top bar and bottom dock,
+  // which vary with the safe areas, the growing textarea, and attachment chips.
+  function fitMessages() {
+    const bar = document.querySelector("#screen-chat .bar");
+    const dock = $("composer-dock");
+    const msgs = $("messages");
+    if (!bar || !dock || !msgs || $("screen-chat").hidden) return;
+    const near = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
+    msgs.style.paddingTop = (bar.offsetHeight + 6) + "px";
+    msgs.style.paddingBottom = (dock.offsetHeight + 6) + "px";
+    if (near) msgs.scrollTop = msgs.scrollHeight;
+  }
+  window.addEventListener("resize", fitMessages);
+  window.addEventListener("orientationchange", () => setTimeout(fitMessages, 200));
 
   // ------------------------------------------------------------- vault I/O
   function loadVault() {
@@ -302,6 +317,7 @@
   prompt.addEventListener("input", () => {
     prompt.style.height = "auto";
     prompt.style.height = Math.min(prompt.scrollHeight, 160) + "px";
+    fitMessages();
   });
   prompt.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); composer.requestSubmit(); }
@@ -332,6 +348,7 @@
       chip.append(label, x);
       box.appendChild(chip);
     });
+    fitMessages();
   }
   function attachmentNote() {
     return attachments.length ? "\n\n📎 " + attachments.map(attLabel).join(", ") : "";
@@ -560,7 +577,7 @@
     if (currentRun || composing) return;
     const text = prompt.value.trim();
     if (!text && !attachments.length) return;
-    prompt.value = ""; prompt.style.height = "auto";
+    prompt.value = ""; prompt.style.height = "auto"; fitMessages();
     addBubble("user", (text || "(attached files)") + attachmentNote());
     // composeMessage may call the vision model (to describe uploaded images), so
     // guard against a second send and disable the composer while it runs.

@@ -47,7 +47,7 @@ button { cursor: pointer; border: none; background: none; }
 #bg-layer { position: fixed; inset: 0; z-index: 0; pointer-events: none; background-size: cover; background-position: center; }
 
 /* A reusable glass helper. */
-.glass, .bar, .composer, .dialog, .toast,
+.glass, .dialog, .toast,
 .field input, .field select, .row input, .composer textarea,
 .repo-list li, .tool-head, button.ghost, .swatch.upload,
 .bubble.assistant, pre.code, pre.tool-out, .preview {
@@ -107,11 +107,12 @@ button.link.danger { color: var(--danger); }
 .error { color: #ff9d9d; font-size: 13.5px; margin: 4px 0 0; min-height: 1em; text-shadow: 0 1px 3px rgba(0,0,0,.55); }
 
 /* ---------- top bar ---------- */
+/* No box — just a soft gradient scrim that fades content passing under it and
+   keeps the title/status text legible over the wallpaper. */
 .bar {
   display: flex; align-items: center; gap: 10px;
-  padding: max(10px, env(safe-area-inset-top)) 12px 10px;
-  background: var(--glass-strong); -webkit-backdrop-filter: var(--blur-strong); backdrop-filter: var(--blur-strong);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08); box-shadow: var(--glass-hi);
+  padding: max(10px, env(safe-area-inset-top)) 14px 16px;
+  background: linear-gradient(to bottom, rgba(6,8,12,.66) 0, rgba(6,8,12,.24) 55%, transparent 100%);
   position: sticky; top: 0; z-index: 5;
 }
 .bar-title { font-weight: 600; font-size: 15px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -174,10 +175,23 @@ button.link.danger { color: var(--danger); }
 .toggle:checked::after { transform: translateX(18px); }
 
 /* ---------- messages ---------- */
-.messages {
-  flex: 1; overflow-y: auto; padding: 16px 14px 8px;
+/* The scroll area fills the whole screen; the bar and composer overlay it, so
+   content scrolls behind their gradient scrims and fades. Top/bottom padding
+   (set in JS to match the real bar/dock heights) keeps content clear of them. */
+/* Pin the chat's bar / scroll area / composer to the viewport (fixed, like
+   #bg-layer) so they reliably fill the screen incl. both safe areas — and are
+   hidden with the screen when it isn't shown. */
+#screen-chat .bar { position: fixed; top: 0; left: 0; right: 0; }
+#screen-chat .messages {
+  position: fixed; inset: 0; overflow-y: auto;
+  padding: 16px 14px 8px;
   display: flex; flex-direction: column; gap: 10px;
-  width: 100%; max-width: 720px; margin: 0 auto; -webkit-overflow-scrolling: touch;
+  -webkit-overflow-scrolling: touch;
+}
+#composer-dock {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
+  padding-bottom: env(safe-area-inset-bottom);
+  background: linear-gradient(to top, rgba(6,8,12,.6) 0, rgba(6,8,12,.34) 45%, rgba(6,8,12,.12) 78%, transparent 100%);
 }
 .bubble { border-radius: var(--radius); padding: 11px 14px; max-width: 92%; word-wrap: break-word; animation: rise .18s ease; box-shadow: var(--glass-hi); }
 .bubble.user { align-self: flex-end; background: linear-gradient(180deg, rgba(64,90,158,.62), rgba(46,64,116,.58)); border: 1px solid rgba(120,150,230,.4); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); }
@@ -209,11 +223,10 @@ pre.code, pre.tool-out, .preview {
 @keyframes pulse { 0%,100% { opacity: .55; } 50% { opacity: 1; } }
 
 /* ---------- composer ---------- */
+/* No box: the input pill + buttons float on the dock's gradient scrim. */
 .composer {
   display: flex; gap: 8px; align-items: flex-end;
-  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
-  border-top: 1px solid rgba(255,255,255,.08); background: var(--glass-strong);
-  -webkit-backdrop-filter: var(--blur-strong); backdrop-filter: var(--blur-strong);
+  padding: 8px 12px 12px; background: none;
   width: 100%; max-width: 720px; margin: 0 auto;
 }
 .composer textarea {
