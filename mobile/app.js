@@ -67,7 +67,7 @@
   $("btn-save-setup").addEventListener("click", async () => {
     const err = $("setup-error"); err.textContent = "";
     const modelKey = $("in-model-key").value.trim();
-    const model = $("in-model").value.trim() || "glm-4.6";
+    const model = $("in-model").value.trim() || "glm-4.7-flash";
     const baseUrl = $("in-base-url").value;
     const githubToken = $("in-gh-token").value.trim();
     const pin = $("in-pin").value, pin2 = $("in-pin2").value;
@@ -580,7 +580,7 @@
   // Non-secret settings live in plain localStorage. The model NAME isn't a
   // secret (the key is), so it can live here and override what setup stored.
   function pref(k, def) { const v = localStorage.getItem(k); return v === null ? def : v; }
-  function getModelName() { return pref("mnm.model", "") || (session && session.secrets && session.secrets.model) || "glm-4.6"; }
+  function getModelName() { return pref("mnm.model", "") || (session && session.secrets && session.secrets.model) || "glm-4.7-flash"; }
   function getThinking() { return pref("mnm.thinking", "medium"); }
   function confirmCommits() { return pref("mnm.confirm", "1") === "1"; }
   function planMode() { return pref("mnm.plan", "0") === "1"; }
@@ -622,7 +622,7 @@
   $("settings-backdrop").addEventListener("click", (e) => { if (e.target === $("settings-backdrop")) closeSettings(); });
   $("btn-settings-lock").addEventListener("click", () => { closeSettings(); lock(); });
   $("set-model").addEventListener("change", () => {
-    localStorage.setItem("mnm.model", $("set-model").value.trim() || "glm-4.6");
+    localStorage.setItem("mnm.model", $("set-model").value.trim() || "glm-4.7-flash");
     if (session) buildModel();
   });
   $("set-thinking").addEventListener("click", (e) => {

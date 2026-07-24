@@ -54,7 +54,7 @@
         </label>
         <label class="field">
           <span>Model</span>
-          <input id="in-model" type="text" autocomplete="off" spellcheck="false" placeholder="glm-4.6" value="glm-4.6" />
+          <input id="in-model" type="text" autocomplete="off" spellcheck="false" placeholder="glm-4.7-flash" value="glm-4.7-flash" />
         </label>
         <label class="field">
           <span>Model API base URL</span>
@@ -189,13 +189,15 @@
         <div class="settings-scroll">
           <div class="setting-block">
             <label class="setting-label" for="set-model">Model</label>
-            <input id="set-model" class="setting-input" list="model-list" spellcheck="false" autocapitalize="off" placeholder="glm-4.6" />
+            <input id="set-model" class="setting-input" list="model-list" spellcheck="false" autocapitalize="off" placeholder="glm-4.7-flash" />
             <datalist id="model-list">
+              <option value="glm-4.7-flash"></option>
+              <option value="glm-4.6v-flash"></option>
               <option value="glm-4.6"></option>
               <option value="glm-4.5"></option>
               <option value="glm-4.5-air"></option>
-              <option value="glm-4.5-flash"></option>
             </datalist>
+            <span class="setting-hint">glm-4.7-flash is the free coding model; glm-4.6v-flash is the free vision model.</span>
           </div>
 
           <div class="setting-block">
