@@ -2159,14 +2159,21 @@ TOOL_SCHEMAS = [
     _schema(
         "check_page",
         "Load a running web page (usually your run_background dev server) in a real headless "
-        "browser and report what happens AT RUNTIME: JavaScript console errors/warnings, uncaught "
-        "exceptions, and failed network requests — plus a screenshot. Use it after a UI/web change "
-        "to catch what actually breaks when the app runs, not just what compiles. If it reports "
-        "errors, fix them and check again. First call installs Chromium (~150-300MB, one-time).",
+        "browser and report what happens AT RUNTIME: the FULL console output (not just "
+        "error/warning — a console.log carrying a failure is caught too), uncaught exceptions and "
+        "unhandled promise rejections, and failed requests — both connection-level failures and any "
+        "API call that came back with a 4xx/5xx status (with its URL, status, and response body) — "
+        "plus a screenshot. Use it after a UI/web change to catch what actually breaks when the app "
+        "runs, not just what compiles. If a page has delayed async work (data fetched after mount, "
+        "errors surfaced after a timeout), raise wait_seconds so it's still running when they happen. "
+        "If it reports problems, fix them and check again. First call installs Chromium "
+        "(~150-300MB, one-time).",
         {
             "url": {"type": "string", "description": "URL to load, e.g. 'http://localhost:3000'"},
             "wait_seconds": {"type": "number",
-                             "description": "Seconds to interact/settle after load (default 2.5, max 20)"},
+                             "description": "Seconds to interact/settle after load (default 2.5, max 20). "
+                                            "Raise this for pages whose errors surface after an async "
+                                            "load or a delay."},
         },
         ["url"],
     ),

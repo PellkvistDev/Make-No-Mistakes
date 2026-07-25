@@ -661,9 +661,9 @@ class Agent:
         lines = []
         if r.get("load_error"):
             lines.append(f"LOAD ERROR: {r['load_error']}")
-        for label, key in (("Uncaught JS errors", "page_errors"),
-                           ("Console errors/warnings", "console"),
-                           ("Failed network requests", "failed_requests")):
+        for label, key in (("Uncaught JS errors / unhandled promise rejections", "page_errors"),
+                           ("Console output", "console"),
+                           ("Failed requests (network or HTTP 4xx/5xx)", "failed_requests")):
             items = r.get(key) or []
             if items:
                 lines.append(f"{label} ({len(items)}):")

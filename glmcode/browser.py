@@ -10,6 +10,7 @@ whatever the page itself loads).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -133,11 +134,45 @@ def preview_page(url: str, out_path: Path, wait_seconds: float = 2.0,
     return out_path
 
 
+def _console_message_text(msg) -> str:
+    """The message's real argument values, not Playwright's msg.text -- which
+    renders nested objects as a bare '{a: Object}' with no way to see what's
+    actually inside. console.error('failed:', {status:500, body:{...}}) is
+    exactly the call a developer makes when something breaks, so collapsing
+    its payload defeats the point of reading the console at all."""
+    try:
+        parts = []
+        for arg in msg.args:
+            try:
+                val = arg.json_value()
+                parts.append(val if isinstance(val, str) else json.dumps(val, default=str))
+            except Exception:
+                parts.append(str(arg))  # functions, DOM nodes, circular refs, ...
+        if parts:
+            return " ".join(parts)
+    except Exception:
+        pass
+    return msg.text
+
+
+def _format_bad_response(resp) -> str:
+    body = ""
+    try:
+        body = resp.text()[:300]
+    except Exception:
+        pass
+    line = f"{resp.request.method} {resp.url} → {resp.status} {resp.status_text}"
+    return f"{line} — {body}" if body else line
+
+
 def capture_page(url: str, out_path: Path, wait_seconds: float = 2.5,
                  status: StatusFn = None) -> dict:
     """Load a URL in headless Chromium like preview_page, but ALSO capture what
-    happens at runtime: console errors/warnings, uncaught exceptions, and failed
-    network requests. Returns {screenshot, console, page_errors, failed_requests,
+    happens at runtime: the full console (not just error/warning -- apps log
+    failures at any level), uncaught exceptions and unhandled promise rejections,
+    and failed requests -- both network-level failures (DNS, connection refused)
+    and HTTP-level ones (an API call that came back 4xx/5xx, with its URL, status
+    and response body). Returns {screenshot, console, page_errors, failed_requests,
     load_error} so the agent can fix what actually breaks when the app runs, not
     just what compiles."""
     url = (url or "").strip()
@@ -150,6 +185,11 @@ def capture_page(url: str, out_path: Path, wait_seconds: float = 2.5,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     result = {"screenshot": "", "console": [], "page_errors": [],
               "failed_requests": [], "load_error": ""}
+    # error/warning are the headline signal and must survive the final cap
+    # intact; log/info/debug/etc. are supplementary (this is where a
+    # console.log("request failed", status) would otherwise vanish) and are
+    # capped harder so a chatty app can't crowd the real errors out.
+    console_important, console_other = [], []
 
     with _lock:
         if not ready():
@@ -164,14 +204,17 @@ def capture_page(url: str, out_path: Path, wait_seconds: float = 2.5,
                     page = browser.new_page(viewport={"width": 1280, "height": 800})
 
                     def on_console(msg):
-                        if msg.type in ("error", "warning"):
-                            result["console"].append(f"[{msg.type}] {msg.text}"[:500])
+                        line = f"[{msg.type}] {_console_message_text(msg)}"[:500]
+                        (console_important if msg.type in ("error", "warning")
+                         else console_other).append(line)
 
                     page.on("console", on_console)
                     page.on("pageerror",
                             lambda exc: result["page_errors"].append(str(exc)[:500]))
                     page.on("requestfailed", lambda req: result["failed_requests"].append(
-                        f"{req.method} {req.url} — {(req.failure or '')}"[:300]))
+                        f"{req.method} {req.url} — {(req.failure or '')}"[:400]))
+                    page.on("response", lambda resp: result["failed_requests"].append(
+                        _format_bad_response(resp)[:400]) if resp.status >= 400 else None)
                     try:
                         page.goto(url, wait_until="load", timeout=20_000)
                     except Exception as e:
@@ -190,12 +233,16 @@ def capture_page(url: str, out_path: Path, wait_seconds: float = 2.5,
         except Exception as e:
             if not result["load_error"]:
                 result["load_error"] = f"Browser run failed: {e}"
-    # De-duplicate while preserving order (a noisy app repeats the same error).
-    for key in ("console", "page_errors", "failed_requests"):
+
+    def _dedup(items, cap):
         seen, uniq = set(), []
-        for item in result[key]:
+        for item in items:
             if item not in seen:
                 seen.add(item)
                 uniq.append(item)
-        result[key] = uniq[:25]
+        return uniq[:cap]
+
+    result["console"] = _dedup(console_important, 30) + _dedup(console_other, 10)
+    for key in ("page_errors", "failed_requests"):
+        result[key] = _dedup(result[key], 25)
     return result
