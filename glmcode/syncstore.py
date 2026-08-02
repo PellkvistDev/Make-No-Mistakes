@@ -22,9 +22,24 @@ for byte or the two sides can't read each other:
             ciphertext (WebCrypto's layout), base64 in {"v":1,"iv":..,"ct":..}.
             The plaintext is JSON -- json.dumps and JSON.stringify each parse
             the other's output, so whitespace differences don't matter.
-  * sync.json        = {"v":1,"salt":b64,"check": <blob of "mnm-sync-ok">}
-  * index.json       = <blob of {"v":1,"chats":[{id,title,updated,preview}]}>
-  * chats/<id>.json  = <blob of the chat object>
+  * sync.json          = {"v":1,"salt":b64,"check": <blob of "mnm-sync-ok">}
+  * index.json         = <blob of {"v":1,"chats":[{id,title,updated,preview}]}>
+  * chats/<id>.json    = <blob of the chat object>
+  * chats/<id>.lock.json = <blob of {v,device_id,device,label,acquired,expires}>,
+    a soft per-chat lock (see "SAME CHAT, TWO DEVICES" below).
+
+SAME CHAT, TWO DEVICES. Sending from the phone and the desktop into the same
+chat at once has no live channel to coordinate on -- each side only finds out
+about the other by reading GitHub, and reads are a moment stale. The lock file
+turns "silently overwrite whichever push lands last" into "tell the user,
+before they send, that this chat is busy elsewhere" for the near-totality of
+cases, using GitHub's own compare-and-swap (a Contents API PUT/DELETE with the
+current blob sha; a stale sha is rejected) as the only real atomicity available
+without a server. It is deliberately a COURTESY, not a guarantee: a lock is
+held with a short TTL and renewed (heartbeat) while a turn runs, and expires on
+its own if a device disappears mid-turn, so nothing ever stays wedged waiting
+for a device that crashed or lost its network. The user can always override an
+active lock and send anyway.
 
 SECURITY: the sync passphrase is separate from every other secret, is never
 sent to GitHub (only ciphertext is), and is stored on this device through the
@@ -53,6 +68,8 @@ SYNC_REPO_NAME = "makenomistakes-sync"   # the dedicated private data repo
 SYNC_REPO_BRANCH = "main"
 STATE_BRANCH = "makenomistakes/state"    # legacy per-repo store (read-only path)
 SYNC_CHECK = "mnm-sync-ok"
+DEVICE_LOCK_TTL_MS = 90_000               # a lock older than this is abandoned
+DEVICE_LOCK_HEARTBEAT_S = DEVICE_LOCK_TTL_MS // 3000  # renew well before it expires
 PBKDF2_ITERS = 210000
 
 SYNC_REPO_README = (
@@ -68,6 +85,19 @@ SYNC_REPO_README = (
 
 class SyncError(Exception):
     """A user-safe sync failure (wrong passphrase, network, unavailable crypto)."""
+
+
+class LockedElsewhere(SyncError):
+    """Another device holds a live lock on this chat right now."""
+
+    def __init__(self, device_label: str, since_ms: int):
+        self.device_label = device_label
+        self.since_ms = since_ms
+        super().__init__(f"This chat is active on {device_label} right now.")
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
 
 
 # --------------------------------------------------------------------- #
@@ -305,6 +335,95 @@ class SyncStore:
         data, isha = self._read_index()
         self._write_index([c for c in (data.get("chats") or [])
                            if c.get("id") != chat_id], isha)
+
+    # ------------------------------------------------------------- locking --
+    def _lock_path(self, chat_id: str) -> str:
+        return f"chats/{chat_id}.lock.json"
+
+    def _read_lock(self, chat_id: str) -> tuple[dict | None, str | None]:
+        """(live lock data or None, the raw file's sha or None). The sha is
+        returned even for an EXPIRED lock -- the caller needs it to overwrite
+        the stale file via a sha-gated PUT."""
+        obj, sha = _read_json(self.repo, self._lock_path(chat_id))
+        if not obj:
+            return None, None
+        try:
+            data = aes_decrypt(obj, self.key)
+        except SyncError:
+            return None, sha
+        if data.get("expires", 0) < _now_ms():
+            return None, sha   # abandoned -- treat as free, but keep the sha
+        return data, sha
+
+    def check_lock(self, chat_id: str) -> dict | None:
+        """Current lock info if the chat is actively held by ANY device
+        (including this one), or None if free. Read-only -- does not acquire."""
+        data, _ = self._read_lock(chat_id)
+        return data
+
+    def acquire_lock(self, chat_id: str, device_id: str, device_label: str,
+                     force: bool = False) -> dict:
+        """Atomically claim the chat for `device_id`, via a sha-gated write --
+        so if two devices race to acquire at once, exactly one wins and the
+        other finds out immediately (as a GitHub 409, translated below) rather
+        than both believing they hold it. Raises LockedElsewhere if another
+        device holds a live lock and `force` isn't set; `force` claims it
+        anyway (an explicit user override, not a merge)."""
+        current, sha = self._read_lock(chat_id)
+        if current and current.get("device_id") != device_id and not force:
+            raise LockedElsewhere(current.get("label") or current.get("device") or "another device",
+                                  current.get("acquired", 0))
+        now = _now_ms()
+        payload = {"v": 1, "device_id": device_id, "device": device_label,
+                  "label": device_label, "acquired": now, "expires": now + DEVICE_LOCK_TTL_MS}
+        blob = aes_encrypt(payload, self.key)
+        try:
+            self.repo.put_file(self._lock_path(chat_id), json.dumps(blob),
+                              f"Lock {chat_id}", sha)
+        except GitHubError:
+            # Someone else's write landed in the gap between our read and ours.
+            winner, _ = self._read_lock(chat_id)
+            if winner and winner.get("device_id") != device_id:
+                raise LockedElsewhere(winner.get("label") or winner.get("device") or "another device",
+                                      winner.get("acquired", 0))
+            raise
+        return payload
+
+    def renew_lock(self, chat_id: str, device_id: str, device_label: str) -> bool:
+        """Heartbeat: extend the TTL while this device still holds the lock.
+        Returns False only when another device has genuinely taken over (so
+        the caller can warn its user their turn was preempted) -- a transient
+        write failure returns True, since "couldn't confirm" must never read
+        as "definitely lost it"."""
+        current, sha = self._read_lock(chat_id)
+        if current and current.get("device_id") != device_id:
+            return False
+        now = _now_ms()
+        payload = {"v": 1, "device_id": device_id, "device": device_label,
+                  "label": device_label, "acquired": now, "expires": now + DEVICE_LOCK_TTL_MS}
+        blob = aes_encrypt(payload, self.key)
+        try:
+            self.repo.put_file(self._lock_path(chat_id), json.dumps(blob),
+                              f"Renew lock {chat_id}", sha)
+            return True
+        except GitHubError:
+            winner, _ = self._read_lock(chat_id)
+            if winner and winner.get("device_id") != device_id:
+                return False
+            return True
+
+    def release_lock(self, chat_id: str, device_id: str) -> None:
+        """Best-effort: if this fails or is skipped, the lock still self-heals
+        via TTL expiry within DEVICE_LOCK_TTL_MS."""
+        current, sha = self._read_lock(chat_id)
+        if not sha:
+            return
+        if current and current.get("device_id") != device_id:
+            return   # already taken over by someone else -- not ours to clear
+        try:
+            self.repo.delete_file(self._lock_path(chat_id), f"Unlock {chat_id}", sha)
+        except GitHubError:
+            pass
 
 
 # --------------------------------------------------------------------- #

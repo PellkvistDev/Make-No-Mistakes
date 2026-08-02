@@ -19,6 +19,8 @@
   const SESSION_KEY = "mnm.session.v1";  // encrypted conversation (under the vault key)
   const KEEPKEY_KEY = "mnm.key.v1";      // remembered key for "keep me signed in"
   const SYNCPASS_KEY = "mnm.syncpass.v1"; // sync passphrase, encrypted under the vault key
+  const DEVICEID_KEY = "mnm.deviceid.v1"; // random id identifying this phone for cross-device locks
+  const DEVICE_LABEL = "phone";
 
   // In-memory session (cleared on lock). Secrets/keys never persisted unless
   // "keep me signed in" is on; the conversation is persisted encrypted.
@@ -401,6 +403,68 @@
     } catch (e) { /* offline / rate-limited — keep the local copy */ }
   }
 
+  // ---- cross-device lock (same chat open on phone + desktop at once) ----
+  // A courtesy, not a guarantee: self-heals via TTL if a device disappears
+  // mid-turn, and never permanently blocks — see agent-core.js's
+  // DEVICE_LOCK_TTL_MS note and glmcode/syncstore.py for the desktop twin.
+  function deviceId() {
+    let id = localStorage.getItem(DEVICEID_KEY);
+    if (!id) {
+      try { id = crypto.randomUUID(); }
+      catch { id = "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
+      localStorage.setItem(DEVICEID_KEY, id);
+    }
+    return id;
+  }
+  const chatLockHeartbeats = {}; // chatId -> setInterval id, for chats this device currently holds the lock on
+  function stopLockHeartbeat(chatId) {
+    const id = chatLockHeartbeats[chatId];
+    if (id) { clearInterval(id); delete chatLockHeartbeats[chatId]; }
+  }
+  function startLockHeartbeat(chatId, store) {
+    stopLockHeartbeat(chatId);
+    chatLockHeartbeats[chatId] = setInterval(async () => {
+      try {
+        const ok = await store.renewLock(chatId, deviceId(), DEVICE_LABEL);
+        if (!ok) { stopLockHeartbeat(chatId); addBubble("system", "Heads up: this chat is now also being used on another device."); }
+      } catch (e) { /* fail open — a transient error must not be misread as "preempted" */ }
+    }, AC.DEVICE_LOCK_HEARTBEAT_S * 1000);
+  }
+  // Returns null if the turn is free to proceed (sync off, no chat, lock
+  // acquired, or sync unreachable — fail open, since unreachable means the
+  // other device can't push either). Returns { locked, lockedBy, lockedSince }
+  // if another live device holds it and force wasn't set.
+  async function tryAcquireDeviceLock(chatId, force) {
+    if (!syncOn() || !chatId) return null;
+    let store;
+    try { store = await ensureSyncStore(); } catch (e) { return null; }
+    if (!store) return null;
+    try {
+      await store.acquireLock(chatId, deviceId(), DEVICE_LABEL, !!force);
+    } catch (e) {
+      if (e && e.lockedElsewhere) return { locked: true, lockedBy: e.deviceLabel, lockedSince: e.sinceMs };
+      return null;
+    }
+    startLockHeartbeat(chatId, store);
+    return null;
+  }
+  async function releaseDeviceLock(chatId) {
+    stopLockHeartbeat(chatId);
+    if (!syncOn() || !chatId) return;
+    let store;
+    try { store = await ensureSyncStore(); } catch (e) { return; }
+    if (!store) return;
+    try { await store.releaseLock(chatId, deviceId()); } catch (e) { /* best effort */ }
+  }
+  // Shows who holds the chat and lets the user override. Resolves true to
+  // retry with force=true, false to leave the composer restored and stop.
+  async function confirmLockOverride(lockResult) {
+    const mins = Math.max(1, Math.round((Date.now() - (lockResult.lockedSince || Date.now())) / 60000));
+    return confirm(
+      `This chat is active on ${lockResult.lockedBy} right now (started ${mins}m ago).\n\n` +
+      "Sending here too can overwrite what you're doing there. Send anyway?");
+  }
+
   // ---- chat history screen ----
   function relTime(ms) {
     if (!ms) return "";
@@ -770,23 +834,57 @@
     return report || "(the sub-agent finished without a report)";
   }
 
-  // Wrap a run: manage the running state, stop control, and errors.
-  async function withRun(fn) {
+  // Wrap a run: manage the running state, stop control, errors, and the
+  // cross-device lock. Returns a { locked, lockedBy, lockedSince } object if
+  // another live device holds the chat and force wasn't set (fn never runs
+  // in that case); otherwise undefined.
+  async function withRun(fn, opts) {
     if (currentRun) return;
+    opts = opts || {};
+    const chatId = session && session.chatId;
+    if (chatId) {
+      const lockResult = await tryAcquireDeviceLock(chatId, !!opts.force);
+      if (lockResult) return lockResult;
+    }
     stopFlag = false;
     currentRun = { stop: () => { stopFlag = true; $("btn-stop").disabled = true; } };
     setRunning(true);
     try { await fn(() => stopFlag); }
     catch (e) { addBubble("error", e.message || String(e)); }
-    finally { setRunning(false); currentRun = null; persistSession(); await syncSave(); }
+    finally {
+      setRunning(false); currentRun = null; persistSession(); await syncSave();
+      if (chatId) await releaseDeviceLock(chatId);
+    }
   }
 
-  async function sendPrompt() {
+  // Undo the optimistic bubble/message-array additions made before a send
+  // that turned out to be locked elsewhere.
+  function popOptimisticUser(bubble) {
+    if (bubble && bubble.remove) bubble.remove();
+    if (session) {
+      const t = session.transcript;
+      if (t && t.length && t[t.length - 1].role === "user") t.pop();
+      const m = session.messages;
+      if (m && m.length && m[m.length - 1].role === "user") m.pop();
+    }
+  }
+  // Same, plus restore the composer's text/attachments (for a manual send).
+  function rollbackOptimisticSend(bubble, text, atts) {
+    popOptimisticUser(bubble);
+    prompt.value = text;
+    prompt.style.height = "auto";
+    prompt.style.height = Math.min(prompt.scrollHeight, 160) + "px";
+    attachments = atts;
+    renderChips();
+  }
+
+  async function sendPrompt(force) {
     if (currentRun || composing) return;
     const text = prompt.value.trim();
     if (!text && !attachments.length) return;
+    const savedAttachments = attachments.slice();
     prompt.value = ""; prompt.style.height = "auto"; fitMessages();
-    addBubble("user", (text || "(attached files)") + attachmentNote());
+    const bubble = addBubble("user", (text || "(attached files)") + attachmentNote());
     // composeMessage may call the vision model (to describe uploaded images), so
     // guard against a second send and disable the composer while it runs.
     composing = true; setRunning(true);
@@ -797,7 +895,7 @@
     session.turnCommits = 0;
     session.messages.push({ role: "user", content });
 
-    await withRun(async (getStopped) => {
+    const lockResult = await withRun(async (getStopped) => {
       if (planMode()) {
         session.messages[0].content = session.baseSystem + PLAN_DIRECTIVE;
         await runTurn(getStopped, session.readTools, READ_SCHEMAS);
@@ -805,7 +903,12 @@
       } else {
         await runBuild(getStopped);
       }
-    });
+    }, { force });
+
+    if (lockResult && lockResult.locked) {
+      rollbackOptimisticSend(bubble, text, savedAttachments);
+      if (await confirmLockOverride(lockResult)) await sendPrompt(true);
+    }
   }
 
   function showApproveBar() {
@@ -822,11 +925,16 @@
     if (atBottom()) scroll();
   }
 
-  async function executePlan() {
-    addBubble("user", "Approved — build it.");
+  async function executePlan(force) {
+    const bubble = addBubble("user", "Approved — build it.");
     session.turnCommits = 0;
     session.messages.push({ role: "user", content: "Approved. Implement that plan now: make the edits and commit them." });
-    await withRun((getStopped) => runBuild(getStopped));
+    const lockResult = await withRun((getStopped) => runBuild(getStopped), { force });
+    if (lockResult && lockResult.locked) {
+      popOptimisticUser(bubble);
+      if (await confirmLockOverride(lockResult)) await executePlan(true);
+      else showApproveBar();
+    }
   }
 
   function setRunning(on) {

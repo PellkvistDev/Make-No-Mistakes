@@ -170,6 +170,24 @@
   const STATE_BRANCH = "makenomistakes/state";  // legacy per-repo store
   const SYNC_CHECK = "mnm-sync-ok";
 
+  // SAME CHAT, TWO DEVICES: a per-chat lock file (chats/<id>.lock.json,
+  // encrypted like everything else) records which device is actively
+  // mid-turn on a chat. It's a courtesy, not a guarantee — self-heals via
+  // TTL expiry if a device disappears mid-turn, and GitHub's own sha-gated
+  // PUT (compare-and-swap) is the only real atomicity primitive here.
+  // Mirrors glmcode/syncstore.py's SyncStore lock methods field-for-field
+  // so phone and desktop can read/write each other's locks interchangeably.
+  const DEVICE_LOCK_TTL_MS = 90000;
+  const DEVICE_LOCK_HEARTBEAT_S = Math.floor(DEVICE_LOCK_TTL_MS / 3000);
+
+  function lockedElsewhereError(deviceLabel, sinceMs) {
+    const e = new Error(`This chat is active on ${deviceLabel} right now.`);
+    e.lockedElsewhere = true;
+    e.deviceLabel = deviceLabel;
+    e.sinceMs = sinceMs;
+    return e;
+  }
+
   // Find (or create) the dedicated private sync repo for the signed-in user.
   // Returns { owner, repo }.
   async function ensureSyncRepo(gh) {
@@ -234,6 +252,16 @@
     async function fileSha(path) {
       try { return (await gh.getFile(path)).sha; } catch (e) { return null; }
     }
+    function lockPath(id) { return `chats/${id}.lock.json`; }
+    // { data: live lock or null, sha: the raw file's sha or null }.
+    async function readLock(id) {
+      let f;
+      try { f = await gh.getFile(lockPath(id)); } catch (e) { return { data: null, sha: null }; }
+      let data;
+      try { data = await aesDecrypt(JSON.parse(f.text), key); } catch (e) { return { data: null, sha: f.sha }; }
+      if (!data || (data.expires || 0) < Date.now()) return { data: null, sha: f.sha };
+      return { data, sha: f.sha };
+    }
     return {
       // Newest-first list of chat summaries (id, title, updated, preview).
       async list() {
@@ -267,6 +295,60 @@
         if (sha) await gh.deleteFile(path, `Delete session ${id}`, sha);
         const { data, sha: isha } = await readIndex();
         await writeIndex((data.chats || []).filter((c) => c.id !== id), isha);
+      },
+      // --- cross-device lock (see DEVICE_LOCK_TTL_MS note above) ------------
+      async checkLock(id) {
+        const { data } = await readLock(id);
+        return data;
+      },
+      // Throws lockedElsewhereError() if another live device holds it, unless
+      // force is set. Even with force, a genuine write race still reports the
+      // true winner rather than silently succeeding.
+      async acquireLock(id, deviceId, deviceLabel, force) {
+        const { data: current, sha } = await readLock(id);
+        if (current && current.device_id !== deviceId && !force) {
+          throw lockedElsewhereError(current.label || current.device || "another device",
+            current.acquired || 0);
+        }
+        const now = Date.now();
+        const payload = { v: 1, device_id: deviceId, device: deviceLabel, label: deviceLabel,
+          acquired: now, expires: now + DEVICE_LOCK_TTL_MS };
+        const blob = await aesEncrypt(payload, key);
+        try {
+          await gh.putFile(lockPath(id), JSON.stringify(blob), `Lock ${id}`, sha);
+        } catch (e) {
+          const { data: winner } = await readLock(id);
+          if (winner && winner.device_id !== deviceId) {
+            throw lockedElsewhereError(winner.label || winner.device || "another device",
+              winner.acquired || 0);
+          }
+          throw e;
+        }
+        return payload;
+      },
+      // Extends an already-held lock. Returns false once another device has
+      // genuinely taken over; fails OPEN (returns true) on a transient write
+      // error, since "couldn't confirm" must never be misread as "preempted".
+      async renewLock(id, deviceId, deviceLabel) {
+        const { data: current, sha } = await readLock(id);
+        if (current && current.device_id !== deviceId) return false;
+        const now = Date.now();
+        const payload = { v: 1, device_id: deviceId, device: deviceLabel, label: deviceLabel,
+          acquired: now, expires: now + DEVICE_LOCK_TTL_MS };
+        const blob = await aesEncrypt(payload, key);
+        try {
+          await gh.putFile(lockPath(id), JSON.stringify(blob), `Renew lock ${id}`, sha);
+          return true;
+        } catch (e) {
+          const { data: winner } = await readLock(id);
+          return !(winner && winner.device_id !== deviceId);
+        }
+      },
+      async releaseLock(id, deviceId) {
+        const { data: current, sha } = await readLock(id);
+        if (!sha) return;
+        if (current && current.device_id !== deviceId) return;
+        try { await gh.deleteFile(lockPath(id), `Unlock ${id}`, sha); } catch (e) { /* best effort */ }
       },
     };
   }
@@ -511,6 +593,7 @@
     SYSTEM_PROMPT, SUBAGENT_PROMPT,
     openSync, makeSyncStore, ensureSyncRepo,
     SYNC_REPO_NAME, SYNC_REPO_BRANCH, STATE_BRANCH,
+    DEVICE_LOCK_TTL_MS, DEVICE_LOCK_HEARTBEAT_S,
     _b64: { bytesToB64, b64ToBytes },
   };
   if (typeof module !== "undefined" && module.exports) module.exports = CoreAPI;

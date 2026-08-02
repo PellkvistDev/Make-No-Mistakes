@@ -433,3 +433,184 @@ test("sync: list on an empty store returns [] (no index yet)", async () => {
   const { store } = await C.openSync(gh, "empty store pass");
   assert.deepEqual(await store.list(), []);
 });
+
+// ------------------------------------------------ cross-device lock -----
+// A courtesy, not a guarantee: TTL self-heals a dead device, and GitHub's
+// own sha-gated PUT (compare-and-swap) is the only real atomicity here.
+// Mirrors glmcode/syncstore.py's SyncStore lock tests so behavior stays in
+// lockstep between the desktop and phone implementations.
+
+// Unlike fakeSyncGh (lenient — accepts any sha, fine for the non-racing
+// tests above), this fake enforces real sha-gating so a genuine lost-race
+// can actually be exercised.
+function fakeLockingGh(initial) {
+  const files = Object.assign({}, initial);
+  const shas = {};
+  let counter = 0;
+  const state = { branch: initial ? "sha0" : null, orphanCalls: 0 };
+  const gh = {
+    async getFile(path) {
+      if (!(path in files)) throw new Error("GitHub 404: not found " + path);
+      if (!(path in shas)) shas[path] = "seed-" + path;
+      return { text: files[path], sha: shas[path] };
+    },
+    async putFile(path, text, message, sha) {
+      const current = shas[path];
+      if (current !== undefined ? sha !== current : !!sha) {
+        throw new Error("GitHub 409: " + path + " is out of date");
+      }
+      files[path] = text;
+      shas[path] = "sha-" + path + "-" + (++counter);
+      return { commit: { sha: "c" } };
+    },
+    async deleteFile(path, message, sha) {
+      const current = shas[path];
+      if (current !== sha) throw new Error("GitHub 409: " + path + " is out of date");
+      delete files[path]; delete shas[path];
+      return null;
+    },
+    async branchSha() { return state.branch; },
+    async createOrphanBranch() { state.orphanCalls++; state.branch = "sha-orphan"; return state.branch; },
+  };
+  return { gh, files, shas, state };
+}
+
+test("lock: acquireLock succeeds when the chat is free", async () => {
+  const { gh } = fakeLockingGh(null);
+  const { store } = await C.openSync(gh, "lock passphrase");
+  const payload = await store.acquireLock("c1", "device-a", "desktop", false);
+  assert.equal(payload.device_id, "device-a");
+  assert.equal(payload.label, "desktop");
+  assert.ok(payload.expires > payload.acquired);
+  assert.deepEqual(await store.checkLock("c1"), payload);
+});
+
+test("lock: acquireLock fails when held by another live device", async () => {
+  const { gh } = fakeLockingGh(null);
+  const { store } = await C.openSync(gh, "lock passphrase");
+  await store.acquireLock("c1", "device-a", "desktop", false);
+  await assert.rejects(
+    () => store.acquireLock("c1", "device-b", "phone", false),
+    (e) => { assert.match(e.message, /active on desktop/); assert.equal(e.lockedElsewhere, true);
+      assert.equal(e.deviceLabel, "desktop"); return true; });
+});
+
+test("lock: acquireLock is a no-op re-lock for the SAME device (no throw)", async () => {
+  const { gh } = fakeLockingGh(null);
+  const { store } = await C.openSync(gh, "lock passphrase");
+  await store.acquireLock("c1", "device-a", "desktop", false);
+  const again = await store.acquireLock("c1", "device-a", "desktop", false);
+  assert.equal(again.device_id, "device-a");
+});
+
+test("lock: acquireLock succeeds once the existing lock has expired", async () => {
+  const { gh, files, shas } = fakeLockingGh(null);
+  const { key, store } = await C.openSync(gh, "lock passphrase");
+  const expired = { v: 1, device_id: "device-a", device: "desktop", label: "desktop",
+    acquired: Date.now() - 200000, expires: Date.now() - 100000 };
+  const blob = await C.aesEncrypt(expired, key);
+  files["chats/c1.lock.json"] = JSON.stringify(blob);
+  shas["chats/c1.lock.json"] = "seed-expired";
+  const payload = await store.acquireLock("c1", "device-b", "phone", false);
+  assert.equal(payload.device_id, "device-b");
+});
+
+test("lock: force overrides a live lock held by another device", async () => {
+  const { gh } = fakeLockingGh(null);
+  const { store } = await C.openSync(gh, "lock passphrase");
+  await store.acquireLock("c1", "device-a", "desktop", false);
+  const payload = await store.acquireLock("c1", "device-b", "phone", true);
+  assert.equal(payload.device_id, "device-b");
+  assert.equal((await store.checkLock("c1")).device_id, "device-b");
+});
+
+test("lock: acquireLock detects a genuine write race and reports the true winner", async () => {
+  const { gh } = fakeLockingGh(null);
+  const { key, store } = await C.openSync(gh, "lock passphrase");
+  const originalPut = gh.putFile.bind(gh);
+  let injected = false;
+  gh.putFile = async (path, text, message, sha) => {
+    if (path === "chats/c1.lock.json" && !injected) {
+      injected = true;
+      // Device A's lock lands, using the SAME stale sha device B just read,
+      // right in the window between B's read and B's own write.
+      const payload = { v: 1, device_id: "device-a", device: "desktop", label: "desktop",
+        acquired: Date.now(), expires: Date.now() + 90000 };
+      const blob = await C.aesEncrypt(payload, key);
+      await originalPut(path, JSON.stringify(blob), "Lock c1", sha);
+    }
+    return originalPut(path, text, message, sha); // B's write now sees a stale sha
+  };
+  await assert.rejects(
+    () => store.acquireLock("c1", "device-b", "phone", false),
+    (e) => { assert.match(e.message, /active on desktop/); return true; });
+});
+
+test("lock: renewLock extends the TTL while still held by the same device", async () => {
+  const { gh } = fakeLockingGh(null);
+  const { store } = await C.openSync(gh, "lock passphrase");
+  const first = await store.acquireLock("c1", "device-a", "desktop", false);
+  await new Promise((r) => setTimeout(r, 5));
+  const ok = await store.renewLock("c1", "device-a", "desktop");
+  assert.equal(ok, true);
+  const now = await store.checkLock("c1");
+  assert.ok(now.expires >= first.expires);
+});
+
+test("lock: renewLock returns false once another device has taken over", async () => {
+  const { gh } = fakeLockingGh(null);
+  const { store } = await C.openSync(gh, "lock passphrase");
+  await store.acquireLock("c1", "device-a", "desktop", false);
+  await store.acquireLock("c1", "device-b", "phone", true); // force takeover
+  const ok = await store.renewLock("c1", "device-a", "desktop");
+  assert.equal(ok, false);
+});
+
+test("lock: renewLock fails OPEN (true) on a transient write error", async () => {
+  const { gh } = fakeLockingGh(null);
+  const { store } = await C.openSync(gh, "lock passphrase");
+  await store.acquireLock("c1", "device-a", "desktop", false);
+  gh.putFile = async () => { throw new Error("network blip"); };
+  const ok = await store.renewLock("c1", "device-a", "desktop");
+  assert.equal(ok, true, "a transient error must never be misread as preempted");
+});
+
+test("lock: releaseLock frees the chat immediately", async () => {
+  const { gh } = fakeLockingGh(null);
+  const { store } = await C.openSync(gh, "lock passphrase");
+  await store.acquireLock("c1", "device-a", "desktop", false);
+  await store.releaseLock("c1", "device-a");
+  assert.equal(await store.checkLock("c1"), null);
+  // and it's immediately acquirable again
+  const payload = await store.acquireLock("c1", "device-b", "phone", false);
+  assert.equal(payload.device_id, "device-b");
+});
+
+test("lock: releaseLock does not clear a lock taken over by someone else", async () => {
+  const { gh } = fakeLockingGh(null);
+  const { store } = await C.openSync(gh, "lock passphrase");
+  await store.acquireLock("c1", "device-a", "desktop", false);
+  await store.acquireLock("c1", "device-b", "phone", true);
+  await store.releaseLock("c1", "device-a"); // stale release from the loser
+  const current = await store.checkLock("c1");
+  assert.equal(current.device_id, "device-b", "the winner's lock must survive a stale release");
+});
+
+test("lock: checkLock treats an expired lock as free", async () => {
+  const { gh, files, shas } = fakeLockingGh(null);
+  const { key, store } = await C.openSync(gh, "lock passphrase");
+  const expired = { v: 1, device_id: "device-a", device: "desktop", label: "desktop",
+    acquired: Date.now() - 200000, expires: Date.now() - 100000 };
+  files["chats/c1.lock.json"] = JSON.stringify(await C.aesEncrypt(expired, key));
+  shas["chats/c1.lock.json"] = "seed-expired";
+  assert.equal(await store.checkLock("c1"), null);
+});
+
+test("lock: the lock file is encrypted (no plaintext device label on the wire)", async () => {
+  const { gh, files } = fakeLockingGh(null);
+  const { store } = await C.openSync(gh, "lock passphrase");
+  await store.acquireLock("c1", "device-a", "my-laptop", false);
+  const dump = JSON.stringify(files["chats/c1.lock.json"]);
+  assert.ok(!dump.includes("my-laptop"), "device label leaked into the lock file");
+  assert.ok(!dump.includes("device-a"), "device id leaked into the lock file");
+});

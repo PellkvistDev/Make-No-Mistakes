@@ -418,6 +418,8 @@ def _bare_api(active=None, **attrs):
     api._chats = {}
     api.session_id = ""
     api._store = _FakeStore()
+    api._chat_locks = {}
+    api._cfg = types.SimpleNamespace(extra={})
     for k, v in attrs.items():
         setattr(api, k, v)
     if active is not None:
@@ -798,3 +800,332 @@ def test_github_create_and_open_needs_a_name_and_token(monkeypatch):
 
     monkeypatch.setattr(gui_app.Api, "_gh_token", lambda self: "T")
     assert "Name the new repository" in api.github_create_and_open("  ")["error"]
+
+
+# ------------------------------------------------------------ device locking
+# Sending from two devices into the same chat has no live channel to
+# coordinate on -- the lock file (compare-and-swap via GitHub's sha-gated
+# writes) is what turns "silently overwrite whichever push lands last" into
+# "tell the user, before they send, that this chat is busy elsewhere".
+
+class LockingFakeGitHub(FakeGitHub):
+    """FakeGitHub, but PUT actually enforces sha-gating like the real GitHub
+    Contents API. The base fake accepts any PUT unconditionally, which is fine
+    for the non-racing tests above but can't exercise acquire_lock's
+    lost-the-race branch -- that needs a PUT to genuinely fail when the sha
+    it's holding is stale."""
+
+    def api(self, method, path, token, body=None):
+        p = path.split("?", 1)[0]
+        if method == "PUT" and "/contents/" in p:
+            fpath = p.split("/contents/", 1)[1]
+            current_sha = ("sha-" + hashlib.sha1(self.files[fpath].encode()).hexdigest()[:8]
+                          if fpath in self.files else None)
+            if (body or {}).get("sha") != current_sha:
+                raise GitHubError("409: sha does not match")
+        return super().api(method, path, token, body)
+
+
+def _lock_store(fake):
+    return SyncStore(_repo(fake), b"k")
+
+
+def test_acquire_lock_succeeds_when_free(fake_codec):
+    fake = LockingFakeGitHub()
+    store = _lock_store(fake)
+    lock = store.acquire_lock("c1", "device-a", "desktop")
+    assert lock["device_id"] == "device-a"
+    assert lock["label"] == "desktop"
+    assert "chats/c1.lock.json" in fake.files
+
+
+def test_acquire_lock_fails_when_held_by_another_live_device(fake_codec):
+    fake = LockingFakeGitHub()
+    a, b = _lock_store(fake), _lock_store(fake)
+    a.acquire_lock("c1", "device-a", "desktop")
+    with pytest.raises(syncstore.LockedElsewhere) as exc:
+        b.acquire_lock("c1", "device-b", "phone")
+    assert exc.value.device_label == "desktop"
+
+
+def test_acquire_lock_succeeds_when_the_existing_lock_expired(fake_codec):
+    fake = LockingFakeGitHub()
+    store = _lock_store(fake)
+    stale = {"v": 1, "device_id": "device-a", "device": "desktop", "label": "desktop",
+             "acquired": 1, "expires": 1}   # expired eons ago
+    fake.files["chats/c1.lock.json"] = json.dumps(syncstore.aes_encrypt(stale, b"k"))
+    lock = store.acquire_lock("c1", "device-b", "phone")   # must not raise
+    assert lock["device_id"] == "device-b"
+
+
+def test_acquire_lock_force_overrides_a_live_lock(fake_codec):
+    fake = LockingFakeGitHub()
+    a, b = _lock_store(fake), _lock_store(fake)
+    a.acquire_lock("c1", "device-a", "desktop")
+    lock = b.acquire_lock("c1", "device-b", "phone", force=True)
+    assert lock["device_id"] == "device-b"
+    assert _lock_store(fake).check_lock("c1")["device_id"] == "device-b"
+
+
+def test_acquire_lock_detects_a_genuine_write_race(fake_codec, monkeypatch):
+    """The gap between acquire_lock's read and its write is where a real race
+    lives: two devices both read 'free', both attempt to write, and GitHub's
+    sha-gated PUT makes exactly one of them win. This forces that exact
+    interleaving (device A's write lands between B's read and B's write) and
+    checks B is told the truth -- not left believing it holds the lock."""
+    fake = LockingFakeGitHub()
+    a = _lock_store(fake)
+    a.acquire_lock("c1", "device-a", "desktop")
+
+    b = _lock_store(fake)
+    real_read = b._read_lock
+    calls = {"n": 0}
+
+    def stale_once(chat_id):
+        calls["n"] += 1
+        return (None, None) if calls["n"] == 1 else real_read(chat_id)
+    monkeypatch.setattr(b, "_read_lock", stale_once)
+
+    with pytest.raises(syncstore.LockedElsewhere) as exc:
+        b.acquire_lock("c1", "device-b", "phone")
+    assert exc.value.device_label == "desktop"
+
+
+def test_renew_lock_extends_while_still_held(fake_codec):
+    fake = LockingFakeGitHub()
+    store = _lock_store(fake)
+    first = store.acquire_lock("c1", "device-a", "desktop")
+    assert store.renew_lock("c1", "device-a", "desktop") is True
+    renewed = store.check_lock("c1")
+    assert renewed["expires"] >= first["expires"]
+
+
+def test_renew_lock_returns_false_once_another_device_took_over(fake_codec):
+    fake = LockingFakeGitHub()
+    a, b = _lock_store(fake), _lock_store(fake)
+    a.acquire_lock("c1", "device-a", "desktop")
+    b.acquire_lock("c1", "device-b", "phone", force=True)
+    assert a.renew_lock("c1", "device-a", "desktop") is False
+
+
+def test_renew_lock_fails_open_on_a_transient_write_error(fake_codec, monkeypatch):
+    """A network hiccup on the renewal PUT must not read as 'preempted' --
+    that would wrongly warn the user their own still-active turn was taken
+    over by someone else."""
+    fake = LockingFakeGitHub()
+    store = _lock_store(fake)
+    store.acquire_lock("c1", "device-a", "desktop")
+
+    def boom(*a, **kw):
+        raise GitHubError("network blip")
+    monkeypatch.setattr(fake, "api", boom)
+    # renew_lock's own re-check also goes through the (now-broken) api, so it
+    # can't confirm anything either -- and must still fail open.
+    assert store.renew_lock("c1", "device-a", "desktop") is True
+
+
+def test_release_lock_frees_it_immediately(fake_codec):
+    fake = LockingFakeGitHub()
+    a = _lock_store(fake)
+    a.acquire_lock("c1", "device-a", "desktop")
+    a.release_lock("c1", "device-a")
+    assert _lock_store(fake).check_lock("c1") is None
+    _lock_store(fake).acquire_lock("c1", "device-b", "phone")   # must not raise
+
+
+def test_release_lock_does_not_clear_a_lock_taken_over_by_someone_else(fake_codec):
+    fake = LockingFakeGitHub()
+    a, b = _lock_store(fake), _lock_store(fake)
+    a.acquire_lock("c1", "device-a", "desktop")
+    b.acquire_lock("c1", "device-b", "phone", force=True)
+    a.release_lock("c1", "device-a")   # A's turn finishes, tries to clean up
+    still_there = _lock_store(fake).check_lock("c1")
+    assert still_there and still_there["device_id"] == "device-b"
+
+
+def test_check_lock_treats_an_expired_lock_as_free(fake_codec):
+    fake = LockingFakeGitHub()
+    stale = {"v": 1, "device_id": "device-a", "device": "desktop", "label": "desktop",
+             "acquired": 1, "expires": 1}
+    fake.files["chats/c1.lock.json"] = json.dumps(syncstore.aes_encrypt(stale, b"k"))
+    assert _lock_store(fake).check_lock("c1") is None
+
+
+# ------------------------------------------------ desktop Api: device lock
+
+class _FakeChatState:
+    def __init__(self, sid):
+        self.sid = sid
+        self.turn_lock = threading.Lock()
+
+
+def test_device_identity_generates_and_persists_once(monkeypatch):
+    api = _bare_api()
+    api._cfg = types.SimpleNamespace(extra={})
+    saved = []
+    monkeypatch.setattr(gui_app, "save_config", lambda c: saved.append(dict(c.extra)))
+    did1, label1 = api._device_identity()
+    assert did1 and api._cfg.extra["device_id"] == did1
+    assert saved and saved[0]["device_id"] == did1
+    assert "desktop" in label1
+
+    did2, _label2 = api._device_identity()
+    assert did2 == did1, "must reuse the persisted id, not mint a new one each call"
+    assert len(saved) == 1, "must not re-save once the id already exists"
+
+
+def test_try_acquire_device_lock_none_when_sync_is_off(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: None)
+    assert api._try_acquire_device_lock("s1") is None
+
+
+def test_try_acquire_device_lock_fails_open_when_sync_is_unreachable(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pass")
+    monkeypatch.setattr(gui_app.Api, "_open_sync_store", lambda self: (None, "offline"))
+    monkeypatch.setattr(gui_app, "save_config", lambda c: None)
+    assert api._try_acquire_device_lock("s1") is None
+
+
+def test_try_acquire_device_lock_reports_a_live_lock(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pass")
+    monkeypatch.setattr(gui_app, "save_config", lambda c: None)
+
+    class Store:
+        def acquire_lock(self, sid, device_id, device_label, force=False):
+            raise gui_app.syncstore.LockedElsewhere("phone", 123)
+    monkeypatch.setattr(gui_app.Api, "_open_sync_store", lambda self: (Store(), None))
+    res = api._try_acquire_device_lock("s1")
+    assert res == {"locked": True, "error": "This chat is active on phone right now.",
+                   "locked_by": "phone", "locked_since": 123}
+
+
+def test_try_acquire_device_lock_succeeds_and_starts_a_heartbeat(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pass")
+    monkeypatch.setattr(gui_app, "save_config", lambda c: None)
+    acquired = []
+
+    class Store:
+        def acquire_lock(self, sid, device_id, device_label, force=False):
+            acquired.append((sid, device_id, device_label, force))
+    monkeypatch.setattr(gui_app.Api, "_open_sync_store", lambda self: (Store(), None))
+    monkeypatch.setattr(gui_app.Api, "_start_lock_heartbeat",
+                        lambda self, sid, store, device_id, device_label: "STOP_TOKEN")
+    res = api._try_acquire_device_lock("s1", force=True)
+    assert res is None
+    assert acquired[0][0] == "s1" and acquired[0][3] is True, "force must reach acquire_lock"
+    assert api._chat_locks["s1"] == "STOP_TOKEN"
+
+
+def test_release_device_lock_stops_heartbeat_and_releases(monkeypatch):
+    api = _bare_api()
+    stop = threading.Event()
+    api._chat_locks = {"s1": stop}
+    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pass")
+    monkeypatch.setattr(gui_app, "save_config", lambda c: None)
+    released = []
+
+    class Store:
+        def release_lock(self, sid, device_id):
+            released.append(sid)
+    monkeypatch.setattr(gui_app.Api, "_open_sync_store", lambda self: (Store(), None))
+    api._release_device_lock("s1")
+    assert stop.is_set()
+    assert "s1" not in api._chat_locks
+    assert released == ["s1"]
+
+
+def test_release_device_lock_is_a_safe_no_op_without_sync(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: None)
+    api._release_device_lock("nonexistent")   # must not raise
+
+
+def test_send_returns_locked_and_never_starts_the_turn(monkeypatch):
+    cs = _FakeChatState("s1")
+    api = _bare_api(active=cs)
+    monkeypatch.setattr(gui_app.Api, "_try_acquire_device_lock",
+                        lambda self, sid, force=False: {"locked": True, "error": "busy",
+                                                        "locked_by": "phone", "locked_since": 1})
+    ran = threading.Event()
+    monkeypatch.setattr(gui_app.Api, "_run_send_turn", lambda self, *a, **kw: ran.set())
+    res = api.send("hello")
+    assert res["locked"] is True and res["locked_by"] == "phone"
+    assert not ran.wait(0.2), "the turn must never start when the chat is locked elsewhere"
+    assert cs.turn_lock.acquire(blocking=False), "turn_lock must be released back to the caller"
+
+
+def test_send_proceeds_when_nothing_is_locked(monkeypatch):
+    cs = _FakeChatState("s2")
+    api = _bare_api(active=cs)
+    monkeypatch.setattr(gui_app.Api, "_try_acquire_device_lock",
+                        lambda self, sid, force=False: None)
+    ran = threading.Event()
+    monkeypatch.setattr(gui_app.Api, "_run_send_turn", lambda self, *a, **kw: ran.set())
+    res = api.send("hello")
+    assert res == {"ok": True, "started": True}
+    assert ran.wait(1.0), "the turn must start once the lock check clears"
+
+
+def test_send_passes_force_through_to_the_lock_check(monkeypatch):
+    cs = _FakeChatState("s3")
+    api = _bare_api(active=cs)
+    seen = {}
+
+    def fake_acquire(self, sid, force=False):
+        seen["sid"], seen["force"] = sid, force
+        return None
+    monkeypatch.setattr(gui_app.Api, "_try_acquire_device_lock", fake_acquire)
+    monkeypatch.setattr(gui_app.Api, "_run_send_turn", lambda self, *a, **kw: None)
+    api.send("hello", force=True)
+    assert seen == {"sid": "s3", "force": True}
+
+
+def test_maybe_autosync_releases_the_lock_only_after_the_push_lands(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pass")
+    order = []
+    monkeypatch.setattr(gui_app.Api, "sync_push_chat",
+                        lambda self, sid: order.append("pushed"))
+    monkeypatch.setattr(gui_app.Api, "_release_device_lock",
+                        lambda self, sid: order.append("released"))
+    api._maybe_autosync("s1", then_unlock=True)
+    for _ in range(50):
+        if len(order) >= 2:
+            break
+        time.sleep(0.02)
+    assert order == ["pushed", "released"], \
+        "the lock must not be released until the push actually completes"
+
+
+def test_maybe_autosync_releases_immediately_when_sync_is_off(monkeypatch):
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: None)
+    released = []
+    monkeypatch.setattr(gui_app.Api, "_release_device_lock",
+                        lambda self, sid: released.append(sid))
+    api._maybe_autosync("s1", then_unlock=True)
+    assert released == ["s1"]
+
+
+def test_maybe_autosync_without_then_unlock_never_touches_the_lock(monkeypatch):
+    """The scheduled-task call site never holds a device lock; confirm the
+    default doesn't accidentally start releasing one."""
+    api = _bare_api()
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pass")
+    monkeypatch.setattr(gui_app.Api, "sync_push_chat", lambda self, sid: None)
+    released = []
+    monkeypatch.setattr(gui_app.Api, "_release_device_lock",
+                        lambda self, sid: released.append(sid))
+    api._maybe_autosync("s1")
+    time.sleep(0.1)
+    assert released == []
