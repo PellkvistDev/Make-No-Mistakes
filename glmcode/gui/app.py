@@ -10,6 +10,7 @@ import os
 import queue
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -645,6 +646,9 @@ class Api:
         # only fire while the user is away in another app -- the in-app UI
         # already covers the focused case).
         self._window_focused = True
+        # sid -> heartbeat stop-event, for chats this device currently holds
+        # the cross-device sync lock on (see _try_acquire_device_lock).
+        self._chat_locks: dict[str, threading.Event] = {}
 
         configure_search(self._cfg.search_provider, self._cfg.resolve_tavily_key())
         # MCP servers: spawned in the background so a slow `npx` download
@@ -1870,6 +1874,80 @@ class Api:
     # GitHub token and never leaves this machine (stored via the same secure
     # secretstore). GitHub only ever sees ciphertext. See glmcode/syncstore.py.
 
+    def _device_identity(self) -> tuple[str, str]:
+        """(device_id, human label) for this install -- stable across
+        launches, used only to tell devices apart for the sync lock (see
+        syncstore.py's "SAME CHAT, TWO DEVICES"). Generated once, stashed in
+        config.extra (it isn't a secret, no reason for its own store)."""
+        did = self._cfg.extra.get("device_id")
+        if not did:
+            did = uuid.uuid4().hex
+            self._cfg.extra["device_id"] = did
+            save_config(self._cfg)
+        label = "desktop"
+        try:
+            host = socket.gethostname().strip()
+            if host:
+                label = f"desktop ({host[:24]})"
+        except OSError:
+            pass
+        return did, label
+
+    def _try_acquire_device_lock(self, sid: str, force: bool = False) -> dict | None:
+        """None if there's nothing to coordinate (sync off, or sync
+        unreachable -- fails OPEN, since an unreachable sync store means the
+        other device can't push either, so there's no race to protect
+        against); {"locked": True, ...} if another device holds a live lock
+        and `force` wasn't set. On success, starts the heartbeat that keeps
+        the lock alive for the rest of this turn."""
+        if not (syncstore.crypto_available() and syncstore.load_passphrase()):
+            return None
+        device_id, device_label = self._device_identity()
+        try:
+            store, err = self._open_sync_store()
+            if err or not store:
+                return None
+            store.acquire_lock(sid, device_id, device_label, force=force)
+        except syncstore.LockedElsewhere as e:
+            return {"locked": True, "error": str(e),
+                    "locked_by": e.device_label, "locked_since": e.since_ms}
+        except (syncstore.SyncError, githubsync.GitHubError):
+            return None
+        self._chat_locks[sid] = self._start_lock_heartbeat(sid, store, device_id, device_label)
+        return None
+
+    def _start_lock_heartbeat(self, sid: str, store, device_id: str,
+                              device_label: str) -> threading.Event:
+        stop = threading.Event()
+
+        def beat():
+            while not stop.wait(syncstore.DEVICE_LOCK_HEARTBEAT_S):
+                try:
+                    if not store.renew_lock(sid, device_id, device_label):
+                        self._make_events(sid).warn(
+                            "Heads up: this chat is now also being used on another device.")
+                        return
+                except Exception:
+                    pass   # transient -- the next heartbeat tries again
+        threading.Thread(target=beat, daemon=True).start()
+        return stop
+
+    def _release_device_lock(self, sid: str) -> None:
+        """Best-effort; a lock we fail to release here still self-heals via
+        its own TTL within DEVICE_LOCK_TTL_MS."""
+        stop = self._chat_locks.pop(sid, None)
+        if stop:
+            stop.set()
+        if not (syncstore.crypto_available() and syncstore.load_passphrase()):
+            return
+        try:
+            device_id, _label = self._device_identity()
+            store, err = self._open_sync_store()
+            if not err and store:
+                store.release_lock(sid, device_id)
+        except Exception:
+            pass
+
     def sync_env(self):
         """What the UI needs to render the sync controls. When encryption is
         unavailable we return WHY plus the command that fixes it, so the panel
@@ -1992,13 +2070,21 @@ class Api:
             return {"error": str(e)}
         return {"ok": True}
 
-    def _maybe_autosync(self, sid: str) -> None:
+    def _maybe_autosync(self, sid: str, then_unlock: bool = False) -> None:
         """Push a finished turn to the sync repo, in the background.
 
         Seamless means the user never presses Upload. This runs off the turn
         thread and swallows everything: the local session is already saved, so a
-        failed push costs nothing but a retry next turn."""
+        failed push costs nothing but a retry next turn.
+
+        then_unlock=True (only when this turn held the cross-device lock)
+        releases it only once THIS push actually lands, not when the turn's
+        synchronous work finishes -- releasing any earlier would reopen the
+        exact race the lock exists to close: another device could acquire and
+        push its own (now stale) copy while ours is still in flight."""
         if not sid or not syncstore.load_passphrase():
+            if then_unlock:
+                self._release_device_lock(sid)
             return
 
         def push():
@@ -2006,6 +2092,9 @@ class Api:
                 self.sync_push_chat(sid)
             except Exception:
                 pass  # offline / rate-limited / no token -- retried next turn
+            finally:
+                if then_unlock:
+                    self._release_device_lock(sid)
 
         threading.Thread(target=push, daemon=True).start()
 
@@ -2466,11 +2555,16 @@ class Api:
 
     # -- chat ---------------------------------------------------------- #
 
-    def send(self, text: str, file_paths: list | None = None, plan: bool = False):
+    def send(self, text: str, file_paths: list | None = None, plan: bool = False,
+             force: bool = False):
         """Start a turn in the ACTIVE chat and return immediately -- the turn
         runs on its own thread, so the user can switch to (or create) other
         chats while it works. Completion arrives as a "turn_complete" event
-        tagged with the chat's sid."""
+        tagged with the chat's sid.
+
+        If this chat is synced and another device holds a live lock on it,
+        returns {"locked": True, ...} instead of starting the turn (nothing is
+        appended to the chat) -- pass force=True to send anyway."""
         cs = self._active
         if cs is None:
             return {"error": "no active chat — start a New Chat first"}
@@ -2480,6 +2574,10 @@ class Api:
             return {"error": "empty"}
         if not cs.turn_lock.acquire(blocking=False):
             return {"error": "busy"}
+        lock_result = self._try_acquire_device_lock(cs.sid, force=force)
+        if lock_result is not None:
+            cs.turn_lock.release()
+            return lock_result
         threading.Thread(target=self._run_send_turn,
                          args=(cs, text, paths, plan), daemon=True).start()
         return {"ok": True, "started": True}
@@ -2569,7 +2667,9 @@ class Api:
                         context=agent.context_estimate(),
                         title=cs.title, sessions=self.list_sessions())
             self._maybe_autopush(cs)  # background commit+push if connected
-            self._maybe_autosync(cs.sid)  # background push to the sync repo
+            # then_unlock=True: harmless no-op if this turn never held the
+            # cross-device lock (sync off, or the acquire failed open).
+            self._maybe_autosync(cs.sid, then_unlock=True)
             self._os_attention(cs.sid, "Done -- waiting for you."
                                if ok else "Stopped on an error -- waiting for you.")
 

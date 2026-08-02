@@ -632,6 +632,7 @@ function addUserMessage(text, images, note, plan) {
   wrap.appendChild(b);
   chatEl.appendChild(wrap);
   scrollDown(true);
+  return wrap;
 }
 
 /* Edit & resend a past message: rewind the chat to just before it (the
@@ -2249,11 +2250,19 @@ async function sendMessage() {
   if (text) histPush(text);
   const plan = planMode && !!text;
   const imgs = attachments.slice();
-  addUserMessage(text || (imgs.length === 1 ? "(file attached)" : "(files attached)"), imgs, "", plan);
   input.value = "";
   input.style.height = "auto";
   attachments = [];
   renderAttachments();
+  await performSend(text, imgs, plan, false);
+}
+
+// The part of sending that can be RETRIED with force=true after an
+// active-elsewhere warning -- kept separate from sendMessage() so a retry
+// resends the exact text/attachments already captured, instead of re-reading
+// the composer (which has already been cleared by then).
+async function performSend(text, imgs, plan, force) {
+  const bubble = addUserMessage(text || (imgs.length === 1 ? "(file attached)" : "(files attached)"), imgs, "", plan);
   setBusy(true);
   current = null;
   $("plan-actions").hidden = true;
@@ -2263,10 +2272,25 @@ async function sendMessage() {
   // chat_busy + turn_complete events (which follow the chat even if the
   // user switches away and back).
   try {
-    const res = await api().send(text, imgs.map((i) => i.path), plan);
+    const res = await api().send(text, imgs.map((i) => i.path), plan, !!force);
     if (res && res.error) {
-      if (res.error !== "busy") toast(res.error, "error", 7000);
       setBusy(false);
+      if (res.locked) {
+        // Nothing was actually sent -- the bubble was optimistic. Remove it
+        // rather than leave a message on screen that was never recorded.
+        bubble.remove();
+        const mins = Math.max(1, Math.round((Date.now() - (res.locked_since || Date.now())) / 60000));
+        const proceed = confirm(
+          `This chat is active on ${res.locked_by} right now (started ${mins}m ago).\n\n` +
+          "Sending here too can overwrite what you're doing there. Send anyway?");
+        if (proceed) { await performSend(text, imgs, plan, true); return; }
+        input.value = text;
+        input.style.height = Math.min(input.scrollHeight, 200) + "px";
+        attachments = imgs;
+        renderAttachments();
+        return;
+      }
+      if (res.error !== "busy") toast(res.error, "error", 7000);
     }
   } catch (e) {
     toast("Bridge error: " + e, "error", 7000);
