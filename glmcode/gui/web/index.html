@@ -67,14 +67,9 @@
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
     New Chat
   </button>
-  <div class="sess-tabs" role="tablist" aria-label="Chat source">
-    <button id="tab-local" class="sess-tab on" role="tab" aria-selected="true" data-src="local">This computer</button>
-    <button id="tab-github" class="sess-tab" role="tab" aria-selected="false" data-src="github">GitHub</button>
-  </div>
   <input id="chat-search" class="chat-search" type="text"
          placeholder="Search all chats…" aria-label="Search chats">
   <div id="session-list" class="session-list"></div>
-  <div id="github-list" class="session-list" hidden></div>
 </nav>
 
 <!-- Chat -->
@@ -809,8 +804,8 @@
       <h3 style="margin-top:22px">Sync chats across devices</h3>
       <p class="row-sub">Your chats are kept in a single private repository
         (<code id="sync-repo-name">makenomistakes-sync</code>), created for you automatically, so a
-        conversation you start on your phone continues here — and vice versa. They upload themselves
-        after each turn, and you browse them from the <strong>GitHub</strong> tab in the sidebar.
+        conversation you start on your phone continues right here, in the same chat list — and vice
+        versa. They upload themselves after each turn; nothing to browse or download separately.
         Everything is encrypted on your device with a <strong>sync passphrase</strong> before it's
         uploaded: GitHub only ever stores ciphertext, and the passphrase never leaves this machine.
         Use the <em>same</em> passphrase on every device.</p>

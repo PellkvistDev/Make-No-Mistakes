@@ -148,14 +148,18 @@
   });
 
   // Finish unlocking: cache the key, honour "keep me signed in", and resume the
-  // saved conversation if there is one (otherwise go to the repo picker).
+  // saved conversation if there is one. Otherwise: sync users land on the chat
+  // hub (every chat, every repo — the phone's equivalent of the desktop
+  // sidebar); without sync there's no hub to show, so it's the repo picker.
   async function finishUnlock(secrets, key, pin, salt) {
     session = { secrets, cryptoKey: key, pin: pin || null, vaultSalt: salt || null };
     session.model = newModel(getModelName());
     armIdle();
     if (keepSignedIn()) { try { localStorage.setItem(KEEPKEY_KEY, await AC.exportRawKey(key)); } catch {} }
     else localStorage.removeItem(KEEPKEY_KEY);
-    if (!(await tryRestoreSession())) await enterRepoPicker();
+    if (await tryRestoreSession()) return;
+    if (syncOn() && hasSyncPass()) await enterChatList();
+    else await enterRepoPicker();
   }
 
   // ------------------------------------------------------- session persistence
@@ -193,7 +197,6 @@
     session.messages = data.messages;
     session.transcript = data.transcript || [];
     $("chat-repo-name").textContent = r.full_name;
-    updateChatListBtn();
     $("messages").innerHTML = "";
     for (const b of session.transcript) addBubble(b.role, b.text, false);
     addBubble("system", "Resumed your session in " + r.full_name + ".", false);
@@ -202,9 +205,13 @@
   }
 
   // ================================================================ REPO PICKER
+  // Reached either as the first screen after unlock (sync off — nothing else to
+  // show) or via "＋ New chat" from the hub (sync on — picking/creating a repo
+  // here always starts a FRESH chat; existing ones are resumed from the hub).
   let repoCache = [];
   async function enterRepoPicker() {
     show("screen-repo");
+    $("btn-repo-back").hidden = !(syncOn() && hasSyncPass());
     $("repo-error").textContent = "";
     $("repo-whoami").textContent = "Loading account…";
     const tmpGh = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
@@ -240,6 +247,7 @@
   $("in-repo-filter").addEventListener("input", renderRepos);
   $("btn-repo-refresh").addEventListener("click", refreshRepos);
   $("btn-repo-lock").addEventListener("click", lock);
+  $("btn-repo-back").addEventListener("click", () => { if (!currentRun) enterChatList(); });
   $("btn-create-repo").addEventListener("click", async () => {
     const name = $("in-new-repo").value.trim();
     if (!name) return;
@@ -285,16 +293,22 @@
     clearAttachments();
   }
 
+  // Picking (or creating) a repo always starts a FRESH chat — resuming an
+  // existing one happens from the hub, never by re-picking its repo. The sync
+  // store is central (one repo, independent of the project), so it stays
+  // cached across this switch instead of being re-derived from GitHub again.
   async function openRepo(fullName, branch) {
     const [owner, repo] = fullName.split("/");
     connectRepo(owner, repo, branch, fullName);
-    session.syncStore = null; session.syncRepo = null;   // new repo → re-open its store
-    if (syncOn() && hasSyncPass()) await enterChatList();
-    else startNewChat();
+    startNewChat();
   }
-  $("btn-back-repo").addEventListener("click", () => { if (!currentRun) enterRepoPicker(); });
+  // "Back" from an open chat: to the hub if sync can show one, else the repo
+  // picker (sync off has no hub — that IS the top-level screen).
+  $("btn-back-repo").addEventListener("click", () => {
+    if (currentRun) return;
+    if (syncOn() && hasSyncPass()) enterChatList(); else enterRepoPicker();
+  });
   $("btn-chat-lock").addEventListener("click", lock);
-  $("btn-chat-list").addEventListener("click", () => { if (!currentRun) enterChatList(); });
 
   // Start a brand-new chat in the connected repo.
   function startNewChat() {
@@ -305,7 +319,6 @@
     session.images = {};
     clearAttachments();
     $("chat-repo-name").textContent = session.repo.full_name;
-    updateChatListBtn();
     $("messages").innerHTML = "";
     addBubble("system", "Connected to " + session.repo.full_name + ". I can read, search, and edit files here — each edit is committed. I can't run code on the phone; that happens when your desktop syncs or via CI.");
     show("screen-chat");
@@ -317,7 +330,6 @@
     try { if (crypto.randomUUID) return crypto.randomUUID(); } catch {}
     return "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
   }
-  function updateChatListBtn() { $("btn-chat-list").hidden = !(syncOn() && hasSyncPass()); }
 
   // ================================================================ SESSION SYNC
   // Opt-in cross-device sync. Chats live encrypted on the repo's orphan state
@@ -337,19 +349,25 @@
     const blob = await AC.aesEncrypt(pass, session.cryptoKey);
     localStorage.setItem(SYNCPASS_KEY, JSON.stringify(blob));
   }
-  // Lazily open (and cache) the ONE central sync store. It's independent of the
-  // project you're working in, so every chat lands in the same place and the
-  // history list never depends on which repo happens to be open.
+  // Open the ONE central sync store for a given passphrase. Independent of any
+  // connected repo — every chat, from every project, lives here. The single
+  // path both "unlock the store for use" and "verify a passphrase before
+  // saving it" go through, so there's exactly one place that can get the
+  // target repo wrong.
+  async function openCentralSync(passphrase) {
+    const api = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+    const { owner, repo } = await AC.ensureSyncRepo(api);
+    const syncGh = AC.makeGitHub({ token: session.secrets.githubToken,
+      owner, repo, branch: AC.SYNC_REPO_BRANCH });
+    return AC.openSync(syncGh, passphrase);
+  }
+  // Lazily open (and cache) the store using the saved passphrase.
   async function ensureSyncStore() {
     if (!syncOn() || !session) return null;
     if (session.syncStore) return session.syncStore;
     const pass = await getSyncPass();
     if (!pass) return null;
-    const api = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
-    const { owner, repo } = await AC.ensureSyncRepo(api);
-    const syncGh = AC.makeGitHub({ token: session.secrets.githubToken,
-      owner, repo, branch: AC.SYNC_REPO_BRANCH });
-    const { store } = await AC.openSync(syncGh, pass);
+    const { store } = await openCentralSync(pass);
     session.syncStore = store;
     return store;
   }
@@ -394,8 +412,6 @@
   }
   async function enterChatList() {
     show("screen-chats");
-    // The store spans every project now, so the header names the store, not a repo.
-    $("chats-repo-name").textContent = "Your chats";
     $("chats-error").textContent = "";
     $("chats-list").innerHTML = "<li class='muted'>Loading…</li>";
     let store;
@@ -405,7 +421,12 @@
       $("chats-error").textContent = "Couldn't open sync: " + friendlyGhError(e, "list");
       return;
     }
-    if (!store) { startNewChat(); return; }  // sync not actually configured
+    if (!store) {
+      // Sync isn't actually configured (edge case: toggled off elsewhere).
+      // There's no hub to show without it — fall back to wherever makes sense.
+      if (session.repo) startNewChat(); else enterRepoPicker();
+      return;
+    }
     let list;
     try { list = await store.list(); }
     catch (e) { $("chats-list").innerHTML = ""; $("chats-error").textContent = friendlyGhError(e, "list"); return; }
@@ -460,7 +481,6 @@
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
     clearAttachments();
     $("chat-repo-name").textContent = session.repo.full_name;
-    updateChatListBtn();
     $("messages").innerHTML = "";
     for (const b of session.transcript) addBubble(b.role, b.text, false);
     addBubble("system", "Resumed “" + (session.chatTitle || "chat") + "”.", false);
@@ -476,8 +496,10 @@
       await enterChatList();
     } catch (e) { toast("Couldn't delete: " + friendlyGhError(e, "list")); }
   }
-  $("btn-chats-back").addEventListener("click", () => { if (!currentRun) enterRepoPicker(); });
-  $("btn-chats-new").addEventListener("click", () => { if (!currentRun) startNewChat(); });
+  // "+" always goes through the repo picker: starting something new means
+  // choosing (or creating) its project, which the hub itself doesn't do.
+  $("btn-chats-new").addEventListener("click", () => { if (!currentRun) enterRepoPicker(); });
+  $("btn-chats-lock").addEventListener("click", lock);
 
   // ================================================================ CONFIRM DIALOG
   function confirmWrite(kind, path, content) {
@@ -1067,6 +1089,7 @@
   function closeSettings() { $("settings-backdrop").hidden = true; }
   $("btn-repo-settings").addEventListener("click", openSettings);
   $("btn-chat-settings").addEventListener("click", openSettings);
+  $("btn-chats-settings").addEventListener("click", openSettings);
   $("btn-settings-done").addEventListener("click", closeSettings);
   $("settings-backdrop").addEventListener("click", (e) => { if (e.target === $("settings-backdrop")) closeSettings(); });
   $("btn-settings-lock").addEventListener("click", () => { closeSettings(); lock(); });
@@ -1111,8 +1134,7 @@
     if (on && !hasSyncPass()) { $("set-sync").checked = false; openSyncPass(); return; }
     localStorage.setItem("mnm.sync", on ? "1" : "0");
     $("set-sync-pass-row").hidden = !on;
-    if (!on && session) { session.syncStore = null; session.syncRepo = null; }
-    updateChatListBtn();
+    if (!on && session) session.syncStore = null;
   });
   $("btn-change-syncpass").addEventListener("click", openSyncPass);
   function openSyncPass() {
@@ -1131,22 +1153,18 @@
     if (!session || !session.cryptoKey) return (err.textContent = "Unlock first.");
     $("btn-syncpass-save").disabled = true;
     try {
-      // If we're connected, verify the passphrase against any existing store on
-      // the branch BEFORE storing it — so a mismatch with another device is
-      // caught here rather than silently forking the history.
-      if (session.repo) {
-        const syncGh = AC.makeGitHub({ token: session.secrets.githubToken,
-          owner: session.repo.owner, repo: session.repo.repo, branch: AC.STATE_BRANCH });
-        await AC.openSync(syncGh, p1);
-      }
+      // Verify the passphrase against the central store BEFORE storing it, so
+      // a mismatch with another device is caught here rather than silently
+      // forking the history (or, worse, bootstrapping a fresh empty store
+      // under a typo'd passphrase that then "just works" with nothing in it).
+      const { store } = await openCentralSync(p1);
       await storeSyncPass(p1);
       localStorage.setItem("mnm.sync", "1");
-      session.syncStore = null; session.syncRepo = null;   // re-open with the new key
-      if (session.repo) { await ensureSyncStore(); await syncSave(); }
+      session.syncStore = store;
+      if (session.chatId) await syncSave();   // catch up an in-progress chat
       closeSyncPass();
       $("set-sync").checked = true;
       $("set-sync-pass-row").hidden = false;
-      updateChatListBtn();
       toast("Sync enabled.");
     } catch (e) { err.textContent = friendlyGhError(e, "list"); }
     finally { $("btn-syncpass-save").disabled = false; }

@@ -3765,7 +3765,7 @@ async function saveSyncPassphrase(btn) {
   if (!res) return;
   $("sync-pass").value = "";
   syncEnv = res; renderSyncSettings();
-  refreshGithubChats(true);   // the sidebar's GitHub tab can load now
+  refreshSyncChatsBackground();   // fold synced chats into the sidebar now
   toast("Sync is on — your chats upload automatically. Use the same " +
         "passphrase on your phone.", "info", 6000);
 }
@@ -3951,131 +3951,74 @@ const TRASH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" s
 // search must not stomp the filtered view).
 let searchResults = null;
 
-/* ---- sidebar source tabs: this computer | GitHub ----------------------
- * GitHub chats are browsed right here, next to local ones, instead of being
- * buried in Settings. Clicking one downloads it and opens it like any other
- * chat, so "continue on my computer" is a single click.
+/* ---- one chat list, synced chats folded in automatically ---------------
+ * Every chat -- from this computer, from the phone, from anywhere -- shows up
+ * in the same list, sorted together by recency. There is no "local" vs
+ * "GitHub" tab and no origin badge: a synced chat behaves exactly like a
+ * local one, just fetched fresh before it opens. Local sessions render
+ * instantly (offline-safe); synced ones fold in moments later once fetched,
+ * with no visible step for the user.
  */
-let sidebarSource = "local";
-let githubChats = null;      // null = not loaded yet this session
-let githubListError = "";
+let syncChats = null;   // null = not fetched yet this session; [] = fetched, none
 
-function setSidebarSource(src) {
-  sidebarSource = src;
-  for (const b of document.querySelectorAll(".sess-tab")) {
-    const on = b.dataset.src === src;
-    b.classList.toggle("on", on);
-    b.setAttribute("aria-selected", String(on));
-  }
-  $("session-list").hidden = src !== "local";
-  $("github-list").hidden = src !== "github";
-  $("chat-search").hidden = src !== "local";
-  if (src === "github") {
-    renderGithubSidebar();
-    if (githubChats === null) refreshGithubChats();
-  }
-}
-document.querySelectorAll(".sess-tab").forEach((b) =>
-  b.addEventListener("click", () => setSidebarSource(b.dataset.src)));
-
-async function refreshGithubChats(force) {
-  if (force) githubChats = null;
-  githubListError = "";
-  renderGithubSidebar(true);
-  let res;
-  try { res = await api().sync_list_chats(); }
-  catch (e) { res = { error: "Couldn't reach the app." }; }
-  if (res && res.error) { githubListError = res.error; githubChats = []; }
-  else { githubChats = (res && res.chats) || []; }
-  renderGithubSidebar();
+// Fire-and-forget: fetch what's synced and merge it into the visible list.
+// Silent on failure (sync not set up, offline, etc.) -- this is a background
+// enrichment of the list, not a user-initiated action worth a toast for.
+async function refreshSyncChatsBackground() {
+  try {
+    const res = await api().sync_list_chats();
+    syncChats = (res && !res.error && res.chats) || [];
+  } catch (e) { syncChats = syncChats || []; }
+  renderSidebar();
 }
 
-function renderGithubSidebar(loading) {
-  const list = $("github-list");
-  if (!list) return;
-  if (loading && githubChats === null) {
-    list.innerHTML = '<div class="session-empty">Loading your synced chats…</div>';
-    return;
+// Merge local sessions with fetched sync chats into one recency-sorted list.
+// A row present in both keeps its local cwd (so opening it can be instant)
+// but is still flagged `synced` so opening it re-fetches the latest turns.
+function mergedChatRows() {
+  const rows = (searchResults ?? sessions).map((s) => ({
+    id: s.id, title: s.title, updated: s.updated, cwd: s.cwd,
+    snippet: s.snippet, synced: false,
+  }));
+  if (searchResults) return rows;   // search is local-only; don't fold sync in
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  for (const c of syncChats || []) {
+    const existing = byId.get(c.id);
+    if (existing) {
+      existing.synced = true;
+      existing.project = c.project;
+      if (msToTime(c.updated) > msToTime(existing.updated)) {
+        existing.updated = c.updated;
+        existing.snippet = c.preview;
+      }
+    } else {
+      const row = { id: c.id, title: c.title, updated: c.updated, cwd: "",
+                    snippet: c.preview, project: c.project, synced: true };
+      rows.push(row);
+      byId.set(c.id, row);
+    }
   }
-  if (githubListError) {
-    list.innerHTML = "";
-    const box = document.createElement("div");
-    box.className = "session-empty";
-    box.textContent = githubListError;
-    const btn = document.createElement("button");
-    btn.className = "btn btn-ghost sess-empty-cta";
-    btn.textContent = "Set up sync";
-    btn.addEventListener("click", () => { openSettings(); showSettingsTab("github"); });
-    list.append(box, btn);
-    return;
-  }
-  const items = githubChats || [];
-  if (!items.length) {
-    list.innerHTML = '<div class="session-empty">No synced chats yet.<br>' +
-      'Chats upload themselves after each turn once sync is on.</div>';
-    return;
-  }
-  list.innerHTML = "";
-  for (const c of items) {
-    const row = document.createElement("div");
-    row.className = "sess-row" + (c.id === activeSessionId ? " active" : "");
-    row.tabIndex = 0;
-    row.setAttribute("role", "button");
-    const bits = [c.project, timeAgo(c.updated)].filter(Boolean).join(" · ");
-    // Only badge chats this machine doesn't have yet -- that's the useful signal.
-    const badge = c.local ? "" :
-      `<span class="sess-badge">${esc(c.device === "phone" ? "phone" : "other device")}</span>`;
-    row.innerHTML =
-      `<div class="sess-main"><div class="sess-title${badge ? " has-badge" : ""}">` +
-      `<span class="sess-title-text">${esc(c.title || "New chat")}</span>${badge}</div>` +
-      `<div class="sess-sub">${esc(bits)}</div>` +
-      (c.preview ? `<div class="sess-snippet">${esc(c.preview)}</div>` : "") + `</div>` +
-      `<button class="sess-del" aria-label="Delete synced chat: ${esc(c.title || "chat")}">${TRASH_ICON}</button>`;
-    const open = () => openGithubChat(c.id, row);
-    row.addEventListener("click", (e) => { if (!e.target.closest(".sess-del")) open(); });
-    row.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
-    });
-    row.querySelector(".sess-del").addEventListener("click", async (e) => {
-      e.stopPropagation();
-      if (!confirm(`Remove "${c.title || "this chat"}" from your synced chats? ` +
-                   "It disappears from your other devices; any local copy stays.")) return;
-      const res = await api().sync_delete_chat(c.id);
-      if (res && res.error) { toast(res.error, "error", 5000); return; }
-      refreshGithubChats(true);
-    });
-    list.appendChild(row);
-  }
+  rows.sort((a, b) => msToTime(b.updated) - msToTime(a.updated));
+  return rows;
 }
-
-async function openGithubChat(id, row) {
-  if (row) row.classList.add("sess-loading");
-  let res;
-  try { res = await api().sync_pull_chat(id); }
-  catch (e) { res = { error: "Couldn't open that chat." }; }
-  if (row) row.classList.remove("sess-loading");
-  if (res && res.error) { toast(res.error, "error", 6000); return; }
-  applySession(res);
-  setSidebarSource("local");
-  input.focus();
-}
+function msToTime(v) { const t = new Date(v).getTime(); return Number.isNaN(t) ? 0 : t; }
 
 function renderSidebar() {
   const list = $("session-list");
-  const items = searchResults ?? sessions;
-  if (!items.length) {
+  const rows = mergedChatRows();
+  if (!rows.length) {
     list.innerHTML = searchResults
       ? '<div class="session-empty">No chats match.</div>'
       : '<div class="session-empty">No chats yet.<br>Click "New Chat" to pick a project folder and start.</div>';
     return;
   }
   list.innerHTML = "";
-  for (const s of items) {
+  for (const s of rows) {
     const row = document.createElement("div");
     row.className = "sess-row" + (s.id === activeSessionId ? " active" : "");
     row.tabIndex = 0;
     row.setAttribute("role", "button");
-    row.title = s.cwd;
+    if (s.cwd) row.title = s.cwd;
     const snippet = s.snippet
       ? `<div class="sess-snippet">${esc(s.snippet)}</div>` : "";
     let stateDot = "";
@@ -4085,26 +4028,58 @@ function renderSidebar() {
     } else if (unreadSessions.has(s.id)) {
       stateDot = '<span class="sess-dot sess-dot-unread" title="Finished while you were away"></span>';
     }
+    const sub = [s.project || (s.cwd ? basename(s.cwd) : ""), timeAgo(s.updated)]
+      .filter(Boolean).join(" · ");
     row.innerHTML =
       `<div class="sess-main"><div class="sess-title">${stateDot}${esc(s.title || "New chat")}</div>` +
-      `<div class="sess-sub">${esc(basename(s.cwd))} · ${esc(timeAgo(s.updated))}</div>${snippet}</div>` +
+      `<div class="sess-sub">${esc(sub)}</div>${snippet}</div>` +
       `<button class="sess-del" aria-label="Delete chat: ${esc(s.title || "New chat")}">${TRASH_ICON}</button>`;
+    const open = () => openChatRow(s, row);
     row.addEventListener("click", (e) => {
       if (e.target.closest(".sess-del") || s.id === activeSessionId) return;
-      openSession(s.id);
+      open();
     });
     row.addEventListener("keydown", (e) => {
       if ((e.key === "Enter" || e.key === " ") && s.id !== activeSessionId) {
         e.preventDefault();
-        openSession(s.id);
+        open();
       }
     });
     row.querySelector(".sess-del").addEventListener("click", (e) => {
       e.stopPropagation();
-      if (confirm(`Delete "${s.title || "this chat"}"? This can't be undone.`)) deleteSession(s.id);
+      deleteChatRow(s);
     });
     list.appendChild(row);
   }
+}
+
+// Any chat that's synced always opens via a fresh pull -- guaranteeing you see
+// the latest turns even if they happened on your phone a minute ago. A
+// local-only chat opens instantly, no network round trip needed.
+async function openChatRow(s, row) {
+  if (s.id === activeSessionId) return;
+  if (!s.synced) return openSession(s.id);
+  if (row) row.classList.add("sess-loading");
+  let res;
+  try { res = await api().sync_pull_chat(s.id); }
+  catch (e) { res = { error: "Couldn't open that chat." }; }
+  if (row) row.classList.remove("sess-loading");
+  if (res && res.error) { toast(res.error, "error", 6000); return; }
+  applySession(res);
+  input.focus();
+}
+
+// "Delete" means gone everywhere, not "gone from this list" -- that's what
+// treating local and synced chats as one and the same actually requires.
+async function deleteChatRow(s) {
+  if (!confirm(`Delete "${s.title || "this chat"}"? This can't be undone.`)) return;
+  if (sessions.some((x) => x.id === s.id)) await deleteSession(s.id);
+  if (s.synced) {
+    const res = await api().sync_delete_chat(s.id);
+    if (res && res.error) toast("Removed locally, but couldn't remove the synced copy: " + res.error, "error", 6000);
+    syncChats = (syncChats || []).filter((c) => c.id !== s.id);
+  }
+  renderSidebar();
 }
 
 // Full-text chat search: matches titles AND the persistent transcripts, so
@@ -4496,6 +4471,9 @@ async function boot() {
   settings = b.settings;
   applyPerfMode();  // before first paint of the session, so no heavy-then-flat flash
   sessions = b.sessions || [];
+  // Local sessions render immediately below (offline-safe); synced chats from
+  // other devices fold into the same list moments later, no separate step.
+  refreshSyncChatsBackground();
   if (b.contextLimit) contextLimit = b.contextLimit;
   try { const c = await api().commands(); slashCommands = (c && c.commands) || []; } catch (e) { /* ignore */ }
   setBackground(b.background);

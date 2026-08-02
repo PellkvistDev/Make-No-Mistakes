@@ -109,8 +109,13 @@
     </section>
 
     <!-- ===================== REPO PICKER ===================== -->
+    <!-- Reached either as the very first screen after unlock (sync off — there's
+         nothing else to show), or via "＋ New chat" from the chat list (sync on
+         — picking a repo here always starts a FRESH chat; existing chats are
+         resumed from the list, never by re-picking a repo). -->
     <section id="screen-repo" class="screen" hidden>
       <header class="bar">
+        <button id="btn-repo-back" class="icon-btn" title="Your chats" hidden>‹</button>
         <span class="bar-title">Choose a repository</span>
         <button id="btn-repo-settings" class="icon-btn" title="Settings">⚙</button>
         <button id="btn-repo-lock" class="icon-btn" title="Lock">🔒</button>
@@ -139,16 +144,20 @@
       </div>
     </section>
 
-    <!-- ===================== CHAT HISTORY (synced) ===================== -->
+    <!-- ===================== YOUR CHATS (synced hub) ===================== -->
+    <!-- The top-level screen once sync is on: every chat you have, from every
+         repo, on every device — the phone mirrors the desktop's sidebar. No
+         "pick a repo first": that's only for starting something new. -->
     <section id="screen-chats" class="screen" hidden>
       <header class="bar">
-        <button id="btn-chats-back" class="icon-btn" title="Switch repo">‹</button>
-        <span class="bar-title" id="chats-repo-name">repo</span>
+        <span class="bar-title">Your chats</span>
         <button id="btn-chats-new" class="icon-btn" title="New chat">＋</button>
+        <button id="btn-chats-settings" class="icon-btn" title="Settings">⚙</button>
+        <button id="btn-chats-lock" class="icon-btn" title="Lock">🔒</button>
       </header>
       <div class="pane scroll">
-        <p class="sub">Your synced chats for this repo. They're stored encrypted on a private
-          <code>makenomistakes/state</code> branch, so you can pick any of them up on another device.</p>
+        <p class="sub">Encrypted and synced across your devices — start one here or on your
+          computer, and pick it back up wherever you are.</p>
         <ul id="chats-list" class="repo-list"></ul>
         <p id="chats-error" class="error" role="alert"></p>
       </div>
@@ -157,9 +166,8 @@
     <!-- ===================== CHAT ===================== -->
     <section id="screen-chat" class="screen" hidden>
       <header class="bar">
-        <button id="btn-back-repo" class="icon-btn" title="Switch repo">‹</button>
+        <button id="btn-back-repo" class="icon-btn" title="Back">‹</button>
         <span class="bar-title" id="chat-repo-name">repo</span>
-        <button id="btn-chat-list" class="icon-btn" title="Chats" hidden>🗂</button>
         <button id="btn-chat-settings" class="icon-btn" title="Settings">⚙</button>
         <button id="btn-chat-lock" class="icon-btn" title="Lock">🔒</button>
       </header>
@@ -273,9 +281,9 @@
 
           <div class="setting-block toggle-row">
             <div><label class="setting-label" for="set-sync">Sync chats across devices</label>
-              <span class="setting-hint">Store your chats encrypted on a private <code>makenomistakes/state</code>
-                branch, protected by a sync passphrase, so you can continue them on your phone, computer, or
-                any device. GitHub only ever sees ciphertext.</span></div>
+              <span class="setting-hint">Every chat, from every repo, in one encrypted private GitHub
+                repository — protected by a sync passphrase, so you can pick up any of them on your
+                phone, computer, or any device. GitHub only ever sees ciphertext.</span></div>
             <input id="set-sync" type="checkbox" class="toggle" />
           </div>
           <div class="setting-block" id="set-sync-pass-row" hidden>
