@@ -385,6 +385,34 @@ def test_chat_to_session_carries_the_writing_device_through():
     assert sess["device"] == "phone"
 
 
+def test_session_to_chat_publishes_the_desktop_repo_state():
+    """The phone reads GitHub, so work sitting only on this disk is invisible
+    to it -- publishing the state is what lets the phone warn instead of
+    editing an older copy and committing over it."""
+    chat = syncstore.session_to_chat(
+        {"id": "s1", "messages": [], "cwd": "/tmp/proj"},
+        {"branch": "feature-x", "dirty": True, "ahead": 2, "at": 123})
+    assert chat["repo_state"] == {"branch": "feature-x", "dirty": True, "ahead": 2, "at": 123}
+
+
+def test_session_to_chat_without_repo_state_stays_empty():
+    chat = syncstore.session_to_chat({"id": "s1", "messages": [], "cwd": "/tmp/p"})
+    assert chat["repo_state"] == {}
+
+
+def test_apply_handoff_also_clears_stale_desktop_state_notes():
+    """Both notes describe the *other* device right now, so both are re-derived
+    per open and neither may accumulate."""
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": syncstore.DESKTOP_STATE_MARKER + " old news"},
+    ]
+    out = syncstore.apply_handoff(msgs, "desktop", "phone")
+    stale = [m for m in out
+             if str(m.get("content", "")).startswith(syncstore.DESKTOP_STATE_MARKER)]
+    assert not stale
+
+
 @needs_node
 def test_the_phone_writes_a_byte_identical_handoff_note():
     """Both devices strip the marker by exact prefix and rewrite it on open. If

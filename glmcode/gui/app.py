@@ -2065,13 +2065,32 @@ class Api:
         if err:
             return {"error": err}
         try:
-            updated = store.save(syncstore.session_to_chat(data))
+            updated = store.save(syncstore.session_to_chat(data, self._repo_state(data.get("cwd"))))
         except (syncstore.SyncError, githubsync.GitHubError) as e:
             return {"error": str(e)}
         # Remember our own write, so catch-up doesn't mistake it for the phone.
         if live:
             live.synced_at = updated or 0
         return {"ok": True, "id": sid}
+
+    def _repo_state(self, cwd: str) -> dict:
+        """This machine's git state for a project, published with the chat.
+
+        The phone reads the repo over the GitHub API, so anything living only
+        on this disk -- uncommitted edits, or commits not pushed yet -- is
+        invisible to it. Without this it would read an older copy of a file and
+        commit straight over the work sitting here.
+        """
+        if not cwd:
+            return {}
+        try:
+            st = githubsync.status(Path(cwd))
+            if not st.connected:
+                return {}
+            return {"branch": st.branch or "", "dirty": bool(st.dirty),
+                    "ahead": int(st.ahead or 0), "at": syncstore._now_ms()}
+        except Exception:
+            return {}   # a chat must never fail to sync over a git hiccup
 
     def sync_catch_up(self):
         """Adopt the open chat's synced copy if another device moved it on.

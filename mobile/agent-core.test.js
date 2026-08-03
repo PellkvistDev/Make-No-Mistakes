@@ -264,6 +264,54 @@ test("handoff: a chat with no device tag is left alone", () => {
   assert.deepEqual(C.applyHandoff(msgs, undefined, "phone"), msgs);
 });
 
+// The phone reads the repo over the GitHub API, so anything only on the
+// desktop's disk is invisible here — editing on top of it means committing
+// over it. repoStateWarning is what turns that into a warning.
+
+test("repo state: silent when GitHub really is the latest word", () => {
+  assert.equal(C.repoStateWarning({ branch: "main", dirty: false, ahead: 0 }, "main"), "");
+  assert.equal(C.repoStateWarning(null, "main"), "");
+  assert.equal(C.repoStateWarning({}, "main"), "", "a chat with no published state stays quiet");
+});
+
+test("repo state: uncommitted desktop work is called out", () => {
+  const w = C.repoStateWarning({ branch: "main", dirty: true, ahead: 0 }, "main");
+  assert.match(w, /uncommitted changes/);
+  assert.match(w, /committing over that work/);
+});
+
+test("repo state: unpushed commits are counted, and pluralised", () => {
+  assert.match(C.repoStateWarning({ branch: "main", ahead: 1 }, "main"), /1 commit not pushed/);
+  assert.match(C.repoStateWarning({ branch: "main", ahead: 3 }, "main"), /3 commits not pushed/);
+});
+
+test("repo state: dirty AND unpushed reads as one sentence", () => {
+  const w = C.repoStateWarning({ branch: "main", dirty: true, ahead: 2 }, "main");
+  assert.match(w, /uncommitted changes and 2 commits not pushed/);
+});
+
+test("repo state: a branch mismatch is its own warning", () => {
+  const w = C.repoStateWarning({ branch: "feature-x", dirty: false, ahead: 0 }, "main");
+  assert.match(w, /branch "feature-x"/);
+  assert.match(w, /"main"/);
+  assert.match(w, /different code entirely/);
+});
+
+test("repo state: an unknown local branch doesn't invent a mismatch", () => {
+  assert.equal(C.repoStateWarning({ branch: "main", dirty: false, ahead: 0 }, ""), "");
+});
+
+test("handoff: stale desktop-state notes are cleared alongside the marker", () => {
+  const msgs = [
+    { role: "system", content: "live prompt" },
+    { role: "user", content: "hi" },
+    { role: "system", content: "[desktop-state] old news" },
+  ];
+  const out = C.applyHandoff(msgs, "desktop", "phone");
+  assert.ok(!out.some((m) => String(m.content).startsWith("[desktop-state]")));
+  assert.equal(out[0].content, "live prompt");
+});
+
 test("unknown tool: a desktop-only tool explains itself instead of dead-ending", async () => {
   const model = { async chat() {
     return { role: "assistant", content: "", tool_calls: [
