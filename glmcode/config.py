@@ -128,7 +128,11 @@ class Config:
     parallel_attempts: int = 1       # "race": 1 = off; 2 or 3 = run that many isolated attempts from a common baseline and keep the best
     show_reasoning: bool = True      # print the model's reasoning (dimmed)
     vision_route: str = "describe"   # describe | direct
-    context_limit_tokens: int = 155_000  # hard auto-compact fallback above this estimate
+    # Auto-compact above this. The GLM models carry ~200k; the headroom is for
+    # the reply, not for the counter being wrong -- the estimate now calibrates
+    # itself against the prompt_tokens the API reports (api.calibrate_ratio),
+    # so it no longer has to be padded against a guess the way chars/N did.
+    context_limit_tokens: int = 185_000
     max_turns_per_request: int = 200  # safety cap on agentic iterations
     search_provider: str = "auto"    # auto | ddg | tavily
     tavily_api_key: str = ""         # optional upgrade: free key at tavily.com

@@ -110,3 +110,38 @@ def test_rate_limiter_spaces_out_concurrent_threads():
     # Every consecutive pair must be spaced by ~min_interval (small slack for
     # scheduler wobble).
     assert all(g >= 0.04 for g in gaps), gaps
+
+
+# ---------------------------------------------------------- token counting
+# Dividing characters by a constant is a guess, and that guess is why the
+# context limit had to sit well under the model's real window. The API reports
+# the exact prompt_tokens for every request it answers, so measure instead.
+
+def test_estimate_tokens_uses_the_ratio_it_is_given():
+    msgs = [{"role": "user", "content": "a" * 3600}]
+    assert api.estimate_tokens(msgs) == 1000                # default 3.6
+    assert api.estimate_tokens(msgs, 2.0) == 1800           # denser tokenisation
+    assert api.estimate_tokens(msgs, 0) == 1000, "a nonsense ratio falls back"
+
+
+def test_message_chars_counts_images_at_a_flat_cost():
+    huge = "data:image/png;base64," + "A" * 200_000
+    msgs = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": huge}}]}]
+    # Counting the data URL by length would read as tens of thousands of tokens.
+    assert api.message_chars(msgs) == 4000
+
+
+def test_calibrate_ratio_measures_from_a_priced_request():
+    msgs = [{"role": "user", "content": "a" * 1000}]
+    assert api.calibrate_ratio(msgs, 250) == 4.0
+    assert api.calibrate_ratio(msgs, 500) == 2.0
+
+
+def test_calibrate_ratio_rejects_impossible_readings():
+    """One odd response must not be able to skew the meter."""
+    msgs = [{"role": "user", "content": "a" * 1000}]
+    assert api.calibrate_ratio(msgs, 0) is None
+    assert api.calibrate_ratio(msgs, -1) is None
+    assert api.calibrate_ratio([], 100) is None            # nothing to measure
+    assert api.calibrate_ratio(msgs, 1) is None            # 1000 chars/token
+    assert api.calibrate_ratio(msgs, 900) is None          # ~1 char/token

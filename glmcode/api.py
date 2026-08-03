@@ -279,8 +279,12 @@ def encode_image_data_uri(path: Path) -> str:
     return f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
 
 
-def estimate_tokens(messages: list) -> int:
-    """Rough token estimate (chars/3.6, safe-side) for context management."""
+DEFAULT_CHARS_PER_TOKEN = 3.6   # starting guess, replaced by a real measurement
+_RATIO_MIN, _RATIO_MAX = 1.5, 8.0   # readings outside this can't be right
+
+
+def message_chars(messages: list) -> int:
+    """Characters the model will see, images counted at a flat cost."""
     chars = 0
     for m in messages:
         c = m.get("content")
@@ -294,4 +298,32 @@ def estimate_tokens(messages: list) -> int:
                     chars += 4000  # images cost roughly ~1k tokens
         for tc in m.get("tool_calls") or []:
             chars += len(json.dumps(tc))
-    return int(chars / 3.6)
+    return chars
+
+
+def estimate_tokens(messages: list, chars_per_token: float = DEFAULT_CHARS_PER_TOKEN) -> int:
+    """Token estimate for context management.
+
+    Dividing characters by a constant is a guess, and it's the reason the
+    context limit has to sit well under the model's real window. Pass a ratio
+    measured by calibrate_ratio() and the guess goes away."""
+    r = chars_per_token if chars_per_token and chars_per_token > 0 else DEFAULT_CHARS_PER_TOKEN
+    return int(message_chars(messages) / r)
+
+
+def calibrate_ratio(messages: list, prompt_tokens: int) -> float | None:
+    """Chars-per-token derived from a request the API actually priced.
+
+    The response reports the exact prompt_tokens for what we sent, so the
+    divisor can be measured instead of assumed -- and it adapts to the content,
+    since dense code tokenises very differently from prose. Returns None for
+    implausible readings so one odd response can't skew the meter."""
+    if not prompt_tokens or prompt_tokens <= 0:
+        return None
+    chars = message_chars(messages)
+    if chars <= 0:
+        return None
+    ratio = chars / prompt_tokens
+    if not (_RATIO_MIN <= ratio <= _RATIO_MAX):
+        return None
+    return ratio
