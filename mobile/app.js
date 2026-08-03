@@ -433,6 +433,7 @@
       session.messages = data.messages;
       session.transcript = data.transcript || [];
       session.messages[0] = { role: "system", content: session.baseSystem };
+      session.messages = AC.applyHandoff(session.messages, data.device, DEVICE_LABEL);
       $("messages").innerHTML = "";
       for (const b of session.transcript) addBubble(b.role, b.text, false);
       addBubble("system", "Caught up with your " + (row.device || "other device") + ".", false);
@@ -583,6 +584,9 @@
     session.syncedAt = data.updated || 0;
     session.images = {};
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
+    // Picking up a chat the desktop was driving: mark the switch, or the model
+    // keeps imitating turns that used tools this phone doesn't have.
+    session.messages = AC.applyHandoff(session.messages, data.device, DEVICE_LABEL);
     clearAttachments();
     $("chat-repo-name").textContent = session.repo.full_name;
     $("messages").innerHTML = "";

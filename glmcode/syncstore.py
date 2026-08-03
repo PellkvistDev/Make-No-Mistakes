@@ -549,6 +549,58 @@ def project_label(cwd: str) -> str:
     return s.rsplit("/", 1)[-1] if s else ""
 
 
+# --- device handoff -------------------------------------------------------
+# A synced chat carries its whole message history between devices, and the two
+# devices do NOT have the same tools: the desktop has a shell, tests and a
+# browser; the phone has the GitHub API and nothing that executes. The model
+# learns from its own history, so after a handoff it will happily imitate a
+# turn it "successfully" ran on the other device and call a tool that doesn't
+# exist here -- reaching for PowerShell on the phone, or for view_image the way
+# the phone resolves it on the desktop.
+#
+# Rebuilding the system prompt per device isn't enough on its own: the prompt
+# says one thing while a hundred lines of history demonstrate the opposite, and
+# demonstrations win. So on every cross-device open we splice a marker into the
+# history at the boundary, naming the switch and voiding the earlier tool calls
+# as examples.
+#
+# The marker is a SYSTEM message on purpose: it's invisible in the transcript
+# (so it never shows up as a chat bubble), and session_to_chat drops system
+# messages, so it can't accumulate -- each device re-derives its own on open.
+# mobile/agent-core.js carries a word-for-word copy; keep the two in step.
+HANDOFF_MARKER = "[device-handoff]"
+
+_DEVICE_FACTS = {
+    "desktop": "a real machine: you can run commands, tests, servers and a browser here",
+    "phone": ("the phone: there is no shell here, so you cannot run commands, tests or "
+              "servers -- note anything that needs running and it will happen on the desktop"),
+}
+
+
+def handoff_note(from_device: str, to_device: str) -> str:
+    """The marker spliced in when a chat moves between devices."""
+    frm = (from_device or "another device").lower()
+    to = (to_device or "").lower()
+    return (
+        f"{HANDOFF_MARKER} This conversation just moved from the {frm} to the {to}. "
+        f"You are now on {_DEVICE_FACTS.get(to, to)}. "
+        f"Everything above ran on the {frm}, which has a different set of tools, so earlier "
+        f"turns may show tool calls that do not exist here. Do not copy them: only the tools "
+        f"offered to you now are real. If you need something this device cannot do, say so "
+        f"plainly instead of calling a tool that isn't there."
+    )
+
+
+def apply_handoff(messages: list, from_device: str, to_device: str) -> list:
+    """Strip any stale handoff markers, then add one if the device changed."""
+    out = [m for m in messages
+           if not (m.get("role") == "system"
+                   and str(m.get("content", "")).startswith(HANDOFF_MARKER))]
+    if from_device and to_device and from_device.lower() != to_device.lower():
+        out.append({"role": "system", "content": handoff_note(from_device, to_device)})
+    return out
+
+
 def session_to_chat(sess: dict) -> dict:
     """A desktop SessionStore record -> a sync chat object the phone can read.
 
@@ -593,4 +645,7 @@ def chat_to_session(chat: dict) -> dict:
         "todos": extra.get("todos") or [],
         "model_provider": extra.get("model_provider", ""),
         "model": extra.get("model", ""),
+        # Which device last wrote this chat, so the opener can tell whether it
+        # is picking up its own work or taking a handoff.
+        "device": chat.get("device", ""),
     }

@@ -364,6 +364,47 @@
     };
   }
 
+  // --- device handoff ------------------------------------------------------
+  // A synced chat carries its whole history between devices, and the two do NOT
+  // have the same tools: the desktop has a shell, tests and a browser; the phone
+  // has the GitHub API and nothing that executes. The model learns from its own
+  // history, so after a handoff it will imitate a turn it "successfully" ran on
+  // the other device and call a tool that doesn't exist here — reaching for
+  // PowerShell on the phone, or for desktop-only tools after coming back.
+  //
+  // Rebuilding the system prompt per device isn't enough on its own: the prompt
+  // says one thing while a hundred lines of history demonstrate the opposite,
+  // and demonstrations win. So on every cross-device open we splice a marker in
+  // at the boundary, naming the switch and voiding the earlier calls as examples.
+  //
+  // Mirrors glmcode/syncstore.py's handoff_note/apply_handoff word for word.
+  const HANDOFF_MARKER = "[device-handoff]";
+  const DEVICE_FACTS = {
+    desktop: "a real machine: you can run commands, tests, servers and a browser here",
+    phone: "the phone: there is no shell here, so you cannot run commands, tests or " +
+           "servers -- note anything that needs running and it will happen on the desktop",
+  };
+  function handoffNote(fromDevice, toDevice) {
+    const frm = String(fromDevice || "another device").toLowerCase();
+    const to = String(toDevice || "").toLowerCase();
+    return `${HANDOFF_MARKER} This conversation just moved from the ${frm} to the ${to}. ` +
+      `You are now on ${DEVICE_FACTS[to] || to}. ` +
+      `Everything above ran on the ${frm}, which has a different set of tools, so earlier ` +
+      `turns may show tool calls that do not exist here. Do not copy them: only the tools ` +
+      `offered to you now are real. If you need something this device cannot do, say so ` +
+      `plainly instead of calling a tool that isn't there.`;
+  }
+  // Strip any stale marker, then add one if the device changed. Index 0 (the
+  // live system prompt) is left alone — the caller owns it.
+  function applyHandoff(messages, fromDevice, toDevice) {
+    const out = messages.filter((m, i) => i === 0 ||
+      !(m.role === "system" && String(m.content || "").startsWith(HANDOFF_MARKER)));
+    if (fromDevice && toDevice && String(fromDevice).toLowerCase() !== String(toDevice).toLowerCase()) {
+      out.push({ role: "system", content: handoffNote(fromDevice, toDevice) });
+    }
+    return out;
+  }
+
   // --- images --------------------------------------------------------------
   const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|avif|svg|ico)$/i;
   function imageMime(path) {
@@ -625,6 +666,20 @@
       question: str("What to look for (optional)") },
     ["name"]);
 
+  // A dead-end "unknown tool: x" leaves the model to guess again. Nearly every
+  // real case is a tool it used earlier on the DESKTOP, so name that, and list
+  // what it actually has — enough to recover inside the same turn.
+  const DESKTOP_ONLY = /^(run_|bash|shell|powershell|pwsh|cmd|exec|terminal|test|pytest|npm|git_|browser|screenshot|check_page|preview_page|open_)/i;
+  function unknownTool(name, tools) {
+    const have = Object.keys(tools || {}).join(", ") || "(none)";
+    const hint = DESKTOP_ONLY.test(name)
+      ? `"${name}" doesn't exist on the phone — there's no shell here, so nothing can be run. ` +
+        `If you used it earlier in this conversation, that turn ran on the user's desktop. ` +
+        `Do the part you can do over the GitHub API and say what still needs running there. `
+      : `"${name}" isn't a tool here. `;
+    return `ERROR: ${hint}Tools available right now: ${have}.`;
+  }
+
   // --- the agent loop ------------------------------------------------------
   async function runAgent(cfg) {
     const { model, tools, messages, onEvent = () => {}, maxSteps = 24, shouldStop = () => false,
@@ -648,7 +703,7 @@
         let args = {}; try { args = JSON.parse(tc.function.arguments || "{}"); } catch (e) {}
         onEvent({ type: "tool", name, args });
         let out;
-        try { out = tools[name] ? await tools[name](args) : "unknown tool: " + name; }
+        try { out = tools[name] ? await tools[name](args) : unknownTool(name, tools); }
         catch (e) { out = "ERROR: " + (e && e.message ? e.message : e); }
         onEvent({ type: "tool_result", name, out: String(out) });
         messages.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) });
@@ -664,7 +719,13 @@
     "committed. You CANNOT run commands, tests, or servers here — that happens on the user's desktop " +
     "when it next syncs, or via CI. So: make correct, complete, minimal edits; read before you edit; " +
     "prefer search_code/grep to find things; and in your final reply note anything that still needs to " +
-    "be run or verified on a real machine. Be concise.";
+    "be run or verified on a real machine. Be concise.\n\n" +
+    "THIS CHAT IS SHARED WITH THE USER'S DESKTOP. The same conversation moves between the two, and " +
+    "the desktop has tools you do not have here (a shell, tests, a browser). Earlier turns may " +
+    "therefore show tool calls that don't exist on this device — treat those as history, not as " +
+    "examples to copy. The tools offered to you on this turn are the only ones that are real. When " +
+    "something genuinely needs a machine, say so and leave it for the desktop instead of reaching " +
+    "for a tool that isn't there.";
 
   const SUBAGENT_PROMPT =
     "You are a focused sub-agent of Make No Mistakes, working on the user's PHONE against a GitHub repo " +
@@ -682,6 +743,7 @@
     SYNC_REPO_NAME, SYNC_REPO_BRANCH, STATE_BRANCH,
     DEVICE_LOCK_TTL_MS, DEVICE_LOCK_HEARTBEAT_S,
     IMAGE_RE, imageMime,
+    handoffNote, applyHandoff, HANDOFF_MARKER,
     _b64: { bytesToB64, b64ToBytes },
   };
   if (typeof module !== "undefined" && module.exports) module.exports = CoreAPI;

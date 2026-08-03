@@ -197,7 +197,9 @@ def build_system_prompt(cwd: Path | None = None, model: str = "") -> str:
         "\n\n# Environment\n"
         f"Working directory: {cwd}\n"
         f"Platform: {platform.system()} {platform.release()} ({os.name})\n"
-        f"Shell: Windows PowerShell\n"
+        # Naming the wrong shell makes the agent write commands that can't run
+        # here -- PowerShell syntax on a mac, or the reverse.
+        f"Shell: {'Windows PowerShell' if os.name == 'nt' else 'a POSIX shell (bash/zsh)'}\n"
         f"Today's date: {date.today().isoformat()}\n"
         f"Model: {model}\n"
         f"{_git_info(cwd)}"
