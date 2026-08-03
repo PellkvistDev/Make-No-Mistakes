@@ -569,6 +569,9 @@ def project_label(cwd: str) -> str:
 # messages, so it can't accumulate -- each device re-derives its own on open.
 # mobile/agent-core.js carries a word-for-word copy; keep the two in step.
 HANDOFF_MARKER = "[device-handoff]"
+# The phone's note about what the desktop's checkout looks like. Re-derived on
+# every open like the handoff marker, so it's stripped alongside it.
+DESKTOP_STATE_MARKER = "[desktop-state]"
 
 _DEVICE_FACTS = {
     "desktop": "a real machine: you can run commands, tests, servers and a browser here",
@@ -593,20 +596,26 @@ def handoff_note(from_device: str, to_device: str) -> str:
 
 def apply_handoff(messages: list, from_device: str, to_device: str) -> list:
     """Strip any stale handoff markers, then add one if the device changed."""
+    stale = (HANDOFF_MARKER, DESKTOP_STATE_MARKER)
     out = [m for m in messages
            if not (m.get("role") == "system"
-                   and str(m.get("content", "")).startswith(HANDOFF_MARKER))]
+                   and str(m.get("content", "")).startswith(stale))]
     if from_device and to_device and from_device.lower() != to_device.lower():
         out.append({"role": "system", "content": handoff_note(from_device, to_device)})
     return out
 
 
-def session_to_chat(sess: dict) -> dict:
+def session_to_chat(sess: dict, repo_state: dict | None = None) -> dict:
     """A desktop SessionStore record -> a sync chat object the phone can read.
 
     A leading system slot is included at index 0 because the phone overwrites
     messages[0] with its own system prompt on resume; without it, the phone
-    would clobber the first real message."""
+    would clobber the first real message.
+
+    `repo_state` (optional) is this machine's git state for the project. The
+    phone reads the repo over the GitHub API, so it cannot see work that is
+    only on the desktop's disk -- it would edit an older copy of a file and
+    commit over it. Publishing the state is what lets the phone warn instead."""
     body = [m for m in (sess.get("messages") or []) if m.get("role") != "system"]
     messages = [{"role": "system", "content": ""}] + body
     transcript = _messages_to_transcript(body)
@@ -621,6 +630,9 @@ def session_to_chat(sess: dict) -> dict:
         "device": "desktop",
         "messages": messages,
         "transcript": transcript,
+        # What this machine's checkout looks like right now, so the phone can
+        # tell whether GitHub is actually the latest word on this project.
+        "repo_state": dict(repo_state) if repo_state else {},
         # Desktop-only extras, namespaced so the phone simply ignores them.
         "desktop": {
             "cwd": sess.get("cwd", ""),

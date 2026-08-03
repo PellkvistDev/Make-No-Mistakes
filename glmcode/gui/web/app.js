@@ -3996,6 +3996,25 @@ async function refreshSyncChatsBackground() {
   renderSidebar();
 }
 
+// Coming back to the window: if the phone moved the open chat on while we were
+// away, adopt it — the mirror of the phone's own foreground catch-up. Quiet
+// unless something actually changed, and the backend refuses mid-turn, so this
+// can never interrupt work in progress.
+let catchUpBusy = false;
+async function catchUpFromSync() {
+  if (catchUpBusy || busy) return;
+  catchUpBusy = true;
+  try {
+    const res = await api().sync_catch_up();
+    if (res && res.changed) {
+      applySession(res);
+      toast(`Caught up with your ${res.from_device}.`, "info", 4000);
+    }
+  } catch (e) { /* offline — keep what we have */ }
+  finally { catchUpBusy = false; }
+  refreshSyncChatsBackground();
+}
+
 // Merge local sessions with fetched sync chats into one recency-sorted list.
 // A row present in both keeps its local cwd (so opening it can be instant)
 // but is still flagged `synced` so opening it re-fetches the latest turns.
@@ -4518,7 +4537,7 @@ async function boot() {
   // while the user is away in another app -- keep Python's picture of
   // window focus current, starting from the real state right now.
   const reportFocus = (f) => { try { api().set_window_focus(f); } catch (e) { /* ignore */ } };
-  window.addEventListener("focus", () => reportFocus(true));
+  window.addEventListener("focus", () => { reportFocus(true); catchUpFromSync(); });
   window.addEventListener("blur", () => reportFocus(false));
   reportFocus(document.hasFocus());
   try { api().log && api().log("boot:done"); } catch (e) { /* ignore */ }

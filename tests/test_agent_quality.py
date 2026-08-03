@@ -94,3 +94,17 @@ def test_map_included_in_system_prompt(tmp_path):
     make_tree(tmp_path)
     sp = build_system_prompt(tmp_path, "test-model")
     assert "# Project layout" in sp and "main.py" in sp
+
+
+def test_js_check_timeout_says_so_instead_of_looking_clean(tmp_path, monkeypatch):
+    """A timed-out check must not return the same '' that means "looks fine" --
+    the write would read as verified when nothing actually verified it."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(tools.shutil, "which", lambda n: "/usr/bin/node")
+
+    def slow(*a, **kw):
+        raise tools.subprocess.TimeoutExpired(cmd="node", timeout=30)
+    monkeypatch.setattr(tools.subprocess, "run", slow)
+
+    out = tools.write_file(str(tmp_path / "app.js"), "function f() {}\n")
+    assert "couldn't syntax-check" in out

@@ -394,15 +394,50 @@
       `offered to you now are real. If you need something this device cannot do, say so ` +
       `plainly instead of calling a tool that isn't there.`;
   }
+  // Notes about the other device's state, re-derived on every open. Both are
+  // stripped before a new one is added, so they can't pile up as a chat moves
+  // back and forth describing switches that already happened.
+  const DESKTOP_STATE_MARKER = "[desktop-state]";
+  const isStaleNote = (m) => m.role === "system" &&
+    (String(m.content || "").startsWith(HANDOFF_MARKER) ||
+     String(m.content || "").startsWith(DESKTOP_STATE_MARKER));
   // Strip any stale marker, then add one if the device changed. Index 0 (the
   // live system prompt) is left alone — the caller owns it.
   function applyHandoff(messages, fromDevice, toDevice) {
-    const out = messages.filter((m, i) => i === 0 ||
-      !(m.role === "system" && String(m.content || "").startsWith(HANDOFF_MARKER)));
+    const out = messages.filter((m, i) => i === 0 || !isStaleNote(m));
     if (fromDevice && toDevice && String(fromDevice).toLowerCase() !== String(toDevice).toLowerCase()) {
       out.push({ role: "system", content: handoffNote(fromDevice, toDevice) });
     }
     return out;
+  }
+
+  // What the desktop's checkout looks like, published with the chat by
+  // syncstore.session_to_chat. This phone reads the repo over the GitHub API,
+  // so work that only exists on the desktop's disk is invisible here — editing
+  // on top of it means committing over it. Returns "" when GitHub really is the
+  // latest word, so callers can stay silent in the common case.
+  function repoStateWarning(state, myBranch) {
+    if (!state || typeof state !== "object") return "";
+    const bits = [];
+    if (state.dirty) bits.push("uncommitted changes");
+    const ahead = Number(state.ahead || 0);
+    if (ahead > 0) bits.push(`${ahead} commit${ahead === 1 ? "" : "s"} not pushed yet`);
+    const theirs = String(state.branch || "");
+    const mine = String(myBranch || "");
+    const branchDiffers = theirs && mine && theirs !== mine;
+    if (!bits.length && !branchDiffers) return "";
+    let msg = "";
+    if (bits.length) {
+      msg += `The desktop has ${bits.join(" and ")} for this project, which GitHub ` +
+             `hasn't seen. Files you read here may be older than what's on that machine, ` +
+             `so editing them risks committing over that work. Prefer reading and planning; ` +
+             `if you must edit, say plainly which files might clash.`;
+    }
+    if (branchDiffers) {
+      msg += `${msg ? " " : ""}The desktop is on branch "${theirs}" while you are reading ` +
+             `"${mine}" — you may be looking at different code entirely.`;
+    }
+    return msg;
   }
 
   // --- images --------------------------------------------------------------
@@ -743,7 +778,7 @@
     SYNC_REPO_NAME, SYNC_REPO_BRANCH, STATE_BRANCH,
     DEVICE_LOCK_TTL_MS, DEVICE_LOCK_HEARTBEAT_S,
     IMAGE_RE, imageMime,
-    handoffNote, applyHandoff, HANDOFF_MARKER,
+    handoffNote, applyHandoff, HANDOFF_MARKER, repoStateWarning,
     _b64: { bytesToB64, b64ToBytes },
   };
   if (typeof module !== "undefined" && module.exports) module.exports = CoreAPI;

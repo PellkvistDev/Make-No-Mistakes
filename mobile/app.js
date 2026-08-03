@@ -435,6 +435,7 @@
       session.messages[0] = { role: "system", content: session.baseSystem };
       session.messages = AC.applyHandoff(session.messages, data.device, DEVICE_LABEL);
       $("messages").innerHTML = "";
+      noteDesktopWork(data.repo_state);
       for (const b of session.transcript) addBubble(b.role, b.text, false);
       addBubble("system", "Caught up with your " + (row.device || "other device") + ".", false);
       scroll();
@@ -496,6 +497,17 @@
     if (!store) return;
     try { await store.releaseLock(chatId, deviceId()); } catch (e) { /* best effort */ }
   }
+  // The desktop publishes its git state with the chat. If it has work GitHub
+  // hasn't seen, both the user and the agent need to know: the files read here
+  // are older than that machine's, so editing them risks committing over it.
+  // Silent when GitHub really is the latest word, which is the common case.
+  function noteDesktopWork(repoState) {
+    const warn = AC.repoStateWarning(repoState, session.repo && session.repo.branch);
+    if (!warn) return;
+    session.messages.push({ role: "system", content: "[desktop-state] " + warn });
+    addBubble("system", "⚠︎ " + warn, false);
+  }
+
   // Shows who holds the chat and lets the user override. Resolves true to
   // retry with force=true, false to leave the composer restored and stop.
   async function confirmLockOverride(lockResult) {
@@ -587,6 +599,7 @@
     // Picking up a chat the desktop was driving: mark the switch, or the model
     // keeps imitating turns that used tools this phone doesn't have.
     session.messages = AC.applyHandoff(session.messages, data.device, DEVICE_LABEL);
+    noteDesktopWork(data.repo_state);
     clearAttachments();
     $("chat-repo-name").textContent = session.repo.full_name;
     $("messages").innerHTML = "";

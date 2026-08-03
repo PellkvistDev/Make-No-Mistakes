@@ -385,6 +385,34 @@ def test_chat_to_session_carries_the_writing_device_through():
     assert sess["device"] == "phone"
 
 
+def test_session_to_chat_publishes_the_desktop_repo_state():
+    """The phone reads GitHub, so work sitting only on this disk is invisible
+    to it -- publishing the state is what lets the phone warn instead of
+    editing an older copy and committing over it."""
+    chat = syncstore.session_to_chat(
+        {"id": "s1", "messages": [], "cwd": "/tmp/proj"},
+        {"branch": "feature-x", "dirty": True, "ahead": 2, "at": 123})
+    assert chat["repo_state"] == {"branch": "feature-x", "dirty": True, "ahead": 2, "at": 123}
+
+
+def test_session_to_chat_without_repo_state_stays_empty():
+    chat = syncstore.session_to_chat({"id": "s1", "messages": [], "cwd": "/tmp/p"})
+    assert chat["repo_state"] == {}
+
+
+def test_apply_handoff_also_clears_stale_desktop_state_notes():
+    """Both notes describe the *other* device right now, so both are re-derived
+    per open and neither may accumulate."""
+    msgs = [
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": syncstore.DESKTOP_STATE_MARKER + " old news"},
+    ]
+    out = syncstore.apply_handoff(msgs, "desktop", "phone")
+    stale = [m for m in out
+             if str(m.get("content", "")).startswith(syncstore.DESKTOP_STATE_MARKER)]
+    assert not stale
+
+
 @needs_node
 def test_the_phone_writes_a_byte_identical_handoff_note():
     """Both devices strip the marker by exact prefix and rewrite it on open. If
@@ -1053,6 +1081,101 @@ class _FakeChatState:
     def __init__(self, sid):
         self.sid = sid
         self.turn_lock = threading.Lock()
+        self.synced_at = 0
+
+
+# ------------------------------------------------------ desktop catch-up
+# The mirror of the phone's foreground catch-up: come back to the desktop and
+# find the chat already current. Quiet, and never mid-turn.
+
+def _catch_up_api(monkeypatch, rows, cs, pull_result=None):
+    api = _bare_api(active=cs)
+    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pass")
+    store = types.SimpleNamespace(list=lambda: rows)
+    monkeypatch.setattr(gui_app.Api, "_open_sync_store", lambda self: (store, ""))
+    called = {}
+    def fake_pull(self, chat_id):
+        called["chat_id"] = chat_id
+        return pull_result if pull_result is not None else {"ok": True}
+    monkeypatch.setattr(gui_app.Api, "sync_pull_chat", fake_pull)
+    return api, called
+
+
+def test_catch_up_adopts_a_chat_another_device_moved_on(monkeypatch):
+    cs = _FakeChatState("c1")
+    cs.synced_at = 100
+    api, called = _catch_up_api(
+        monkeypatch, [{"id": "c1", "updated": 500, "device": "phone"}], cs)
+    res = api.sync_catch_up()
+    assert res["changed"] is True
+    assert res["from_device"] == "phone"
+    assert called["chat_id"] == "c1"
+
+
+def test_catch_up_ignores_our_own_push_coming_back(monkeypatch):
+    cs = _FakeChatState("c1")
+    cs.synced_at = 500                      # we wrote this exact version
+    api, called = _catch_up_api(
+        monkeypatch, [{"id": "c1", "updated": 500, "device": "desktop"}], cs)
+    assert api.sync_catch_up()["changed"] is False
+    assert not called, "must not re-pull our own write"
+
+
+def test_catch_up_never_interrupts_a_turn_in_progress(monkeypatch):
+    cs = _FakeChatState("c1")
+    cs.synced_at = 0
+    api, called = _catch_up_api(
+        monkeypatch, [{"id": "c1", "updated": 999, "device": "phone"}], cs)
+    cs.turn_lock.acquire()                  # mid-turn: the agent owns the messages
+    try:
+        assert api.sync_catch_up()["changed"] is False
+        assert not called
+    finally:
+        cs.turn_lock.release()
+
+
+def test_catch_up_is_a_no_op_with_no_active_chat(monkeypatch):
+    api = _bare_api()
+    assert api.sync_catch_up() == {"ok": True, "changed": False}
+
+
+def test_catch_up_is_quiet_when_sync_is_off(monkeypatch):
+    cs = _FakeChatState("c1")
+    api = _bare_api(active=cs)
+    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: None)
+    assert api.sync_catch_up()["changed"] is False
+
+
+def test_catch_up_survives_being_offline(monkeypatch):
+    cs = _FakeChatState("c1")
+    api = _bare_api(active=cs)
+    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pass")
+
+    def boom():
+        raise githubsync.GitHubError("offline")
+    monkeypatch.setattr(gui_app.Api, "_open_sync_store",
+                        lambda self: (types.SimpleNamespace(list=boom), ""))
+    assert api.sync_catch_up()["changed"] is False, "offline must not raise"
+
+
+def test_catch_up_reports_unchanged_if_the_pull_fails(monkeypatch):
+    cs = _FakeChatState("c1")
+    cs.synced_at = 0
+    api, _ = _catch_up_api(
+        monkeypatch, [{"id": "c1", "updated": 900, "device": "phone"}], cs,
+        pull_result={"error": "boom"})
+    assert api.sync_catch_up()["changed"] is False
+
+
+def test_catch_up_ignores_a_chat_that_is_not_in_the_store(monkeypatch):
+    cs = _FakeChatState("c1")
+    api, called = _catch_up_api(
+        monkeypatch, [{"id": "somethingelse", "updated": 900}], cs)
+    assert api.sync_catch_up()["changed"] is False
+    assert not called
 
 
 def test_device_identity_generates_and_persists_once(monkeypatch):

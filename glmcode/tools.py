@@ -319,8 +319,16 @@ def _syntax_feedback(p: Path) -> str:
         elif ext in (".js", ".mjs", ".cjs"):
             node = shutil.which("node")
             if node:
-                r = subprocess.run([node, "--check", str(p)], capture_output=True,
-                                   text=True, timeout=10, **NO_WINDOW_KWARGS)
+                # Node's cold start can be slow on a loaded machine (Windows
+                # Defender scanning a fresh temp file, say), so give it room --
+                # and if it still runs out, say the check didn't happen rather
+                # than returning the same '' that means "looks fine".
+                try:
+                    r = subprocess.run([node, "--check", str(p)], capture_output=True,
+                                       text=True, timeout=30, **NO_WINDOW_KWARGS)
+                except subprocess.TimeoutExpired:
+                    return ("\nNote: couldn't syntax-check this file (node took too long), "
+                            "so it was saved unchecked -- give it a read.")
                 if r.returncode != 0:
                     err = " ".join((r.stderr or "").strip().splitlines()[:3])[:300]
                     return _syntax_warn(f"JavaScript syntax error: {err}")

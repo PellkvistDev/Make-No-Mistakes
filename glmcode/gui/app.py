@@ -604,6 +604,10 @@ class ChatState:
         self.model = ""
         self.auto_backup = True
         self.turn_lock = threading.Lock()  # one turn at a time PER CHAT
+        # chat["updated"] of the synced copy this chat last wrote or adopted, so
+        # a catch-up can tell "the phone moved this on" from "that's my own push
+        # coming back".
+        self.synced_at = 0
         # One entry per send-turn, in order: {"commit": <hash or None>}. The
         # list index IS the turn ordinal, so turn_snapshots[k] is the pre-turn
         # file state of the k-th user turn -- what "edit & resend" reverts to.
@@ -2039,6 +2043,9 @@ class Api:
                                      sess.get("todos", []), sess.get("title", ""),
                                      model_provider=sess.get("model_provider", ""),
                                      model=sess.get("model", ""))
+        live = self._chats.get(sess["id"])
+        if live:
+            live.synced_at = int(chat.get("updated") or 0)
         self._save_current()
         res["sessions"] = self.list_sessions()
         return res
@@ -2058,10 +2065,71 @@ class Api:
         if err:
             return {"error": err}
         try:
-            store.save(syncstore.session_to_chat(data))
+            updated = store.save(syncstore.session_to_chat(data, self._repo_state(data.get("cwd"))))
         except (syncstore.SyncError, githubsync.GitHubError) as e:
             return {"error": str(e)}
+        # Remember our own write, so catch-up doesn't mistake it for the phone.
+        if live:
+            live.synced_at = updated or 0
         return {"ok": True, "id": sid}
+
+    def _repo_state(self, cwd: str) -> dict:
+        """This machine's git state for a project, published with the chat.
+
+        The phone reads the repo over the GitHub API, so anything living only
+        on this disk -- uncommitted edits, or commits not pushed yet -- is
+        invisible to it. Without this it would read an older copy of a file and
+        commit straight over the work sitting here.
+        """
+        if not cwd:
+            return {}
+        try:
+            st = githubsync.status(Path(cwd))
+            if not st.connected:
+                return {}
+            return {"branch": st.branch or "", "dirty": bool(st.dirty),
+                    "ahead": int(st.ahead or 0), "at": syncstore._now_ms()}
+        except Exception:
+            return {}   # a chat must never fail to sync over a git hiccup
+
+    def sync_catch_up(self):
+        """Adopt the open chat's synced copy if another device moved it on.
+
+        The mirror of the phone's foreground catch-up: the whole point of sync
+        is putting the phone down and finding the desktop already current. Quiet
+        by design -- it reports "nothing to do" far more often than not, and is
+        never allowed to interrupt a turn in progress or fail loudly.
+        """
+        cs = self._active
+        if cs is None or not self.session_id:
+            return {"ok": True, "changed": False}
+        if not (syncstore.crypto_available() and syncstore.load_passphrase()):
+            return {"ok": True, "changed": False}
+        # Mid-turn: the agent owns the message list right now. Try again later.
+        if cs.turn_lock.locked():
+            return {"ok": True, "changed": False}
+        store, err = self._open_sync_store()
+        if err or not store:
+            return {"ok": True, "changed": False}
+        try:
+            row = next((r for r in store.list() if r.get("id") == cs.sid), None)
+        except (syncstore.SyncError, githubsync.GitHubError):
+            return {"ok": True, "changed": False}   # offline: keep what we have
+        if not row or not row.get("updated"):
+            return {"ok": True, "changed": False}
+        if row["updated"] <= (cs.synced_at or 0):
+            return {"ok": True, "changed": False}   # our own push, or nothing new
+        # Something else advanced this chat. sync_pull_chat re-activates it,
+        # which also re-derives the handoff marker and kicks off a repo pull.
+        res = self.sync_pull_chat(cs.sid)
+        if res.get("error"):
+            return {"ok": True, "changed": False}
+        live = self._chats.get(cs.sid)
+        if live:
+            live.synced_at = row["updated"]
+        res["changed"] = True
+        res["from_device"] = row.get("device") or "another device"
+        return res
 
     def sync_delete_chat(self, chat_id: str):
         """Remove a chat from the shared store (all devices). Local copy stays."""
@@ -2111,7 +2179,21 @@ class Api:
         def work():
             try:
                 st = githubsync.status(workdir)
-                if not st.connected or st.dirty:
+                if not st.connected:
+                    return
+                if st.dirty:
+                    # Uncommitted work here, so pulling automatically could
+                    # clobber it. Say so rather than leaving the agent to read
+                    # stale files: silently working from an out-of-date tree is
+                    # how the phone's commits get overwritten. Fetch first --
+                    # 'behind' is counted against the last-seen origin ref, so
+                    # without it the phone's fresh push looks like nothing.
+                    githubsync.refresh_remote(workdir, self._gh_token())
+                    st = githubsync.status(workdir)
+                    if st.behind > 0:
+                        ev.toast(
+                            f"{st.behind} new commit(s) on GitHub, but this folder has "
+                            "uncommitted changes — pull manually to catch up.", "warn")
                     return
                 token = self._gh_token()
                 out = githubsync.pull(workdir, token)

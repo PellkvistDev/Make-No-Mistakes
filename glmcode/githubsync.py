@@ -274,6 +274,21 @@ def _scrub_remote(path: Path, host: str, owner: str, repo: str) -> None:
                  cwd=path)
 
 
+def refresh_remote(path: Path, token: str | None = None) -> bool:
+    """Update origin/* refs without touching the working tree.
+
+    status() counts 'behind' against the last-fetched origin ref, so without
+    this it can report 0 while the remote has moved -- which is exactly the case
+    that matters when the phone has just pushed. Safe on a dirty tree: a fetch
+    writes no files.
+    """
+    p = Path(path)
+    try:
+        return _run_git(["fetch", "origin"], cwd=p, token=token).returncode == 0
+    except Exception:
+        return False
+
+
 def status(path: Path, host="", owner="", repo="") -> SyncStatus:
     """Best-effort sync status for the HUD. Local only -- no network."""
     p = Path(path)
