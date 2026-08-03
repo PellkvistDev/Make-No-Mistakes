@@ -451,10 +451,17 @@
   // together. That's not tidiness -- an assistant message carrying tool_calls
   // and the tool replies answering it must never be separated, or the API
   // rejects the request outright.
-  const CHARS_PER_TOKEN = 4;      // rough, but the only option without a tokenizer
-  const IMAGE_TOKEN_COST = 1200;  // an image costs far more than its URL is long
+  // Counting characters and dividing is a guess, and a guess is why the limit
+  // has to be set well under the model's real window. But the API reports the
+  // exact prompt_tokens of every request it answers — so measure the ratio from
+  // that instead of assuming it. calibrateRatio() turns one real reading into
+  // the divisor for everything after, which is both more accurate and adapts to
+  // the content (dense code tokenises very differently from prose).
+  const DEFAULT_CHARS_PER_TOKEN = 3.6;   // matches the desktop's starting guess
+  const IMAGE_CHARS = 4000;              // an image costs far more than its URL is long
+  const RATIO_MIN = 1.5, RATIO_MAX = 8;  // ignore readings outside anything plausible
 
-  function estimateTokens(messages) {
+  function messageChars(messages) {
     let chars = 0;
     for (const m of messages || []) {
       const c = m.content;
@@ -463,7 +470,7 @@
         for (const part of c) {
           // Counting a base64 data URL by length would read as tens of
           // thousands of tokens and trigger endless pointless trimming.
-          if (part && part.type === "image_url") chars += IMAGE_TOKEN_COST * CHARS_PER_TOKEN;
+          if (part && part.type === "image_url") chars += IMAGE_CHARS;
           else if (part && part.text) chars += part.text.length;
         }
       }
@@ -471,7 +478,24 @@
         chars += ((tc.function && tc.function.arguments) || "").length + 24;
       }
     }
-    return Math.ceil(chars / CHARS_PER_TOKEN);
+    return chars;
+  }
+
+  function estimateTokens(messages, charsPerToken) {
+    const r = Number(charsPerToken) > 0 ? Number(charsPerToken) : DEFAULT_CHARS_PER_TOKEN;
+    return Math.ceil(messageChars(messages) / r);
+  }
+
+  // Derive chars-per-token from a request the API actually priced. Returns null
+  // for readings that can't be right, so one odd response can't skew the meter.
+  function calibrateRatio(messages, promptTokens) {
+    const tokens = Number(promptTokens);
+    if (!(tokens > 0)) return null;
+    const chars = messageChars(messages);
+    if (chars <= 0) return null;
+    const ratio = chars / tokens;
+    if (!(ratio >= RATIO_MIN && ratio <= RATIO_MAX)) return null;
+    return ratio;
   }
 
   // Split into system messages (always kept -- small, and deliberately
@@ -595,6 +619,9 @@
           const payload = line.slice(5).trim();
           if (!payload || payload === "[DONE]") continue;
           let j; try { j = JSON.parse(payload); } catch (e) { continue; }
+          // Providers that report usage do it on a trailing chunk. Keep it if
+          // it comes; the token meter falls back to an estimate if it doesn't.
+          if (j.usage) msg.usage = j.usage;
           applyDelta(msg, j.choices && j.choices[0] && j.choices[0].delta, onDelta);
         }
       }
@@ -621,7 +648,9 @@
           if (r.ok) {
             if (wantStream && r.body && r.body.getReader) return readStream(r.body, onDelta);
             const j = await r.json();
-            return (j.choices && j.choices[0] && j.choices[0].message) || { role: "assistant", content: "" };
+            const m = (j.choices && j.choices[0] && j.choices[0].message) || { role: "assistant", content: "" };
+            if (j.usage) m.usage = j.usage;   // exact token counts, when offered
+            return m;
           }
           const body = await r.text().catch(() => "");
           const busy = r.status === 429 || /"1305"|访问量过大|rate.?limit/i.test(body);
@@ -822,8 +851,15 @@
       // Stream only when the host actually renders deltas, so sub-agents (whose
       // output is summarised, not shown live) keep the cheaper single read.
       const onDelta = cfg.stream ? (t) => onEvent({ type: "delta", text: t }) : undefined;
+      const sentCount = messages.length;
       try { msg = await model.chat(messages, toolSchemas, onDelta); }
       catch (e) { onEvent({ type: "error", text: e.message }); return messages; }
+      // The exact prompt_tokens for the messages we just sent — worth far more
+      // than any character estimate, so hand it straight to the host.
+      if (msg && msg.usage) {
+        onEvent({ type: "usage", usage: msg.usage, sent: messages.slice(0, sentCount) });
+        delete msg.usage;   // not part of the conversation; don't resend it
+      }
       messages.push(msg);
       if (!msg.tool_calls || !msg.tool_calls.length) {
         onEvent({ type: "answer", text: msg.content || "" });
@@ -876,7 +912,7 @@
     IMAGE_RE, imageMime,
     handoffNote, applyHandoff, HANDOFF_MARKER, repoStateWarning,
     estimateTokens, trimHistory, historyDigest, splitTurns, COMPACT_PROMPT,
-    CHARS_PER_TOKEN, IMAGE_TOKEN_COST,
+    messageChars, calibrateRatio, DEFAULT_CHARS_PER_TOKEN, IMAGE_CHARS,
     _b64: { bytesToB64, b64ToBytes },
   };
   if (typeof module !== "undefined" && module.exports) module.exports = CoreAPI;

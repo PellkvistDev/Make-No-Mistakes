@@ -13,7 +13,8 @@ import threading
 import uuid
 from pathlib import Path
 
-from .api import ApiError, Cancelled, RateLimiter, Usage, ZaiClient, estimate_tokens
+from .api import (ApiError, Cancelled, RateLimiter, Usage, ZaiClient,
+                  DEFAULT_CHARS_PER_TOKEN, calibrate_ratio, estimate_tokens)
 from .config import Config
 from .events import AgentEvents
 from .permissions import PermissionEngine
@@ -186,6 +187,9 @@ class Agent:
             mode=cfg.mode, path_rules=cfg.path_rules, workdir=self.workdir)
         self.messages: list[dict] = []
         self.session_usage = Usage()
+        # chars-per-token, measured from the API's own prompt_tokens rather
+        # than assumed -- see api.calibrate_ratio.
+        self._chars_per_token = DEFAULT_CHARS_PER_TOKEN
         self.cancel = threading.Event()
         # Like cancel, but cooperative rather than immediate: doesn't abort
         # the current tool call, just skips straight to a forced final
@@ -342,7 +346,7 @@ class Agent:
         )
 
     def _with_usage_note(self, base: str) -> str:
-        est = estimate_tokens(self.messages) if self.messages else 0
+        est = estimate_tokens(self.messages, self._chars_per_token) if self.messages else 0
         limit = self.cfg.context_limit_tokens
         return (
             f"{base}\n\n# Context usage\n"
@@ -374,6 +378,15 @@ class Agent:
 
     def set_usage(self, prompt_tokens: int, completion_tokens: int) -> None:
         self.session_usage = Usage(prompt_tokens, completion_tokens)
+
+    def _calibrate(self, usage) -> None:
+        """Replace the chars-per-token guess with what the API actually charged.
+
+        Called before the reply is appended, so self.messages is still exactly
+        what was sent and lines up with usage.prompt_tokens."""
+        ratio = calibrate_ratio(self.messages, getattr(usage, "prompt_tokens", 0))
+        if ratio:
+            self._chars_per_token = ratio
 
     def request_cancel(self) -> None:
         self.cancel.set()
@@ -982,6 +995,7 @@ class Agent:
                 return
 
             self.session_usage.add(result.usage)
+            self._calibrate(result.usage)
             msg = result.to_message()
             self.messages.append(msg)
             self._log_assistant_msg(msg)
@@ -1076,6 +1090,7 @@ class Agent:
                 cancel=self.cancel,
             )
             self.session_usage.add(result.usage)
+            self._calibrate(result.usage)
             msg = result.to_message()
             self.messages.append(msg)
             self._log_assistant_msg(msg)
@@ -2080,7 +2095,7 @@ class Agent:
     # Context management
 
     def context_estimate(self) -> int:
-        return estimate_tokens(self.messages)
+        return estimate_tokens(self.messages, self._chars_per_token)
 
     def maybe_autocompact(self) -> None:
         if self.context_estimate() > self.cfg.context_limit_tokens:

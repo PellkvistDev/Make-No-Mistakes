@@ -350,10 +350,16 @@ const callsTool = (id, name) => ({ role: "assistant", content: "",
   tool_calls: [{ id, type: "function", function: { name, arguments: "{}" } }] });
 const toolReply = (id, t) => ({ role: "tool", tool_call_id: id, content: t });
 
-test("tokens: estimated from text length", () => {
-  assert.equal(C.estimateTokens([usr("abcd")]), 1);
-  assert.equal(C.estimateTokens([usr("a".repeat(400))]), 100);
+test("tokens: estimated from text length at the default ratio", () => {
+  assert.equal(C.estimateTokens([usr("a".repeat(360))]), 100);
   assert.equal(C.estimateTokens([]), 0);
+});
+
+test("tokens: a calibrated ratio overrides the default guess", () => {
+  const msgs = [usr("a".repeat(360))];
+  assert.equal(C.estimateTokens(msgs, 3.6), 100);
+  assert.equal(C.estimateTokens(msgs, 2), 180, "denser tokenisation, more tokens");
+  assert.equal(C.estimateTokens(msgs, 0), 100, "a nonsense ratio falls back to the default");
 });
 
 test("tokens: an image is a flat cost, not its data-URL length", () => {
@@ -361,7 +367,63 @@ test("tokens: an image is a flat cost, not its data-URL length", () => {
   // tokens and trigger endless pointless trimming.
   const huge = "data:image/png;base64," + "A".repeat(200000);
   const withImage = [{ role: "user", content: [{ type: "image_url", image_url: { url: huge } }] }];
-  assert.equal(C.estimateTokens(withImage), C.IMAGE_TOKEN_COST);
+  assert.equal(C.messageChars(withImage), C.IMAGE_CHARS);
+});
+
+// Calibration: the API tells us the exact prompt_tokens it charged, so the
+// divisor can be measured instead of assumed — which is what lets the limit
+// sit near the model's real window instead of well under it.
+
+test("calibrate: derives the real ratio from a priced request", () => {
+  const msgs = [usr("a".repeat(1000))];
+  assert.equal(C.calibrateRatio(msgs, 250), 4);
+  assert.equal(C.calibrateRatio(msgs, 500), 2);
+});
+
+test("calibrate: rejects readings that can't be right", () => {
+  const msgs = [usr("a".repeat(1000))];
+  assert.equal(C.calibrateRatio(msgs, 0), null);
+  assert.equal(C.calibrateRatio(msgs, -5), null);
+  assert.equal(C.calibrateRatio(msgs, undefined), null);
+  assert.equal(C.calibrateRatio([], 100), null, "no content to measure");
+  assert.equal(C.calibrateRatio(msgs, 1), null, "1000 chars/token is not plausible");
+  assert.equal(C.calibrateRatio(msgs, 900), null, "~1 char/token is not plausible either");
+});
+
+test("usage: a non-streamed reply carries the exact token counts", async () => {
+  const fetch = async () => ({ ok: true, status: 200,
+    json: async () => ({ choices: [{ message: { role: "assistant", content: "hi" } }],
+                         usage: { prompt_tokens: 1234, completion_tokens: 7 } }),
+    text: async () => "" });
+  const m = C.makeModel({ apiKey: "k", model: "glm", fetch });
+  const msg = await m.chat([usr("hello")]);
+  assert.equal(msg.usage.prompt_tokens, 1234);
+});
+
+test("usage: a trailing SSE chunk's usage is kept", async () => {
+  const fetch = async () => sseResponse([
+    delta({ content: "hi" }),
+    sseData({ choices: [{ delta: {} }], usage: { prompt_tokens: 999, completion_tokens: 2 } }),
+    "data: [DONE]\n",
+  ]);
+  const m = C.makeModel({ apiKey: "k", model: "glm", fetch });
+  const msg = await m.chat([usr("hello")], [], () => {});
+  assert.equal(msg.usage.prompt_tokens, 999);
+  assert.equal(msg.content, "hi");
+});
+
+test("usage: runAgent reports it and keeps it out of the conversation", async () => {
+  const model = { async chat() {
+    return { role: "assistant", content: "done", usage: { prompt_tokens: 500 } };
+  } };
+  const seen = [];
+  const msgs = [usr("go")];
+  await C.runAgent({ model, tools: {}, messages: msgs,
+    onEvent: (e) => { if (e.type === "usage") seen.push(e); } });
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].usage.prompt_tokens, 500);
+  assert.equal(seen[0].sent.length, 1, "the messages that were actually priced");
+  assert.ok(!msgs.some((m) => m.usage), "usage must not be resent as conversation");
 });
 
 test("tokens: tool_call arguments are counted", () => {

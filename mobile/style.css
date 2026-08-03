@@ -317,6 +317,39 @@ pre.code, pre.tool-out, .preview {
 }
 @keyframes caret { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
 
+/* ---------- context meter ---------- */
+/* Sits above the composer: how full the model's context is, and a way to
+   summarise older history on demand rather than waiting for the automatic
+   pass. Kept quiet — it should be glanceable, not attention-grabbing. */
+.ctx-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; max-width: 720px; margin: 0 auto; padding: 0 14px 2px;
+}
+.ctx-usage, .ctx-compact {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--muted); padding: 4px 8px; border-radius: 999px;
+  background: none; border: 1px solid transparent;
+  text-shadow: 0 1px 3px rgba(0,0,0,.55);
+}
+.ctx-compact {
+  border-color: var(--glass-brd); background: var(--glass);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+}
+.ctx-compact:active, .ctx-usage:active { transform: scale(.96); }
+.ctx-compact[disabled] { opacity: .45; }
+.token-donut { width: 14px; height: 14px; flex: none; }
+.token-donut .donut-bg { fill: none; stroke: rgba(255,255,255,.16); stroke-width: 3.5; }
+.token-donut .donut-segment {
+  fill: none; stroke: var(--accent); stroke-width: 3.5; stroke-linecap: round;
+  transition: stroke-dasharray .3s ease, stroke .3s ease;
+}
+#token-text { font-family: var(--mono); font-size: 11px; }
+/* Warm the ring as the context fills toward the automatic compaction point. */
+.ctx-foot.warn .donut-segment { stroke: #f5a623; }
+.ctx-foot.warn #token-text { color: #f5c877; }
+.ctx-foot.danger .donut-segment { stroke: #ff6b6b; }
+.ctx-foot.danger #token-text { color: #ffb3b3; }
+
 /* jump-to-latest pill, shown only when scrolled away from the live end */
 .to-bottom {
   position: absolute; left: 50%; transform: translateX(-50%);

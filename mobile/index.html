@@ -177,6 +177,16 @@
 
       <div id="composer-dock">
         <div id="attach-chips" class="attach-chips" hidden></div>
+        <div id="ctx-foot" class="ctx-foot">
+          <button id="btn-ctx" class="ctx-usage" type="button" title="Context usage">
+            <svg class="token-donut" viewBox="0 0 36 36" aria-hidden="true">
+              <path class="donut-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+              <path class="donut-segment" id="token-segment" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+            </svg>
+            <span id="token-text">0%</span>
+          </button>
+          <button id="btn-compact" class="ctx-compact" type="button" title="Summarise older history now">Compact</button>
+        </div>
         <form id="composer" class="composer">
           <button id="btn-attach" class="attach-btn" type="button" title="Attach repo files">＋</button>
           <textarea id="in-prompt" rows="1" placeholder="Message the agent…" autocomplete="off"></textarea>

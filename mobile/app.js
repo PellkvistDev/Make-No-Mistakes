@@ -334,6 +334,7 @@
     $("messages").innerHTML = "";
     addBubble("system", "Connected to " + session.repo.full_name + ". I can read, search, and edit files here — each edit is committed. I can't run code on the phone; that happens when your desktop syncs or via CI.");
     show("screen-chat");
+    renderContextMeter();
     persistSession();
     // Don't sync an empty chat — the first real save happens after a turn, so
     // the history list never fills with blank "New chat" entries.
@@ -612,6 +613,7 @@
     for (const b of session.transcript) addBubble(b.role, b.text, false);
     addBubble("system", "Resumed “" + (session.chatTitle || "chat") + "”.", false);
     show("screen-chat");
+    renderContextMeter();
     persistSession();
   }
   async function deleteSyncChat(id, title) {
@@ -863,10 +865,74 @@
     return true;
   }
 
-  // How much conversation the model is asked to carry. Deliberately well under
-  // what the free GLM models allow: the reply needs room too, and overshooting
-  // doesn't fail this turn, it fails EVERY turn from then on.
-  const CONTEXT_BUDGET_TOKENS = 48000;
+  // The GLM models carry ~200k. The headroom below that is for the reply and
+  // for the estimate being an estimate — but the estimate now calibrates itself
+  // against the exact prompt_tokens the API reports (see calibrateRatio), so it
+  // no longer has to be padded by guesswork the way a pure chars/N count does.
+  const CONTEXT_LIMIT_TOKENS = 185000;
+  // Trim before the model would refuse. Overshooting doesn't fail one turn, it
+  // fails every turn after it, so the automatic pass fires with room to spare.
+  const CONTEXT_BUDGET_TOKENS = 170000;
+
+  // chars-per-token, measured rather than assumed once the API prices a request.
+  let tokenRatio = AC.DEFAULT_CHARS_PER_TOKEN;
+  function noteUsage(sentMessages, usage) {
+    const r = AC.calibrateRatio(sentMessages, usage && usage.prompt_tokens);
+    if (r) tokenRatio = r;
+    renderContextMeter();
+  }
+  function contextTokens() {
+    if (!session || !session.messages) return 0;
+    return AC.estimateTokens(session.messages, tokenRatio);
+  }
+  function renderContextMeter() {
+    const foot = $("ctx-foot");
+    if (!foot) return;
+    const used = contextTokens();
+    const pct = Math.min(100, (used / CONTEXT_LIMIT_TOKENS) * 100);
+    $("token-segment").setAttribute("stroke-dasharray", pct.toFixed(1) + ", 100");
+    $("token-text").textContent = used < 1000
+      ? used + " tokens"
+      : (used / 1000).toFixed(used < 10000 ? 1 : 0) + "k / " +
+        Math.round(CONTEXT_LIMIT_TOKENS / 1000) + "k";
+    foot.classList.toggle("warn", pct >= 70 && pct < 90);
+    foot.classList.toggle("danger", pct >= 90);
+    $("btn-compact").disabled = !session || (session.messages || []).length < 4;
+  }
+  // Manual compaction: summarise everything but the most recent turns and
+  // replace them, so the user can reclaim room deliberately instead of waiting
+  // for the automatic pass. Unlike the automatic trim this DOES rewrite
+  // session.messages -- it's an explicit instruction, not a display concern.
+  async function compactNow() {
+    if (!session || currentRun || composing) return;
+    const msgs = session.messages || [];
+    if (msgs.length < 4) { toast("Nothing to compact yet."); return; }
+    // Keep roughly the last fifth of the conversation, and never nothing.
+    const keepBudget = Math.max(2000, Math.round(contextTokens() / 5));
+    const res = AC.trimHistory(msgs, keepBudget);
+    if (!res.droppedTurns) { toast("Nothing old enough to compact."); return; }
+    setRunning(true);
+    setStatus("compacting…");
+    try {
+      const summary = await compactSummary(res.dropped);
+      const next = res.messages.slice();
+      const at = next[0] && next[0].role === "system" ? 1 : 0;
+      next.splice(at, 0, { role: "system", content: "[compacted] " + summary });
+      session.messages = next;
+      session.compact = null;          // the summary is inline now, not a view
+      addBubble("system", "Compacted " + res.droppedTurns + " earlier turn" +
+        (res.droppedTurns === 1 ? "" : "s") + " into a summary.", false);
+      haptic(14);
+      persistSession();
+      syncSave();
+    } catch (e) {
+      toast("Couldn't compact: " + (e && e.message ? e.message : e));
+    } finally {
+      setStatus("");
+      setRunning(false);
+      renderContextMeter();
+    }
+  }
 
   // A summary of the turns that no longer fit. Cached against how much has been
   // dropped so a long chat doesn't pay for a summarisation call every turn.
@@ -932,6 +998,7 @@
           if (!endStream(ev.text) && ev.text) addBubble("assistant", ev.text);
           haptic(12);
         }
+        else if (ev.type === "usage") noteUsage(ev.sent, ev.usage);
         else if (ev.type === "error") { setStatus(""); endStream(); addBubble("error", ev.text); }
         else if (ev.type === "stopped") { setStatus(""); endStream(); addBubble("system", "Stopped."); }
       },
@@ -1078,7 +1145,8 @@
     try { await fn(() => stopFlag); }
     catch (e) { addBubble("error", e.message || String(e)); }
     finally {
-      setRunning(false); currentRun = null; persistSession(); await syncSave();
+      setRunning(false); currentRun = null; persistSession(); renderContextMeter();
+      await syncSave();
       if (chatId) await releaseDeviceLock(chatId);
     }
   }
@@ -1179,6 +1247,13 @@
   // Scrolling up during a long reply shouldn't strand you: a pill appears to
   // jump back to the live end. (Auto-scroll already pauses while you're away
   // from the bottom, so reading back never fights the stream.)
+  $("btn-compact").addEventListener("click", compactNow);
+  $("btn-ctx").addEventListener("click", () => {
+    const used = contextTokens();
+    toast(used.toLocaleString() + " of ~" + CONTEXT_LIMIT_TOKENS.toLocaleString() +
+      " tokens used. Older turns are summarised automatically before this fills.");
+  });
+
   const toBottomBtn = $("btn-to-bottom");
   function syncToBottomBtn() { toBottomBtn.hidden = atBottom(); }
   messages.addEventListener("scroll", syncToBottomBtn, { passive: true });
