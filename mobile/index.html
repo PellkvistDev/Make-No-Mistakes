@@ -173,6 +173,7 @@
       </header>
 
       <div id="messages" class="messages"></div>
+      <button id="btn-to-bottom" class="to-bottom" type="button" title="Jump to latest" hidden>↓</button>
 
       <div id="composer-dock">
         <div id="attach-chips" class="attach-chips" hidden></div>
@@ -277,6 +278,12 @@
             <div><label class="setting-label" for="set-confirm">Confirm every commit</label>
               <span class="setting-hint">Ask before the agent writes each file. Off = it commits automatically.</span></div>
             <input id="set-confirm" type="checkbox" class="toggle" checked />
+          </div>
+
+          <div class="setting-block toggle-row">
+            <div><label class="setting-label" for="set-haptics">Haptics</label>
+              <span class="setting-hint">A short tap when a reply lands, a commit goes through, or something is copied.</span></div>
+            <input id="set-haptics" type="checkbox" class="toggle" checked />
           </div>
 
           <div class="setting-block toggle-row">
