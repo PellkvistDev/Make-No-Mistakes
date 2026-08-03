@@ -290,6 +290,8 @@
     session.baseSystem = AC.SYSTEM_PROMPT + "\n\nRepository: " + fullName + " (branch " + branch + ").";
     session.turnCommits = 0;
     session.images = {};   // name -> data URL, for view_image
+    session.compact = null;  // cached summary of trimmed turns, per conversation
+    session.toldCompact = false;
     session.transcript = [];
     const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); haptic(18); };
     // Sub-agent tools have NO spawn (depth 1); the main tools add spawn_agent.
@@ -325,6 +327,8 @@
     session.messages = [{ role: "system", content: session.baseSystem }];
     session.transcript = [];
     session.images = {};
+    session.compact = null;
+    session.toldCompact = false;
     clearAttachments();
     $("chat-repo-name").textContent = session.repo.full_name;
     $("messages").innerHTML = "";
@@ -595,6 +599,8 @@
     session.transcript = data.transcript || [];
     session.syncedAt = data.updated || 0;
     session.images = {};
+    session.compact = null;
+    session.toldCompact = false;
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
     // Picking up a chat the desktop was driving: mark the switch, or the model
     // keeps imitating turns that used tools this phone doesn't have.
@@ -857,12 +863,60 @@
     return true;
   }
 
-  function runTurn(shouldStop, tools, toolSchemas) {
+  // How much conversation the model is asked to carry. Deliberately well under
+  // what the free GLM models allow: the reply needs room too, and overshooting
+  // doesn't fail this turn, it fails EVERY turn from then on.
+  const CONTEXT_BUDGET_TOKENS = 48000;
+
+  // A summary of the turns that no longer fit. Cached against how much has been
+  // dropped so a long chat doesn't pay for a summarisation call every turn.
+  async function compactSummary(dropped) {
+    const key = dropped.length;
+    if (session.compact && session.compact.key === key) return session.compact.text;
+    setStatus("compacting…");
+    let text = "";
+    try {
+      const r = await session.model.chat(
+        [{ role: "system", content: AC.COMPACT_PROMPT },
+         { role: "user", content: AC.historyDigest(dropped) }], undefined);
+      text = ((r && r.content) || "").trim();
+    } catch (e) { /* best effort — a failed summary must not block the turn */ }
+    if (!text) {
+      text = "Earlier turns were trimmed to fit the context window. " +
+             "Ask the user to re-state anything from them you need.";
+    }
+    session.compact = { key, text };
+    return text;
+  }
+
+  // What the model actually sees this turn. session.messages is left WHOLE:
+  // this phone's smaller context must not permanently delete history that the
+  // desktop — which syncs the same chat — still has room for.
+  async function modelView() {
+    const full = session.messages;
+    if (AC.estimateTokens(full) <= CONTEXT_BUDGET_TOKENS) return full;
+    const res = AC.trimHistory(full, CONTEXT_BUDGET_TOKENS);
+    if (!res.droppedTurns) return full;
+    const summary = await compactSummary(res.dropped);
+    const view = res.messages.slice();
+    const at = view[0] && view[0].role === "system" ? 1 : 0;
+    view.splice(at, 0, { role: "system", content: "[compacted] " + summary });
+    // Say it once per conversation, not on every re-summarisation.
+    if (!session.toldCompact) {
+      session.toldCompact = true;
+      addBubble("system", "Earlier turns no longer fit, so they're summarised from here on.", false);
+    }
+    return view;
+  }
+
+  async function runTurn(shouldStop, tools, toolSchemas) {
     let liveTool = null;
-    return AC.runAgent({
+    const messages = await modelView();
+    const grewFrom = messages.length;
+    const out = await AC.runAgent({
       model: session.model,
       tools: tools || session.tools,
-      messages: session.messages,
+      messages,
       shouldStop,
       toolSchemas,
       stream: true,
@@ -882,6 +936,13 @@
         else if (ev.type === "stopped") { setStatus(""); endStream(); addBubble("system", "Stopped."); }
       },
     });
+    // runAgent appends this turn onto the array it was handed. When that was a
+    // trimmed view rather than the real history, fold the new turn back in --
+    // otherwise the conversation would quietly stop growing.
+    if (messages !== session.messages) {
+      session.messages.push(...messages.slice(grewFrom));
+    }
+    return out;
   }
 
   const VISION_MODEL = "glm-4.6v-flash";  // free vision model, used by view_image

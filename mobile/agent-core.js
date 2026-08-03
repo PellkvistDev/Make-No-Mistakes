@@ -440,6 +440,102 @@
     return msg;
   }
 
+  // --- context budget ------------------------------------------------------
+  // Every turn resends the whole conversation, so an unbounded history walks
+  // straight into the model's context limit -- and then EVERY send fails, not
+  // just the big one, leaving the chat permanently unusable. Sync makes it
+  // worse: a long desktop chat arrives here in full.
+  //
+  // Trimming happens on TURN boundaries. A user message opens a turn and owns
+  // every assistant/tool message until the next one, so whole turns come and go
+  // together. That's not tidiness -- an assistant message carrying tool_calls
+  // and the tool replies answering it must never be separated, or the API
+  // rejects the request outright.
+  const CHARS_PER_TOKEN = 4;      // rough, but the only option without a tokenizer
+  const IMAGE_TOKEN_COST = 1200;  // an image costs far more than its URL is long
+
+  function estimateTokens(messages) {
+    let chars = 0;
+    for (const m of messages || []) {
+      const c = m.content;
+      if (typeof c === "string") chars += c.length;
+      else if (Array.isArray(c)) {
+        for (const part of c) {
+          // Counting a base64 data URL by length would read as tens of
+          // thousands of tokens and trigger endless pointless trimming.
+          if (part && part.type === "image_url") chars += IMAGE_TOKEN_COST * CHARS_PER_TOKEN;
+          else if (part && part.text) chars += part.text.length;
+        }
+      }
+      for (const tc of m.tool_calls || []) {
+        chars += ((tc.function && tc.function.arguments) || "").length + 24;
+      }
+    }
+    return Math.ceil(chars / CHARS_PER_TOKEN);
+  }
+
+  // Split into system messages (always kept -- small, and deliberately
+  // load-bearing) and whole turns of everything else.
+  function splitTurns(messages) {
+    const system = [], turns = [];
+    let cur = null;
+    (messages || []).forEach((m, i) => {
+      if (m.role === "system") { system.push(i); return; }
+      if (m.role === "user" || !cur) { cur = [i]; turns.push(cur); return; }
+      cur.push(i);
+    });
+    return { system, turns };
+  }
+
+  // Drop the oldest whole turns until the rest fits. The newest turn is always
+  // kept even if it alone blows the budget -- refusing to send the thing the
+  // user just typed would be worse than letting the model complain.
+  function trimHistory(messages, budgetTokens) {
+    const all = messages || [];
+    const { system, turns } = splitTurns(all);
+    const at = (idx) => idx.map((i) => all[i]);
+    let budget = budgetTokens - estimateTokens(at(system));
+    const keptTurns = [];
+    for (let t = turns.length - 1; t >= 0; t--) {
+      const cost = estimateTokens(at(turns[t]));
+      if (keptTurns.length && cost > budget) break;
+      budget -= cost;
+      keptTurns.push(t);
+    }
+    const droppedTurns = turns.filter((_, t) => !keptTurns.includes(t));
+    if (!droppedTurns.length) return { messages: all, dropped: [], droppedTurns: 0 };
+    const drop = new Set(droppedTurns.flat());
+    return {
+      messages: all.filter((_, i) => !drop.has(i)),
+      dropped: at([...drop].sort((a, b) => a - b)),
+      droppedTurns: droppedTurns.length,
+    };
+  }
+
+  // A plain-text rendering of dropped turns, for asking the model to summarise
+  // them. Tool output is clipped hard: the point is what happened, not the bytes.
+  function historyDigest(messages, perMessage = 600) {
+    const out = [];
+    for (const m of messages || []) {
+      let text = typeof m.content === "string" ? m.content
+        : Array.isArray(m.content)
+          ? m.content.map((p) => (p && p.text) || (p && p.type === "image_url" ? "[image]" : "")).join(" ")
+          : "";
+      for (const tc of m.tool_calls || []) {
+        text += `\n[called ${(tc.function && tc.function.name) || "tool"}]`;
+      }
+      text = text.trim();
+      if (text) out.push(`${m.role}: ${text.slice(0, perMessage)}`);
+    }
+    return out.join("\n");
+  }
+
+  const COMPACT_PROMPT =
+    "Summarise this earlier part of a coding conversation so work can continue without it. " +
+    "Keep: what the user is trying to achieve, decisions made and why, files changed and how, " +
+    "and anything still unfinished or unverified. Drop pleasantries and tool noise. " +
+    "Be specific about file paths and names. Write it as notes, not prose.";
+
   // --- images --------------------------------------------------------------
   const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|avif|svg|ico)$/i;
   function imageMime(path) {
@@ -779,6 +875,8 @@
     DEVICE_LOCK_TTL_MS, DEVICE_LOCK_HEARTBEAT_S,
     IMAGE_RE, imageMime,
     handoffNote, applyHandoff, HANDOFF_MARKER, repoStateWarning,
+    estimateTokens, trimHistory, historyDigest, splitTurns, COMPACT_PROMPT,
+    CHARS_PER_TOKEN, IMAGE_TOKEN_COST,
     _b64: { bytesToB64, b64ToBytes },
   };
   if (typeof module !== "undefined" && module.exports) module.exports = CoreAPI;

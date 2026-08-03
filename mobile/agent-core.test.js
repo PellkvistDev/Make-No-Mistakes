@@ -337,6 +337,129 @@ test("unknown tool: a plain typo doesn't get the desktop explanation", async () 
   assert.match(results[0], /read_file/);
 });
 
+// ------------------------------------------------------ context budget --
+// Every turn resends the whole conversation, so without trimming a long chat
+// eventually fails EVERY send, not just the big one. The subtle part is that
+// an assistant message carrying tool_calls and the tool replies answering it
+// must never be split, or the API rejects the request outright.
+
+const sys = (t) => ({ role: "system", content: t });
+const usr = (t) => ({ role: "user", content: t });
+const asst = (t) => ({ role: "assistant", content: t });
+const callsTool = (id, name) => ({ role: "assistant", content: "",
+  tool_calls: [{ id, type: "function", function: { name, arguments: "{}" } }] });
+const toolReply = (id, t) => ({ role: "tool", tool_call_id: id, content: t });
+
+test("tokens: estimated from text length", () => {
+  assert.equal(C.estimateTokens([usr("abcd")]), 1);
+  assert.equal(C.estimateTokens([usr("a".repeat(400))]), 100);
+  assert.equal(C.estimateTokens([]), 0);
+});
+
+test("tokens: an image is a flat cost, not its data-URL length", () => {
+  // A base64 data URL counted by length would read as tens of thousands of
+  // tokens and trigger endless pointless trimming.
+  const huge = "data:image/png;base64," + "A".repeat(200000);
+  const withImage = [{ role: "user", content: [{ type: "image_url", image_url: { url: huge } }] }];
+  assert.equal(C.estimateTokens(withImage), C.IMAGE_TOKEN_COST);
+});
+
+test("tokens: tool_call arguments are counted", () => {
+  const withArgs = [{ role: "assistant", content: "", tool_calls: [
+    { id: "1", type: "function", function: { name: "x", arguments: "a".repeat(400) } }] }];
+  assert.ok(C.estimateTokens(withArgs) >= 100);
+});
+
+test("trim: leaves a conversation that already fits completely alone", () => {
+  const msgs = [sys("p"), usr("hi"), asst("hello")];
+  const out = C.trimHistory(msgs, 10000);
+  assert.equal(out.messages, msgs, "same array back when nothing to do");
+  assert.equal(out.droppedTurns, 0);
+});
+
+test("trim: drops the oldest turns and keeps the newest", () => {
+  const msgs = [sys("p")];
+  for (let i = 0; i < 10; i++) { msgs.push(usr("q" + i + " " + "x".repeat(400))); msgs.push(asst("a" + i)); }
+  const out = C.trimHistory(msgs, 300);
+  const kept = out.messages.filter((m) => m.role === "user").map((m) => m.content.slice(0, 3));
+  assert.ok(out.droppedTurns > 0, "something was dropped");
+  assert.ok(kept.includes("q9 "), "the newest turn survives");
+  assert.ok(!kept.includes("q0 "), "the oldest turn is gone");
+});
+
+test("trim: never separates tool replies from the call that made them", () => {
+  const msgs = [sys("p")];
+  for (let i = 0; i < 8; i++) {
+    msgs.push(usr("q" + i + " " + "x".repeat(400)));
+    msgs.push(callsTool("t" + i, "read_file"));
+    msgs.push(toolReply("t" + i, "contents " + "y".repeat(400)));
+    msgs.push(asst("done " + i));
+  }
+  const out = C.trimHistory(msgs, 400);
+  assert.ok(out.droppedTurns > 0);
+  // every tool reply kept must still have its assistant tool_call present
+  const liveIds = new Set();
+  for (const m of out.messages) for (const tc of m.tool_calls || []) liveIds.add(tc.id);
+  for (const m of out.messages) {
+    if (m.role === "tool") {
+      assert.ok(liveIds.has(m.tool_call_id),
+        `orphaned tool reply ${m.tool_call_id} — the API would reject this`);
+    }
+  }
+});
+
+test("trim: keeps every system message wherever it sits", () => {
+  // The live prompt is at index 0; handoff/desktop-state notes are appended at
+  // the end. Both are small and load-bearing, so neither may be trimmed away.
+  const msgs = [sys("live prompt")];
+  for (let i = 0; i < 10; i++) { msgs.push(usr("q" + i + " " + "x".repeat(400))); msgs.push(asst("a")); }
+  msgs.push(sys("[device-handoff] you are now on the phone"));
+  const out = C.trimHistory(msgs, 250);
+  const kept = out.messages.filter((m) => m.role === "system").map((m) => m.content);
+  assert.deepEqual(kept, ["live prompt", "[device-handoff] you are now on the phone"]);
+});
+
+test("trim: keeps the newest turn even when it alone blows the budget", () => {
+  const msgs = [sys("p"), usr("old"), asst("a"), usr("x".repeat(40000))];
+  const out = C.trimHistory(msgs, 100);
+  const users = out.messages.filter((m) => m.role === "user");
+  assert.equal(users.length, 1);
+  assert.equal(users[0].content.length, 40000, "refusing to send what was just typed is worse");
+});
+
+test("trim: reports what it dropped, in order", () => {
+  const msgs = [sys("p"), usr("first " + "x".repeat(400)), asst("a1"),
+                usr("second " + "x".repeat(400)), asst("a2")];
+  const out = C.trimHistory(msgs, 120);
+  assert.ok(out.dropped.length > 0);
+  assert.equal(out.dropped[0].content.slice(0, 5), "first");
+});
+
+test("trim: an assistant message before any user message is still a turn", () => {
+  const out = C.trimHistory([sys("p"), asst("orphan"), usr("hi")], 10000);
+  assert.equal(out.messages.length, 3, "no message is silently lost");
+});
+
+test("digest: renders roles, names tool calls, and clips long output", () => {
+  const d = C.historyDigest([
+    usr("do the thing"),
+    callsTool("t1", "read_file"),
+    toolReply("t1", "z".repeat(5000)),
+  ], 100);
+  assert.match(d, /user: do the thing/);
+  assert.match(d, /\[called read_file\]/);
+  assert.ok(!d.includes("z".repeat(200)), "tool output is clipped hard");
+});
+
+test("digest: images are named, not inlined", () => {
+  const d = C.historyDigest([{ role: "user", content: [
+    { type: "text", text: "look" },
+    { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }]);
+  assert.match(d, /look/);
+  assert.match(d, /\[image\]/);
+  assert.ok(!d.includes("base64"));
+});
+
 // ------------------------------------------------------------ streaming --
 // Build a fake SSE response whose body yields the given chunks. Chunks are
 // deliberately split at awkward points to prove the line buffering works.
