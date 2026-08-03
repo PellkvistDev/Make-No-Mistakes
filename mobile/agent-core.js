@@ -118,6 +118,17 @@
         const d = await gh("GET", `/repos/${owner}/${repo}/contents/${path}?ref=${branch}`);
         return { text: fromUtf8(b64ToBytes((d.content || "").replace(/\n/g, ""))), sha: d.sha };
       },
+      // Binary-safe read: returns the raw base64 untouched. getFile() decodes as
+      // UTF-8, which mangles images — anything non-text must come through here.
+      // GitHub omits `content` for blobs over ~1MB, so report that plainly.
+      async getFileRaw(path) {
+        const d = await gh("GET", `/repos/${owner}/${repo}/contents/${path}?ref=${branch}`);
+        const b64 = (d.content || "").replace(/\n/g, "");
+        if (!b64 && (d.size || 0) > 0) {
+          throw new Error(`${path} is ${Math.round((d.size || 0) / 1024)}KB — too large for the contents API (1MB limit).`);
+        }
+        return { b64, sha: d.sha, size: d.size || 0 };
+      },
       async putFile(path, text, message, sha) {
         return gh("PUT", `/repos/${owner}/${repo}/contents/${path}`,
           { message, content: bytesToB64(utf8(text)), branch, sha: sha || undefined });
@@ -353,6 +364,17 @@
     };
   }
 
+  // --- images --------------------------------------------------------------
+  const IMAGE_RE = /\.(png|jpe?g|gif|webp|bmp|avif|svg|ico)$/i;
+  function imageMime(path) {
+    const m = IMAGE_RE.exec(path || "");
+    const ext = (m ? m[1] : "png").toLowerCase();
+    if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
+    if (ext === "svg") return "image/svg+xml";
+    if (ext === "ico") return "image/x-icon";
+    return "image/" + ext;
+  }
+
   // --- model client (the "brain") -----------------------------------------
   // The free GLM models are rate-limited, so a "busy" response (HTTP 429, or
   // z.ai's 1305 / 访问量过大) is retried with exponential backoff before failing
@@ -364,18 +386,68 @@
     const maxRetries = opts.maxRetries != null ? opts.maxRetries : 3;
     const baseMs = opts.retryBaseMs || 2000;
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+    // Fold one streamed delta into the message being assembled. Tool calls
+    // arrive in fragments keyed by index (name first, then the arguments JSON
+    // a few characters at a time), so they're accumulated rather than replaced.
+    function applyDelta(msg, d, onDelta) {
+      if (!d) return;
+      if (d.content) { msg.content += d.content; if (onDelta) onDelta(d.content); }
+      if (!d.tool_calls) return;
+      msg.tool_calls = msg.tool_calls || [];
+      for (const tc of d.tool_calls) {
+        const i = tc.index != null ? tc.index : msg.tool_calls.length;
+        if (!msg.tool_calls[i]) msg.tool_calls[i] = { id: "", type: "function", function: { name: "", arguments: "" } };
+        const slot = msg.tool_calls[i];
+        if (tc.id) slot.id = tc.id;
+        if (tc.function) {
+          if (tc.function.name) slot.function.name = tc.function.name;
+          if (tc.function.arguments) slot.function.arguments += tc.function.arguments;
+        }
+      }
+    }
+    // Read an SSE body to completion, feeding text deltas out as they land.
+    async function readStream(body, onDelta) {
+      const reader = body.getReader();
+      const decoder = new TextDecoder();
+      const msg = { role: "assistant", content: "" };
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let nl;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl).trim();
+          buf = buf.slice(nl + 1);
+          if (!line.startsWith("data:")) continue;      // skip SSE comments/blank lines
+          const payload = line.slice(5).trim();
+          if (!payload || payload === "[DONE]") continue;
+          let j; try { j = JSON.parse(payload); } catch (e) { continue; }
+          applyDelta(msg, j.choices && j.choices[0] && j.choices[0].delta, onDelta);
+        }
+      }
+      if (msg.tool_calls) msg.tool_calls = msg.tool_calls.filter(Boolean);
+      return msg;
+    }
     return {
-      async chat(messages, tools) {
+      // onDelta (optional) turns on streaming: it's called with each chunk of
+      // text as it arrives, and the assembled message is still returned at the
+      // end, so callers that don't pass it behave exactly as before. Falls back
+      // to a normal read if the server or runtime can't stream.
+      async chat(messages, tools, onDelta) {
         for (let attempt = 0; ; attempt++) {
+          const wantStream = !!onDelta;
           const r = await fetchFn(baseUrl + "/chat/completions", {
             method: "POST",
             headers: { Authorization: "Bearer " + opts.apiKey, "Content-Type": "application/json" },
             body: JSON.stringify({
               model: opts.model, messages, tools: tools && tools.length ? tools : undefined,
               temperature: 0.6, max_tokens: 4096,
+              stream: wantStream || undefined,
             }),
           });
           if (r.ok) {
+            if (wantStream && r.body && r.body.getReader) return readStream(r.body, onDelta);
             const j = await r.json();
             return (j.choices && j.choices[0] && j.choices[0].message) || { role: "assistant", content: "" };
           }
@@ -418,6 +490,7 @@
       return out;
     }
     const BIN = /\.(png|jpg|jpeg|gif|webp|ico|pdf|zip|gz|woff2?|ttf|mp4|mp3|wasm|lock)$/i;
+    const IMG = /\.(png|jpe?g|gif|webp|bmp|avif|svg|ico)$/i;
 
     const api = {
       async list_dir(a) {
@@ -440,6 +513,12 @@
         return t.filter((e) => rx.test(e.path)).map((e) => e.path).slice(0, 200).join("\n") || "(no matches)";
       },
       async read_file(a) {
+        // Decoding an image as UTF-8 yields garbage that reads like a real file
+        // and quietly derails the turn. Say so, and point at the tool that works.
+        if (IMG.test(a.path || "")) {
+          return `${a.path} is an image. read_file would return unusable bytes — ` +
+                 `use view_image with this path to see what it actually shows.`;
+        }
         const f = await load(a.path);
         const lines = f.text.split("\n");
         return lines.map((l, i) => `${String(i + 1).padStart(4)} | ${l}`).join("\n").slice(0, 12000);
@@ -533,12 +612,17 @@
     { task: str("The self-contained task for the sub-agent"), context: str("Anything it should know: constraints, files, goals") },
     ["task"]);
 
-  // Advertised when the user has attached image(s) and the chat model can't see
-  // them itself; routes the image through the free vision model for a writeup.
+  // Vision. Routes an image through the vision model for a writeup, so a text
+  // (coding) model can still act on it. Works for BOTH images the user attached
+  // and image files that live in the repo — read_file can't do the latter,
+  // since it decodes as UTF-8 and would return mangled bytes.
   const VIEW_IMAGE_SCHEMA = tool("view_image",
-    "Look at an attached image via the vision model and get a text description. Use it whenever the user " +
-    "attached an image you need to understand. Give the image's name and, optionally, a focused question.",
-    { name: str("The attached image's file name"), question: str("What to look for (optional)") },
+    "Look at an image and get a description of what it actually shows. Works for an image the user " +
+    "attached AND for any image file in the repo (png/jpg/gif/webp/svg…) — pass its repo path, e.g. " +
+    "'docs/mockup.png'. Use this whenever an image's visual content matters: a screenshot of a bug, a " +
+    "design mockup, a diagram, a chart. Do NOT use read_file on an image; it returns unusable bytes.",
+    { name: str("The attached image's name, or the image file's path in the repo"),
+      question: str("What to look for (optional)") },
     ["name"]);
 
   // --- the agent loop ------------------------------------------------------
@@ -549,7 +633,10 @@
       if (shouldStop()) { onEvent({ type: "stopped" }); return messages; }
       onEvent({ type: "thinking" });
       let msg;
-      try { msg = await model.chat(messages, toolSchemas); }
+      // Stream only when the host actually renders deltas, so sub-agents (whose
+      // output is summarised, not shown live) keep the cheaper single read.
+      const onDelta = cfg.stream ? (t) => onEvent({ type: "delta", text: t }) : undefined;
+      try { msg = await model.chat(messages, toolSchemas, onDelta); }
       catch (e) { onEvent({ type: "error", text: e.message }); return messages; }
       messages.push(msg);
       if (!msg.tool_calls || !msg.tool_calls.length) {
@@ -594,6 +681,7 @@
     openSync, makeSyncStore, ensureSyncRepo,
     SYNC_REPO_NAME, SYNC_REPO_BRANCH, STATE_BRANCH,
     DEVICE_LOCK_TTL_MS, DEVICE_LOCK_HEARTBEAT_S,
+    IMAGE_RE, imageMime,
     _b64: { bytesToB64, b64ToBytes },
   };
   if (typeof module !== "undefined" && module.exports) module.exports = CoreAPI;

@@ -143,6 +143,49 @@ test("github: non-2xx throws with status", async () => {
   await assert.rejects(() => gh.me(), /GitHub 401/);
 });
 
+test("github: getFileRaw returns bytes intact where getFile would mangle them", async () => {
+  // A real PNG header — invalid UTF-8, so the text path corrupts it.
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe]);
+  const fetch = fakeFetch([
+    { method: "GET", match: (p) => p.includes("/contents/logo.png"),
+      json: { content: png.toString("base64"), sha: "s", size: png.length } },
+  ]);
+  const gh = C.makeGitHub({ token: "t", owner: "o", repo: "r", fetch });
+  const raw = await gh.getFileRaw("logo.png");
+  assert.deepEqual(Buffer.from(raw.b64, "base64"), png, "raw bytes must survive the round trip");
+  // and confirm the text path really would have destroyed them
+  const viaText = await gh.getFile("logo.png");
+  assert.notEqual(Buffer.from(viaText.text, "utf8").toString("base64"), png.toString("base64"));
+});
+
+test("github: getFileRaw explains the 1MB contents-API limit instead of returning nothing", async () => {
+  const fetch = fakeFetch([
+    { method: "GET", match: (p) => p.includes("/contents/big.png"),
+      json: { content: "", sha: "s", size: 2 * 1024 * 1024 } },
+  ]);
+  const gh = C.makeGitHub({ token: "t", owner: "o", repo: "r", fetch });
+  await assert.rejects(() => gh.getFileRaw("big.png"), /too large.*1MB/);
+});
+
+test("images: imageMime maps extensions (jpg→jpeg, svg→svg+xml)", () => {
+  assert.equal(C.imageMime("a/b.png"), "image/png");
+  assert.equal(C.imageMime("a/b.JPG"), "image/jpeg");
+  assert.equal(C.imageMime("a/b.jpeg"), "image/jpeg");
+  assert.equal(C.imageMime("a/b.svg"), "image/svg+xml");
+  assert.equal(C.imageMime("a/b.webp"), "image/webp");
+  assert.ok(C.IMAGE_RE.test("docs/shot.png"));
+  assert.ok(!C.IMAGE_RE.test("src/index.js"));
+});
+
+test("tools: read_file redirects to view_image for images instead of returning junk", async () => {
+  const fetch = fakeFetch([]);
+  const gh = C.makeGitHub({ token: "t", owner: "o", repo: "r", fetch });
+  const tools = C.makeTools(gh);
+  const out = await tools.read_file({ path: "docs/mockup.png" });
+  assert.match(out, /view_image/);
+  assert.equal(fetch.calls.length, 0, "must not even fetch the image as text");
+});
+
 // ---------------------------------------------------------------- model --
 
 test("model: retries on a 429 (rate limit) then succeeds", async () => {
@@ -163,6 +206,140 @@ test("model: a persistent rate limit throws a friendly message", async () => {
   const fetch = async () => ({ ok: false, status: 429, text: async () => "访问量过大" });
   const m = C.makeModel({ apiKey: "k", model: "glm-4.7-flash", fetch, retryBaseMs: 1, maxRetries: 2 });
   await assert.rejects(() => m.chat([{ role: "user", content: "hi" }]), /busy right now .rate-limited/);
+});
+
+// ------------------------------------------------------------ streaming --
+// Build a fake SSE response whose body yields the given chunks. Chunks are
+// deliberately split at awkward points to prove the line buffering works.
+function sseResponse(chunks) {
+  return {
+    ok: true, status: 200,
+    body: {
+      getReader() {
+        let i = 0;
+        return { async read() {
+          if (i >= chunks.length) return { done: true, value: undefined };
+          return { done: false, value: new TextEncoder().encode(chunks[i++]) };
+        } };
+      },
+    },
+    json: async () => { throw new Error("should have streamed, not read json"); },
+    text: async () => "",
+  };
+}
+const sseData = (obj) => "data: " + JSON.stringify(obj) + "\n";
+const delta = (d) => sseData({ choices: [{ delta: d }] });
+
+test("stream: text deltas arrive live and assemble into the final message", async () => {
+  const fetch = async () => sseResponse([
+    delta({ role: "assistant", content: "Hel" }),
+    delta({ content: "lo, " }) + delta({ content: "world" }),
+    "data: [DONE]\n",
+  ]);
+  const m = C.makeModel({ apiKey: "k", model: "glm", fetch });
+  const seen = [];
+  const msg = await m.chat([{ role: "user", content: "hi" }], [], (t) => seen.push(t));
+  assert.deepEqual(seen, ["Hel", "lo, ", "world"], "each chunk surfaces as it lands");
+  assert.equal(msg.content, "Hello, world");
+  assert.equal(msg.role, "assistant");
+});
+
+test("stream: a data line split across chunks is still parsed once whole", async () => {
+  const line = delta({ content: "split!" });
+  const fetch = async () => sseResponse([line.slice(0, 12), line.slice(12), "data: [DONE]\n"]);
+  const m = C.makeModel({ apiKey: "k", model: "glm", fetch });
+  const seen = [];
+  const msg = await m.chat([{ role: "user", content: "hi" }], [], (t) => seen.push(t));
+  assert.deepEqual(seen, ["split!"]);
+  assert.equal(msg.content, "split!");
+});
+
+test("stream: fragmented tool_call deltas accumulate into one usable call", async () => {
+  const fetch = async () => sseResponse([
+    delta({ tool_calls: [{ index: 0, id: "call_1", function: { name: "read_file", arguments: "" } }] }),
+    delta({ tool_calls: [{ index: 0, function: { arguments: '{"pa' } }] }),
+    delta({ tool_calls: [{ index: 0, function: { arguments: 'th":"a.js"}' } }] }),
+    "data: [DONE]\n",
+  ]);
+  const m = C.makeModel({ apiKey: "k", model: "glm", fetch });
+  const msg = await m.chat([{ role: "user", content: "hi" }], [], () => {});
+  assert.equal(msg.tool_calls.length, 1);
+  assert.equal(msg.tool_calls[0].id, "call_1");
+  assert.equal(msg.tool_calls[0].function.name, "read_file");
+  assert.deepEqual(JSON.parse(msg.tool_calls[0].function.arguments), { path: "a.js" });
+});
+
+test("stream: two parallel tool calls stay separate by index", async () => {
+  const fetch = async () => sseResponse([
+    delta({ tool_calls: [{ index: 0, id: "a", function: { name: "glob", arguments: '{"p":1}' } }] }),
+    delta({ tool_calls: [{ index: 1, id: "b", function: { name: "grep", arguments: '{"p":2}' } }] }),
+  ]);
+  const m = C.makeModel({ apiKey: "k", model: "glm", fetch });
+  const msg = await m.chat([{ role: "user", content: "hi" }], [], () => {});
+  assert.equal(msg.tool_calls.length, 2);
+  assert.deepEqual(msg.tool_calls.map((t) => t.function.name), ["glob", "grep"]);
+});
+
+test("stream: malformed SSE lines are skipped, not fatal", async () => {
+  const fetch = async () => sseResponse([
+    ": keep-alive comment\n",
+    "data: {not json}\n",
+    delta({ content: "still here" }),
+    "\n",
+  ]);
+  const m = C.makeModel({ apiKey: "k", model: "glm", fetch });
+  const msg = await m.chat([{ role: "user", content: "hi" }], [], () => {});
+  assert.equal(msg.content, "still here");
+});
+
+test("stream: falls back to a normal read when the runtime can't stream", async () => {
+  // No .body on the response (older WebViews) — must not hang or throw.
+  const fetch = async () => ({ ok: true, status: 200,
+    json: async () => ({ choices: [{ message: { role: "assistant", content: "plain" } }] }),
+    text: async () => "" });
+  const m = C.makeModel({ apiKey: "k", model: "glm", fetch });
+  const msg = await m.chat([{ role: "user", content: "hi" }], [], () => {});
+  assert.equal(msg.content, "plain");
+});
+
+test("stream: only requested when a delta handler is passed", async () => {
+  const bodies = [];
+  const fetch = async (url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return { ok: true, status: 200,
+      json: async () => ({ choices: [{ message: { role: "assistant", content: "x" } }] }),
+      text: async () => "" };
+  };
+  const m = C.makeModel({ apiKey: "k", model: "glm", fetch });
+  await m.chat([{ role: "user", content: "hi" }]);
+  assert.equal(bodies[0].stream, undefined, "no handler → no stream flag");
+});
+
+test("stream: a rate limit still retries before streaming starts", async () => {
+  let n = 0;
+  const fetch = async () => {
+    if (++n < 2) return { ok: false, status: 429, text: async () => "rate limit" };
+    return sseResponse([delta({ content: "after retry" })]);
+  };
+  const m = C.makeModel({ apiKey: "k", model: "glm", fetch, retryBaseMs: 1 });
+  const msg = await m.chat([{ role: "user", content: "hi" }], [], () => {});
+  assert.equal(msg.content, "after retry");
+});
+
+test("runAgent: streams deltas only when cfg.stream is set", async () => {
+  const model = { async chat(messages, tools, onDelta) {
+    if (onDelta) { onDelta("a"); onDelta("b"); }
+    return { role: "assistant", content: "ab" };
+  } };
+  const streamed = [];
+  await C.runAgent({ model, tools: {}, messages: [], stream: true,
+    onEvent: (e) => { if (e.type === "delta") streamed.push(e.text); } });
+  assert.deepEqual(streamed, ["a", "b"]);
+
+  const quiet = [];
+  await C.runAgent({ model, tools: {}, messages: [],
+    onEvent: (e) => { if (e.type === "delta") quiet.push(e.text); } });
+  assert.deepEqual(quiet, [], "sub-agents (no cfg.stream) keep the cheaper single read");
 });
 
 // ---------------------------------------------------------------- tools --

@@ -45,6 +45,9 @@
     const near = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
     msgs.style.paddingTop = (bar.offsetHeight + 6) + "px";
     msgs.style.paddingBottom = (dock.offsetHeight + 6) + "px";
+    // The jump-to-latest pill floats just above the dock, which grows with the
+    // textarea and attachment chips.
+    $("screen-chat").style.setProperty("--dock-h", dock.offsetHeight + "px");
     if (near) msgs.scrollTop = msgs.scrollHeight;
   }
   window.addEventListener("resize", fitMessages);
@@ -85,7 +88,10 @@
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) { if (session) persistSession(); return; }
     const ms = autolockMs();
-    if (session && ms && Date.now() - lastActive > ms) lock(); else armIdle();
+    if (session && ms && Date.now() - lastActive > ms) { lock(); return; }
+    armIdle();
+    // Back in the foreground and still unlocked: see if the desktop moved on.
+    if (session) refreshOpenChatFromSync();
   });
   ["pointerdown", "keydown"].forEach((ev) => document.addEventListener(ev, armIdle, { passive: true }));
 
@@ -285,7 +291,7 @@
     session.turnCommits = 0;
     session.images = {};   // name -> data URL, for view_image
     session.transcript = [];
-    const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); };
+    const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); haptic(18); };
     // Sub-agent tools have NO spawn (depth 1); the main tools add spawn_agent.
     session.subTools = AC.makeTools(session.gh, { confirmWrite, onCommit, viewImage });
     session.tools = AC.makeTools(session.gh, { confirmWrite, onCommit, spawn: runSubAgent, viewImage });
@@ -392,7 +398,7 @@
     if (!store) return;
     try {
       session.chatTitle = session.chatTitle || deriveTitle();
-      await store.save({
+      session.syncedAt = await store.save({
         id: session.chatId, title: session.chatTitle, preview: lastPreview(),
         repo: session.repo,
         project: (session.repo && session.repo.full_name) || "",
@@ -401,6 +407,39 @@
         transcript: session.transcript || [],
       });
     } catch (e) { /* offline / rate-limited — keep the local copy */ }
+  }
+
+  // ---- catching up with the other device ----
+  // The point of sync is that you can put the phone down, keep working on the
+  // desktop, and pick the phone back up on the same conversation. So whenever
+  // the app comes back to the foreground, quietly check whether the open chat
+  // moved on elsewhere and adopt it. Never runs mid-turn, and never replaces
+  // local history with something shorter — losing a message you just sent would
+  // be far worse than being slightly behind.
+  async function refreshOpenChatFromSync() {
+    if (currentRun || composing) return;
+    if (!syncOn() || !session || !session.chatId) return;
+    if ($("screen-chat").hidden) return;
+    let store;
+    try { store = await ensureSyncStore(); } catch (e) { return; }
+    if (!store) return;
+    try {
+      const row = (await store.list()).find((c) => c.id === session.chatId);
+      if (!row || !row.updated || row.updated <= (session.syncedAt || 0)) return;
+      const data = await store.load(session.chatId);
+      if (!data || !Array.isArray(data.messages)) return;
+      session.syncedAt = row.updated;
+      if (data.messages.length <= (session.messages || []).length) return;
+      session.messages = data.messages;
+      session.transcript = data.transcript || [];
+      session.messages[0] = { role: "system", content: session.baseSystem };
+      $("messages").innerHTML = "";
+      for (const b of session.transcript) addBubble(b.role, b.text, false);
+      addBubble("system", "Caught up with your " + (row.device || "other device") + ".", false);
+      scroll();
+      haptic(10);
+      persistSession();
+    } catch (e) { /* offline — keep what we have */ }
   }
 
   // ---- cross-device lock (same chat open on phone + desktop at once) ----
@@ -541,6 +580,7 @@
     session.chatTitle = data.title || "";
     session.messages = data.messages;
     session.transcript = data.transcript || [];
+    session.syncedAt = data.updated || 0;
     session.images = {};
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
     clearAttachments();
@@ -740,6 +780,66 @@
     });
   }
 
+  // ---- live (streamed) assistant text ----
+  // The reply is re-rendered as real markdown while it arrives, throttled to a
+  // few times a second — so you read formatted prose as it lands instead of raw
+  // ## and ** that only resolve at the end. Partial syntax (an unclosed fence or
+  // **bold) simply renders as plain text until it completes.
+  const STREAM_RENDER_MS = 110;
+  let stream = null;   // { bubble, text, raf, lastRender }
+  function beginStream() {
+    const near = atBottom();
+    const bubble = document.createElement("div");
+    bubble.className = "bubble assistant streaming";
+    messages.appendChild(bubble);
+    if (near) scroll();
+    return { bubble, text: "", raf: 0, lastRender: 0 };
+  }
+  function paintStream() {
+    const near = atBottom();
+    while (stream.bubble.firstChild) stream.bubble.removeChild(stream.bubble.firstChild);
+    renderText(stream.bubble, stream.text);
+    if (near) scroll();
+    syncToBottomBtn();
+  }
+  function flushStream() {
+    if (!stream) return;
+    stream.raf = 0;
+    const now = (window.performance || Date).now();
+    // Too soon to repaint: keep a frame pending so the newest tokens still land.
+    if (now - stream.lastRender < STREAM_RENDER_MS) {
+      stream.raf = requestAnimationFrame(flushStream);
+      return;
+    }
+    stream.lastRender = now;
+    paintStream();
+  }
+  function streamAppend(text) {
+    if (!stream) stream = beginStream();
+    stream.text += text;
+    if (!stream.raf) stream.raf = requestAnimationFrame(flushStream);
+  }
+  // Settle the bubble on the final text and record it once. Passing the final
+  // text guards against a dropped last frame.
+  function endStream(finalText) {
+    if (!stream) return false;
+    const s = stream;
+    if (s.raf) cancelAnimationFrame(s.raf);
+    const text = (finalText != null && finalText !== "" ? finalText : s.text).trim();
+    if (!text) { s.bubble.remove(); stream = null; return true; }
+    stream.text = text;
+    paintStream();
+    stream = null;
+    s.bubble.classList.remove("streaming");
+    addBubbleActions(s.bubble, text);
+    if (session) {
+      session.transcript = session.transcript || [];
+      session.transcript.push({ role: "assistant", text });
+    }
+    if (atBottom()) scroll();
+    return true;
+  }
+
   function runTurn(shouldStop, tools, toolSchemas) {
     let liveTool = null;
     return AC.runAgent({
@@ -748,25 +848,32 @@
       messages: session.messages,
       shouldStop,
       toolSchemas,
+      stream: true,
       onEvent: (ev) => {
         armIdle();
         if (ev.type === "thinking") setStatus("thinking…");
-        else if (ev.type === "tool") { liveTool = addTool(ev.name, ev.args); setStatus(ev.name + "…"); }
+        else if (ev.type === "delta") { setStatus("writing…"); streamAppend(ev.text); }
+        // Any tool call ends the streamed preamble that came before it.
+        else if (ev.type === "tool") { endStream(); liveTool = addTool(ev.name, ev.args); setStatus(ev.name + "…"); }
         else if (ev.type === "tool_result") { if (liveTool) finishTool(liveTool, ev.out); }
-        else if (ev.type === "answer") { setStatus(""); if (ev.text) addBubble("assistant", ev.text); }
-        else if (ev.type === "error") { setStatus(""); addBubble("error", ev.text); }
-        else if (ev.type === "stopped") { setStatus(""); addBubble("system", "Stopped."); }
+        else if (ev.type === "answer") {
+          setStatus("");
+          if (!endStream(ev.text) && ev.text) addBubble("assistant", ev.text);
+          haptic(12);
+        }
+        else if (ev.type === "error") { setStatus(""); endStream(); addBubble("error", ev.text); }
+        else if (ev.type === "stopped") { setStatus(""); endStream(); addBubble("system", "Stopped."); }
       },
     });
   }
 
   const VISION_MODEL = "glm-4.6v-flash";  // free vision model, used by view_image
 
-  // Add view_image when the user has attached images and the chat model can't
-  // see them itself (a text/coding model). A vision model sees them directly.
+  // view_image is always advertised: repo images are reachable in any chat, and
+  // even a vision model can't fetch one from GitHub by itself. (Uploads are the
+  // one case a vision model handles directly — they're already in its context.)
   function visionSchemas(base) {
-    const has = session.images && Object.keys(session.images).length;
-    return (has && !isVisionModel(getModelName())) ? base.concat([AC.VIEW_IMAGE_SCHEMA]) : base;
+    return base.concat([AC.VIEW_IMAGE_SCHEMA]);
   }
   // Advertise spawn_agent on the main turn only when sub-agents are enabled.
   function mainSchemas() {
@@ -774,17 +881,58 @@
     return visionSchemas(base);
   }
 
-  // The view_image tool: send an attached image to the free vision model and
-  // return its written description, so a text model can act on the image.
+  // Resolve an image that lives in the REPO to a data URL. getFile() decodes as
+  // UTF-8 and would mangle the bytes, so this goes through the binary-safe read.
+  // Accepts an exact path or a bare filename, which is matched against the tree.
+  async function repoImageDataUrl(name) {
+    if (!session || !session.gh) return null;
+    let path = name;
+    if (!AC.IMAGE_RE.test(path)) return null;
+    try {
+      const paths = (await session.gh.tree()).map((e) => e.path);
+      if (!paths.includes(path)) {
+        const lower = name.toLowerCase();
+        const hit = paths.find((p) => p.toLowerCase() === lower)
+          || paths.find((p) => p.toLowerCase().endsWith("/" + lower))
+          || paths.find((p) => AC.IMAGE_RE.test(p) && p.toLowerCase().includes(lower));
+        if (!hit) return null;
+        path = hit;
+      }
+    } catch (e) { /* tree unavailable — still try the path as given */ }
+    const { b64 } = await session.gh.getFileRaw(path);
+    if (!b64) return null;
+    return { url: "data:" + AC.imageMime(path) + ";base64," + b64, path };
+  }
+
+  // The view_image tool: send an image to the free vision model and return its
+  // written description, so a text model can act on it. Resolves attachments
+  // first, then falls back to image files in the repo — without that fallback
+  // the agent has no way at all to see a screenshot or mockup that's committed.
   async function viewImage(name, question) {
     const imgs = session.images || {};
     const keys = Object.keys(imgs);
     let url = imgs[name];
     if (!url) {
       const hit = keys.find((k) => k === name || k.endsWith(name) || name.endsWith(k) || k.includes(name));
-      url = hit ? imgs[hit] : (keys.length === 1 ? imgs[keys[0]] : null);
+      url = hit ? imgs[hit] : null;
     }
-    if (!url) return "No attached image matches '" + name + "'. Available: " + (keys.join(", ") || "none");
+    let label = name;
+    if (!url) {
+      try {
+        const found = await repoImageDataUrl(name);
+        if (found) { url = found.url; label = found.path; }
+      } catch (e) {
+        return "Couldn't read '" + name + "' from the repo: " + (e && e.message ? e.message : e);
+      }
+    }
+    // Only fall back to "the one attachment" when nothing else matched, so a
+    // wrong repo path doesn't silently describe an unrelated upload.
+    if (!url && keys.length === 1) { url = imgs[keys[0]]; label = keys[0]; }
+    if (!url) {
+      return "No image matches '" + name + "'. Attached: " + (keys.join(", ") || "none") +
+        ". For an image in the repo, pass its path (e.g. docs/shot.png) — use glob '**/*.png' to find it.";
+    }
+    if (label !== name) setStatus("looking at " + label + "…");
     if (!session.visionModel) {
       session.visionModel = newModel(VISION_MODEL);
     }
@@ -949,13 +1097,40 @@
   const messages = $("messages");
   function atBottom() { return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80; }
   function scroll() { messages.scrollTop = messages.scrollHeight; }
+
+  // Scrolling up during a long reply shouldn't strand you: a pill appears to
+  // jump back to the live end. (Auto-scroll already pauses while you're away
+  // from the bottom, so reading back never fights the stream.)
+  const toBottomBtn = $("btn-to-bottom");
+  function syncToBottomBtn() { toBottomBtn.hidden = atBottom(); }
+  messages.addEventListener("scroll", syncToBottomBtn, { passive: true });
+  toBottomBtn.addEventListener("click", () => {
+    messages.scrollTo({ top: messages.scrollHeight, behavior: "smooth" });
+    toBottomBtn.hidden = true;
+  });
+  // A quiet "Copy" affordance on assistant replies — the phone equivalent of
+  // the desktop's hover actions, where there's no hover to rely on.
+  function addBubbleActions(bubble, text) {
+    const act = document.createElement("div");
+    act.className = "bubble-actions";
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "bubble-copy";
+    copy.textContent = "Copy";
+    copy.addEventListener("click", () => copyText(text, copy));
+    act.appendChild(copy);
+    bubble.appendChild(act);
+  }
+
   function addBubble(role, text, record) {
     const near = atBottom();
     const div = document.createElement("div");
     div.className = "bubble " + role;
     renderText(div, text);
+    if (role === "assistant" && String(text || "").trim()) addBubbleActions(div, text);
     messages.appendChild(div);
     if (near) scroll();
+    syncToBottomBtn();
     // Record durable bubbles so the conversation can be re-rendered on resume.
     // (record defaults to true; the transcript replay passes false.)
     if (record !== false && session && (role === "user" || role === "assistant" || role === "system")) {
@@ -964,24 +1139,130 @@
     }
     return div;
   }
-  // Minimal, safe markdown-ish rendering. Everything goes through textContent /
+  // Safe markdown rendering. Everything text-bearing goes through textContent /
   // createTextNode — no innerHTML with model output, so no HTML/script injection.
+  // Handles fenced code, headings, lists, quotes, and inline emphasis/code/links.
   function renderText(container, text) {
-    const parts = String(text).split(/```/);
+    const parts = String(text == null ? "" : text).split(/```/);
     parts.forEach((part, i) => {
-      if (i % 2 === 1) {
-        const pre = document.createElement("pre");
-        pre.className = "code";
-        const nl = part.indexOf("\n");
-        pre.textContent = nl >= 0 ? part.slice(nl + 1) : part;
-        container.appendChild(pre);
-      } else if (part) {
-        const p = document.createElement("div");
-        p.className = "para";
-        p.textContent = part;
-        container.appendChild(p);
-      }
+      if (i % 2 === 1) renderCodeBlock(container, part);
+      else if (part.trim()) renderBlocks(container, part);
     });
+  }
+
+  function renderCodeBlock(container, part) {
+    const nl = part.indexOf("\n");
+    const lang = nl >= 0 ? part.slice(0, nl).trim() : "";
+    const code = (nl >= 0 ? part.slice(nl + 1) : part).replace(/\n$/, "");
+    const wrap = document.createElement("div");
+    wrap.className = "codewrap";
+    const bar = document.createElement("div");
+    bar.className = "codebar";
+    const tag = document.createElement("span");
+    tag.className = "code-lang";
+    tag.textContent = lang || "code";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "code-copy";
+    btn.textContent = "Copy";
+    btn.addEventListener("click", () => copyText(code, btn));
+    bar.append(tag, btn);
+    const pre = document.createElement("pre");
+    pre.className = "code";
+    pre.textContent = code;
+    wrap.append(bar, pre);
+    container.appendChild(wrap);
+  }
+
+  // Block level: headings, bullet/numbered lists, blockquotes, paragraphs.
+  function renderBlocks(container, text) {
+    const lines = String(text).split("\n");
+    let list = null, ordered = false, para = [];
+    const flushPara = () => {
+      if (!para.length) return;
+      const p = document.createElement("div");
+      p.className = "para";
+      // Soft-wrap, as markdown does: a model that hard-wraps its prose at 80
+      // columns must not come out with ragged line breaks on a narrow phone.
+      renderInline(p, para.join(" "));
+      container.appendChild(p);
+      para = [];
+    };
+    const flushList = () => { list = null; };
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) { flushPara(); flushList(); continue; }
+      const h = /^(#{1,4})\s+(.*)$/.exec(t);
+      const bullet = /^[-*+]\s+(.*)$/.exec(t);
+      const num = /^\d+[.)]\s+(.*)$/.exec(t);
+      const quote = /^>\s?(.*)$/.exec(t);
+      if (h) {
+        flushPara(); flushList();
+        const el = document.createElement("div");
+        el.className = "mdh mdh" + h[1].length;
+        renderInline(el, h[2]);
+        container.appendChild(el);
+      } else if (bullet || num) {
+        flushPara();
+        const isOrdered = !!num;
+        if (!list || ordered !== isOrdered) {
+          list = document.createElement(isOrdered ? "ol" : "ul");
+          list.className = "mdlist";
+          ordered = isOrdered;
+          container.appendChild(list);
+        }
+        const li = document.createElement("li");
+        renderInline(li, bullet ? bullet[1] : num[1]);
+        list.appendChild(li);
+      } else if (quote) {
+        flushPara(); flushList();
+        const q = document.createElement("div");
+        q.className = "mdquote";
+        renderInline(q, quote[1]);
+        container.appendChild(q);
+      } else { flushList(); para.push(t); }
+    }
+    flushPara();
+  }
+
+  // Inline: `code`, **bold**, *italic*, [label](url), and bare links.
+  function renderInline(el, text) {
+    const src = String(text);
+    const rx = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*\n]+)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>]+)/g;
+    let last = 0, m;
+    while ((m = rx.exec(src))) {
+      if (m.index > last) el.appendChild(document.createTextNode(src.slice(last, m.index)));
+      if (m[1] != null) { const c = document.createElement("code"); c.textContent = m[1]; el.appendChild(c); }
+      else if (m[2] != null) { const b = document.createElement("strong"); b.textContent = m[2]; el.appendChild(b); }
+      else if (m[3] != null) { const i = document.createElement("em"); i.textContent = m[3]; el.appendChild(i); }
+      else if (m[4] != null) el.appendChild(mdLink(m[5], m[4]));
+      else if (m[6] != null) el.appendChild(mdLink(m[6], m[6]));
+      last = rx.lastIndex;
+    }
+    if (last < src.length) el.appendChild(document.createTextNode(src.slice(last)));
+  }
+  // http(s) only — never javascript:/data:, whatever the model emits.
+  function mdLink(href, label) {
+    const a = document.createElement("a");
+    a.href = /^https?:\/\//i.test(href) ? href : "#";
+    a.textContent = label;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    return a;
+  }
+
+  async function copyText(text, btn) {
+    try {
+      await navigator.clipboard.writeText(text);
+      haptic(8);
+      if (btn) { const was = btn.textContent; btn.textContent = "Copied"; btn.classList.add("ok");
+        setTimeout(() => { btn.textContent = was; btn.classList.remove("ok"); }, 1200); }
+    } catch (e) { toast("Couldn't copy"); }
+  }
+  // Short, quiet taps on meaningful moments. Silently absent on iOS Safari.
+  function haptic(ms) {
+    if (!hapticsOn()) return;
+    try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) {}
   }
   function addTool(name, args) {
     const near = atBottom();
@@ -1160,8 +1441,12 @@
   function confirmCommits() { return pref("mnm.confirm", "1") === "1"; }
   function planMode() { return pref("mnm.plan", "0") === "1"; }
   function subagentsOn() { return pref("mnm.subagents", "1") === "1"; }
+  function hapticsOn() { return pref("mnm.haptics", "1") === "1"; }
   const READ_TOOL_NAMES = ["list_dir", "glob", "read_file", "grep", "search_code"];
-  const READ_SCHEMAS = AC.TOOL_SCHEMAS.filter((s) => READ_TOOL_NAMES.includes(s.function.name));
+  // view_image is read-only, and looking at a mockup is exactly a planning job,
+  // so plan mode gets it too (session.readTools already wires the implementation).
+  const READ_SCHEMAS = AC.TOOL_SCHEMAS.filter((s) => READ_TOOL_NAMES.includes(s.function.name))
+    .concat([AC.VIEW_IMAGE_SCHEMA]);
   const PLAN_DIRECTIVE = "\n\nPLAN MODE: do NOT edit or commit anything. Use the read/search tools to " +
     "investigate, then reply with a short, concrete numbered plan of the exact changes you'd make " +
     "(which files, and what changes in each). Stop after the plan and wait for approval.";
@@ -1188,6 +1473,7 @@
     $("set-plan").checked = planMode();
     $("set-subagents").checked = subagentsOn();
     $("set-confirm").checked = confirmCommits();
+    $("set-haptics").checked = hapticsOn();
     $("set-autolock").value = String(parseInt(pref("mnm.autolock", "15"), 10) || 0);
     $("set-keepsignedin").checked = keepSignedIn();
     $("set-sync").checked = syncOn();
@@ -1218,6 +1504,10 @@
   });
   $("set-confirm").addEventListener("change", () => {
     localStorage.setItem("mnm.confirm", $("set-confirm").checked ? "1" : "0");
+  });
+  $("set-haptics").addEventListener("change", () => {
+    localStorage.setItem("mnm.haptics", $("set-haptics").checked ? "1" : "0");
+    haptic(12);   // confirm the setting with the thing itself
   });
   $("set-autolock").addEventListener("change", () => {
     localStorage.setItem("mnm.autolock", $("set-autolock").value);
