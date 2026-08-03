@@ -2025,6 +2025,10 @@ class Api:
         sess = syncstore.chat_to_session(chat)
         if not sess.get("messages"):
             return {"error": "That chat has no messages yet."}
+        # Taking over a chat the phone was driving: tell the model the tools
+        # changed, or it will keep imitating turns that can't work here.
+        sess["messages"] = syncstore.apply_handoff(
+            sess["messages"], sess.get("device", ""), "desktop")
         # Land it in a folder that exists here: a phone-written chat has no
         # local folder, and another machine's cwd won't resolve on this one.
         cs = self._active

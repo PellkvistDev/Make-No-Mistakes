@@ -208,6 +208,87 @@ test("model: a persistent rate limit throws a friendly message", async () => {
   await assert.rejects(() => m.chat([{ role: "user", content: "hi" }]), /busy right now .rate-limited/);
 });
 
+// ------------------------------------------------------ device handoff --
+// The desktop and phone don't have the same tools, and the model imitates its
+// own history — so moving a chat across has to say so, or it reaches for a
+// shell that isn't there. Must stay word-for-word with syncstore.apply_handoff.
+
+test("handoff: the note names both devices and voids the earlier tool calls", () => {
+  const note = C.handoffNote("desktop", "phone");
+  assert.ok(note.startsWith(C.HANDOFF_MARKER));
+  assert.match(note, /desktop/);
+  assert.match(note, /phone/);
+  assert.match(note, /no shell/);
+  assert.match(note, /Do not copy them/);
+});
+
+test("handoff: the other direction says the machine can run things", () => {
+  assert.match(C.handoffNote("phone", "desktop"), /run commands, tests, servers/);
+});
+
+test("handoff: a cross-device open appends a marker and leaves history intact", () => {
+  const msgs = [{ role: "system", content: "live prompt" }, { role: "user", content: "hi" }];
+  const out = C.applyHandoff(msgs, "desktop", "phone");
+  assert.equal(out.length, 3);
+  assert.deepEqual(out[0], { role: "system", content: "live prompt" });
+  assert.deepEqual(out[1], { role: "user", content: "hi" });
+  assert.equal(out[2].role, "system");
+  assert.ok(out[2].content.startsWith(C.HANDOFF_MARKER));
+});
+
+test("handoff: silent when the device didn't change", () => {
+  const msgs = [{ role: "user", content: "hi" }];
+  assert.deepEqual(C.applyHandoff(msgs, "phone", "phone"), msgs);
+  assert.deepEqual(C.applyHandoff(msgs, "PHONE", "phone"), msgs);
+});
+
+test("handoff: markers don't stack when bouncing between devices", () => {
+  let m = [{ role: "system", content: "live prompt" }, { role: "user", content: "hi" }];
+  m = C.applyHandoff(m, "desktop", "phone");
+  m = C.applyHandoff(m, "phone", "desktop");
+  m = C.applyHandoff(m, "desktop", "phone");
+  const markers = m.filter((x) => String(x.content || "").startsWith(C.HANDOFF_MARKER));
+  assert.equal(markers.length, 1);
+  assert.match(markers[0].content, /to the phone/);
+});
+
+test("handoff: never strips the live system prompt at index 0", () => {
+  // Index 0 is the app's own prompt; only stale markers may be removed.
+  const m = C.applyHandoff([{ role: "system", content: C.HANDOFF_MARKER + " old" }], "phone", "phone");
+  assert.equal(m.length, 1, "index 0 is the caller's slot, never dropped");
+});
+
+test("handoff: a chat with no device tag is left alone", () => {
+  const msgs = [{ role: "user", content: "hi" }];
+  assert.deepEqual(C.applyHandoff(msgs, "", "phone"), msgs);
+  assert.deepEqual(C.applyHandoff(msgs, undefined, "phone"), msgs);
+});
+
+test("unknown tool: a desktop-only tool explains itself instead of dead-ending", async () => {
+  const model = { async chat() {
+    return { role: "assistant", content: "", tool_calls: [
+      { id: "1", type: "function", function: { name: "run_command", arguments: '{"cmd":"pytest"}' } }] };
+  } };
+  const results = [];
+  await C.runAgent({ model, tools: { read_file: async () => "x" }, messages: [], maxSteps: 1,
+    onEvent: (e) => { if (e.type === "tool_result") results.push(e.out); } });
+  assert.match(results[0], /no shell here/);
+  assert.match(results[0], /ran on the user's desktop/);
+  assert.match(results[0], /read_file/, "and lists what it actually has");
+});
+
+test("unknown tool: a plain typo doesn't get the desktop explanation", async () => {
+  const model = { async chat() {
+    return { role: "assistant", content: "", tool_calls: [
+      { id: "1", type: "function", function: { name: "raed_file", arguments: "{}" } }] };
+  } };
+  const results = [];
+  await C.runAgent({ model, tools: { read_file: async () => "x" }, messages: [], maxSteps: 1,
+    onEvent: (e) => { if (e.type === "tool_result") results.push(e.out); } });
+  assert.doesNotMatch(results[0], /desktop/);
+  assert.match(results[0], /read_file/);
+});
+
 // ------------------------------------------------------------ streaming --
 // Build a fake SSE response whose body yields the given chunks. Chunks are
 // deliberately split at awkward points to prove the line buffering works.

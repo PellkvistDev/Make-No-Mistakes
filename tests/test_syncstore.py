@@ -21,6 +21,8 @@ import json
 import sys
 import threading
 import time
+import pathlib
+import subprocess
 import types
 import urllib.error
 
@@ -33,6 +35,15 @@ from glmcode.syncstore import STATE_BRANCH, SYNC_CHECK, StateRepo, SyncStore, op
 
 needs_crypto = pytest.mark.skipif(
     not syncstore.crypto_available(), reason="cryptography AES-GCM unavailable")
+
+
+def _have_node() -> bool:
+    import shutil
+    return shutil.which("node") is not None and _CORE_JS.is_file()
+
+
+_CORE_JS = pathlib.Path(__file__).resolve().parent.parent / "mobile" / "agent-core.js"
+needs_node = pytest.mark.skipif(not _have_node(), reason="node or mobile/agent-core.js unavailable")
 
 
 # ------------------------------------------------------------ WebCrypto vector
@@ -306,6 +317,91 @@ def test_chat_to_session_reads_a_phone_written_chat():
     assert back["title"] == "From phone"
     assert back["cwd"] == "" and back["model"] == ""
     assert [m["role"] for m in back["messages"]] == ["user"]
+
+
+# ------------------------------------------------------------ device handoff
+# The two devices don't have the same tools, and the model imitates its own
+# history -- so moving a chat across has to say so, or it reaches for a shell
+# that isn't there. See syncstore.apply_handoff.
+
+def test_handoff_note_names_both_devices_and_voids_earlier_tool_calls():
+    note = syncstore.handoff_note("desktop", "phone")
+    assert note.startswith(syncstore.HANDOFF_MARKER)
+    assert "desktop" in note and "phone" in note
+    assert "no shell" in note
+    assert "Do not copy them" in note
+
+
+def test_handoff_note_the_other_direction_says_it_can_run_things():
+    note = syncstore.handoff_note("phone", "desktop")
+    assert "run commands, tests, servers" in note
+
+
+def test_apply_handoff_marks_a_cross_device_open():
+    msgs = [{"role": "user", "content": "hi"}]
+    out = syncstore.apply_handoff(msgs, "phone", "desktop")
+    assert len(out) == 2
+    assert out[0] == {"role": "user", "content": "hi"}, "history is left intact"
+    assert out[-1]["role"] == "system"
+    assert out[-1]["content"].startswith(syncstore.HANDOFF_MARKER)
+
+
+def test_apply_handoff_is_silent_when_the_device_did_not_change():
+    msgs = [{"role": "user", "content": "hi"}]
+    assert syncstore.apply_handoff(msgs, "desktop", "desktop") == msgs
+    assert syncstore.apply_handoff(msgs, "DESKTOP", "desktop") == msgs, "case-insensitive"
+
+
+def test_apply_handoff_does_not_stack_markers_when_bouncing_between_devices():
+    msgs = [{"role": "user", "content": "hi"}]
+    once = syncstore.apply_handoff(msgs, "phone", "desktop")
+    twice = syncstore.apply_handoff(once, "desktop", "phone")
+    thrice = syncstore.apply_handoff(twice, "phone", "desktop")
+    markers = [m for m in thrice if str(m.get("content", "")).startswith(syncstore.HANDOFF_MARKER)]
+    assert len(markers) == 1, "only the current handoff should be in context"
+    assert "to the desktop" in markers[0]["content"]
+
+
+def test_apply_handoff_tolerates_a_missing_device_tag():
+    """Chats written before this existed have no device field — no marker, no crash."""
+    msgs = [{"role": "user", "content": "hi"}]
+    assert syncstore.apply_handoff(msgs, "", "desktop") == msgs
+
+
+def test_the_marker_never_survives_a_push_back_to_sync():
+    """session_to_chat drops system messages, so a marker can't leak to the
+    other device and describe a switch that already happened."""
+    marked = syncstore.apply_handoff(
+        [{"role": "user", "content": "hi"}], "phone", "desktop")
+    chat = syncstore.session_to_chat({"id": "s1", "messages": marked, "cwd": "/tmp/proj"})
+    assert not any(syncstore.HANDOFF_MARKER in str(m.get("content", ""))
+                   for m in chat["messages"])
+    assert not any(syncstore.HANDOFF_MARKER in t["text"] for t in chat["transcript"]), \
+        "and it must never show up as a chat bubble"
+
+
+def test_chat_to_session_carries_the_writing_device_through():
+    sess = syncstore.chat_to_session({"id": "c1", "device": "phone", "messages": []})
+    assert sess["device"] == "phone"
+
+
+@needs_node
+def test_the_phone_writes_a_byte_identical_handoff_note():
+    """Both devices strip the marker by exact prefix and rewrite it on open. If
+    the two implementations ever drift, a chat bouncing between them would stack
+    stale markers instead of replacing them -- so pin them together."""
+    js = subprocess.run(
+        ["node", "-e",
+         "const C=require(process.argv[1]);"
+         "console.log(JSON.stringify({marker:C.HANDOFF_MARKER,"
+         "dp:C.handoffNote('desktop','phone'),pd:C.handoffNote('phone','desktop')}));",
+         str(_CORE_JS)],
+        capture_output=True, text=True, timeout=30)
+    assert js.returncode == 0, js.stderr
+    got = json.loads(js.stdout)
+    assert got["marker"] == syncstore.HANDOFF_MARKER
+    assert got["dp"] == syncstore.handoff_note("desktop", "phone")
+    assert got["pd"] == syncstore.handoff_note("phone", "desktop")
 
 
 # ------------------------------------------------- real HTTP layer (StateRepo)
