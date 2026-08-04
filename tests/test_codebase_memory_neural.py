@@ -2,10 +2,25 @@
 vector cache, persistence, and graceful fallback — all with a deterministic
 fake embedder (no real model needed)."""
 
+import hashlib
 import math
 
 import glmcode.codebase_memory as cm
 from glmcode.codebase_memory import CodebaseIndex, Embedder, tokenize
+
+
+def _dim_of(token, dim):
+    """Stable token -> dimension.
+
+    Emphatically NOT builtin hash(): Python randomizes string hashing per
+    process, so the same token landed in a different dimension on every run.
+    With a narrow space that occasionally collided two of this test's tokens
+    and flipped the ranking -- a real failure, reproducible only under the
+    seed that produced it (PYTHONHASHSEED=13 here). blake2b is stable across
+    processes, so this fake now behaves identically on every run: if it ever
+    fails, it fails every time.
+    """
+    return int.from_bytes(hashlib.blake2b(token.encode(), digest_size=8).digest(), "big") % dim
 
 
 class FakeEmbedder(Embedder):
@@ -13,7 +28,7 @@ class FakeEmbedder(Embedder):
     so cosine reflects token overlap (good enough to test retrieval + caching).
     Counts how many texts it embeds, to prove the cache is incremental."""
 
-    DIM = 64
+    DIM = 512
 
     def __init__(self):
         self.calls = 0
@@ -24,10 +39,27 @@ class FakeEmbedder(Embedder):
         for t in texts:
             v = [0.0] * self.DIM
             for tok in tokenize(t):
-                v[hash(tok) % self.DIM] += 1.0
+                v[_dim_of(tok, self.DIM)] += 1.0
             norm = math.sqrt(sum(x * x for x in v)) or 1.0
             out.append([x / norm for x in v])
         return out
+
+
+def test_fake_embedder_does_not_collide_the_tokens_under_test():
+    """The guard that makes the retrieval test meaningful.
+
+    The fake distinguishes files only by which dimensions their tokens land
+    in, so a collision between the two files' vocabularies silently turns the
+    ranking assertion into a coin flip. Determinism alone doesn't rule that
+    out -- it only makes it permanent instead of intermittent. So check it.
+    """
+    auth = set(tokenize("def login(user, password): return check_password(user, password)"))
+    geom = set(tokenize("def area(radius): return 3.14 * radius * radius"))
+    dims = {}
+    for tok in auth | geom:
+        d = _dim_of(tok, FakeEmbedder.DIM)
+        assert d not in dims, f"{tok!r} collides with {dims[d]!r} at dim {d}"
+        dims[d] = tok
 
 
 def _write(root, name, text):

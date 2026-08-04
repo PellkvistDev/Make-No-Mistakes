@@ -53,6 +53,33 @@
   window.addEventListener("resize", fitMessages);
   window.addEventListener("orientationchange", () => setTimeout(fitMessages, 200));
 
+  // How much of the screen the on-screen keyboard covers, published as --kb so
+  // the composer can lift itself over it.
+  //
+  // The document is locked (html/body are fixed and overflow:hidden), which is
+  // what stops iOS shoving the whole UI — wallpaper and all — up off the
+  // screen to reveal the focused field. The cost of locking it is that nothing
+  // moves out of the keyboard's way on its own any more, so measure it here
+  // instead. visualViewport is the only thing that reports this: on iOS the
+  // layout viewport does not change when the keyboard opens, only the visual
+  // one shrinks.
+  function trackKeyboard() {
+    const vv = window.visualViewport;
+    if (!vv) return;                       // --kb stays 0; layout is unchanged
+    const apply = () => {
+      // offsetTop covers the case where the visual viewport has been panned.
+      const covered = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      // Ignore small deltas so a browser's collapsing address bar doesn't read
+      // as a keyboard.
+      document.documentElement.style.setProperty("--kb", (covered > 80 ? covered : 0) + "px");
+      fitMessages();
+    };
+    vv.addEventListener("resize", apply);
+    vv.addEventListener("scroll", apply);
+    apply();
+  }
+  trackKeyboard();
+
   // ------------------------------------------------------------- vault I/O
   function loadVault() {
     try { return JSON.parse(localStorage.getItem(VAULT_KEY) || "null"); }
@@ -639,7 +666,6 @@
     session.images = {};
     session.compact = null;
     session.toldCompact = false;
-    session.pending = [];
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
     // Picking up a chat the desktop was driving: mark the switch, or the model
     // keeps imitating turns that used tools this phone doesn't have.
