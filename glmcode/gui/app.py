@@ -2033,6 +2033,12 @@ class Api:
         # changed, or it will keep imitating turns that can't work here.
         sess["messages"] = syncstore.apply_handoff(
             sess["messages"], sess.get("device", ""), "desktop")
+        # Anything the phone couldn't run goes into context now, so this machine
+        # opens already knowing what was left for it rather than the ask being
+        # buried somewhere up the transcript.
+        pending_note = syncstore.pending_note(sess.get("pending") or [])
+        if pending_note:
+            sess["messages"].append({"role": "system", "content": pending_note})
         # Land it in a folder that exists here: a phone-written chat has no
         # local folder, and another machine's cwd won't resolve on this one.
         cs = self._active
@@ -2046,6 +2052,10 @@ class Api:
         live = self._chats.get(sess["id"])
         if live:
             live.synced_at = int(chat.get("updated") or 0)
+        # Tell the user too, not just the agent -- otherwise the only sign is
+        # the agent suddenly running something they didn't ask for.
+        res["pending"] = len([p for p in (sess.get("pending") or [])
+                              if str(p.get("task", "")).strip()])
         self._save_current()
         res["sessions"] = self.list_sessions()
         return res

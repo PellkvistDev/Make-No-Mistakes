@@ -4000,6 +4000,14 @@ async function refreshSyncChatsBackground() {
 // away, adopt it — the mirror of the phone's own foreground catch-up. Quiet
 // unless something actually changed, and the backend refuses mid-turn, so this
 // can never interrupt work in progress.
+// Work the phone parked for this machine is already in the agent's context;
+// say so out loud too, or the only sign is the agent running something you
+// didn't just ask for.
+function notePendingFromPhone(res) {
+  const n = (res && res.pending) || 0;
+  if (n > 0) toast(`Your phone left ${n} thing${n === 1 ? "" : "s"} to run here.`, "info", 6000);
+}
+
 let catchUpBusy = false;
 async function catchUpFromSync() {
   if (catchUpBusy || busy) return;
@@ -4009,6 +4017,7 @@ async function catchUpFromSync() {
     if (res && res.changed) {
       applySession(res);
       toast(`Caught up with your ${res.from_device}.`, "info", 4000);
+      notePendingFromPhone(res);
     }
   } catch (e) { /* offline — keep what we have */ }
   finally { catchUpBusy = false; }
@@ -4109,6 +4118,7 @@ async function openChatRow(s, row) {
   if (row) row.classList.remove("sess-loading");
   if (res && res.error) { toast(res.error, "error", 6000); return; }
   applySession(res);
+  notePendingFromPhone(res);
   input.focus();
 }
 

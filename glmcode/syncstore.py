@@ -580,6 +580,37 @@ _DEVICE_FACTS = {
 }
 
 
+# The phone can read and edit the repo but cannot run a single thing. Today it
+# says "run the tests when you're back at your desktop" in prose, and that
+# intent dies in the transcript -- you arrive at the machine that CAN run them
+# with no idea anything is waiting. So the phone records it structurally
+# instead, the chat carries it across, and the desktop opens already knowing.
+#
+# One-directional on purpose: only the phone is missing a capability the other
+# device has. session_to_chat writes an empty list unless told otherwise, so
+# the desktop working in a chat naturally clears what it was handed.
+PENDING_MARKER = "[from-your-phone]"
+
+
+def pending_note(items: list) -> str:
+    """The note handed to the desktop agent for work the phone couldn't do."""
+    lines = []
+    for i, it in enumerate(items or [], 1):
+        task = str(it.get("task", "")).strip()
+        if not task:
+            continue
+        why = str(it.get("why", "")).strip()
+        lines.append(f"{i}. {task}" + (f" -- {why}" if why else ""))
+    if not lines:
+        return ""
+    return (
+        f"{PENDING_MARKER} Earlier turns of this chat ran on the phone, which has no shell. "
+        f"These were left for this machine, which does:\n" + "\n".join(lines) +
+        "\nPick them up if they still make sense -- check the code first, since it may have "
+        "moved on since. If one no longer applies, say so instead of doing it anyway."
+    )
+
+
 def handoff_note(from_device: str, to_device: str) -> str:
     """The marker spliced in when a chat moves between devices."""
     frm = (from_device or "another device").lower()
@@ -596,7 +627,7 @@ def handoff_note(from_device: str, to_device: str) -> str:
 
 def apply_handoff(messages: list, from_device: str, to_device: str) -> list:
     """Strip any stale handoff markers, then add one if the device changed."""
-    stale = (HANDOFF_MARKER, DESKTOP_STATE_MARKER)
+    stale = (HANDOFF_MARKER, DESKTOP_STATE_MARKER, PENDING_MARKER)
     out = [m for m in messages
            if not (m.get("role") == "system"
                    and str(m.get("content", "")).startswith(stale))]
@@ -605,7 +636,8 @@ def apply_handoff(messages: list, from_device: str, to_device: str) -> list:
     return out
 
 
-def session_to_chat(sess: dict, repo_state: dict | None = None) -> dict:
+def session_to_chat(sess: dict, repo_state: dict | None = None,
+                    pending: list | None = None) -> dict:
     """A desktop SessionStore record -> a sync chat object the phone can read.
 
     A leading system slot is included at index 0 because the phone overwrites
@@ -633,6 +665,9 @@ def session_to_chat(sess: dict, repo_state: dict | None = None) -> dict:
         # What this machine's checkout looks like right now, so the phone can
         # tell whether GitHub is actually the latest word on this project.
         "repo_state": dict(repo_state) if repo_state else {},
+        # Work the phone couldn't run. Defaults to empty, so the desktop
+        # pushing after a turn clears whatever it was handed.
+        "pending": list(pending or []),
         # Desktop-only extras, namespaced so the phone simply ignores them.
         "desktop": {
             "cwd": sess.get("cwd", ""),
@@ -660,4 +695,6 @@ def chat_to_session(chat: dict) -> dict:
         # Which device last wrote this chat, so the opener can tell whether it
         # is picking up its own work or taking a handoff.
         "device": chat.get("device", ""),
+        # Work the phone left for a machine with a shell.
+        "pending": list(chat.get("pending") or []),
     }

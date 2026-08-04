@@ -1348,3 +1348,63 @@ def test_maybe_autosync_without_then_unlock_never_touches_the_lock(monkeypatch):
     api._maybe_autosync("s1")
     time.sleep(0.1)
     assert released == []
+
+
+# ------------------------------------------------ phone -> desktop handoff
+# The phone has no shell, so "run the tests" has to travel to the machine that
+# does. Prose loses it; a structured list survives the trip.
+
+def test_pending_note_lists_the_work_with_reasons():
+    note = syncstore.pending_note([
+        {"task": "run pytest tests/test_sync.py", "why": "confirms the lock TTL"},
+        {"task": "start the dev server", "why": ""},
+    ])
+    assert note.startswith(syncstore.PENDING_MARKER)
+    assert "1. run pytest tests/test_sync.py -- confirms the lock TTL" in note
+    assert "2. start the dev server" in note
+    assert "no shell" in note
+
+
+def test_pending_note_is_empty_when_there_is_nothing_to_hand_over():
+    assert syncstore.pending_note([]) == ""
+    assert syncstore.pending_note(None) == ""
+    assert syncstore.pending_note([{"task": "   "}]) == "", "blank tasks don't count"
+
+
+def test_pending_survives_the_trip_from_the_phone():
+    sess = syncstore.chat_to_session(
+        {"id": "c1", "messages": [], "pending": [{"task": "run the tests"}]})
+    assert sess["pending"] == [{"task": "run the tests"}]
+
+
+def test_the_desktop_pushing_clears_what_it_was_handed():
+    """session_to_chat defaults pending to empty, so a desktop turn naturally
+    clears the queue rather than handing the same asks back forever."""
+    chat = syncstore.session_to_chat({"id": "s1", "messages": [], "cwd": "/tmp/p"})
+    assert chat["pending"] == []
+
+
+def test_pending_notes_do_not_accumulate_across_opens():
+    msgs = [{"role": "user", "content": "hi"},
+            {"role": "system", "content": syncstore.PENDING_MARKER + " old asks"}]
+    out = syncstore.apply_handoff(msgs, "phone", "desktop")
+    assert not [m for m in out
+                if str(m.get("content", "")).startswith(syncstore.PENDING_MARKER)]
+
+
+@needs_node
+def test_the_phone_writes_a_byte_identical_pending_note():
+    """Each side strips the other's note by exact prefix, so drift would let
+    stale asks pile up instead of being replaced."""
+    items = [{"task": "run pytest", "why": "confirms the fix"}, {"task": "build the app"}]
+    js = subprocess.run(
+        ["node", "-e",
+         "const C=require(process.argv[1]);"
+         "console.log(JSON.stringify({marker:C.PENDING_MARKER,"
+         "note:C.pendingNote(JSON.parse(process.argv[2]))}));",
+         str(_CORE_JS), json.dumps(items)],
+        capture_output=True, text=True, timeout=30)
+    assert js.returncode == 0, js.stderr
+    got = json.loads(js.stdout)
+    assert got["marker"] == syncstore.PENDING_MARKER
+    assert got["note"] == syncstore.pending_note(items)

@@ -1105,3 +1105,51 @@ test("lock: the lock file is encrypted (no plaintext device label on the wire)",
   assert.ok(!dump.includes("my-laptop"), "device label leaked into the lock file");
   assert.ok(!dump.includes("device-a"), "device id leaked into the lock file");
 });
+
+// -------------------------------------------------- phone → desktop queue --
+// The phone has no shell, so "run the tests" has to travel to the machine that
+// does. Prose loses it the moment the reply scrolls away; a structured list
+// survives and is put in front of the desktop agent on open.
+
+test("needs_desktop: only wired when the host provides a sink", async () => {
+  assert.equal(C.makeTools({}).needs_desktop, undefined);
+  const parked = [];
+  const tools = C.makeTools({}, { needsDesktop: async (t, w) => { parked.push([t, w]); return "ok"; } });
+  assert.equal(typeof tools.needs_desktop, "function");
+  await tools.needs_desktop({ task: "run pytest", why: "confirms the fix" });
+  assert.deepEqual(parked, [["run pytest", "confirms the fix"]]);
+});
+
+test("needs_desktop: trims and tolerates a missing reason", async () => {
+  const parked = [];
+  const tools = C.makeTools({}, { needsDesktop: async (t, w) => { parked.push([t, w]); return "ok"; } });
+  await tools.needs_desktop({ task: "  build the app  " });
+  assert.deepEqual(parked, [["build the app", ""]]);
+});
+
+test("pending note: numbers the work and explains why it's here", () => {
+  const note = C.pendingNote([
+    { task: "run pytest tests/test_sync.py", why: "confirms the lock TTL" },
+    { task: "start the dev server" },
+  ]);
+  assert.ok(note.startsWith(C.PENDING_MARKER));
+  assert.match(note, /1\. run pytest tests\/test_sync\.py -- confirms the lock TTL/);
+  assert.match(note, /2\. start the dev server/);
+  assert.match(note, /no shell/);
+});
+
+test("pending note: nothing to hand over means no note at all", () => {
+  assert.equal(C.pendingNote([]), "");
+  assert.equal(C.pendingNote(null), "");
+  assert.equal(C.pendingNote([{ task: "   " }]), "");
+});
+
+test("pending note: stale ones are cleared like the other per-open notes", () => {
+  const msgs = [
+    { role: "system", content: "live prompt" },
+    { role: "user", content: "hi" },
+    { role: "system", content: "[from-your-phone] old asks" },
+  ];
+  const out = C.applyHandoff(msgs, "desktop", "phone");
+  assert.ok(!out.some((m) => String(m.content).startsWith("[from-your-phone]")));
+});
