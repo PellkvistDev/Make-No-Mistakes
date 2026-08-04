@@ -657,6 +657,21 @@
       meta.textContent = [c.project, relTime(c.updated), c.preview]
         .filter(Boolean).join(" · ");
       main.append(title, meta);
+      // A chat whose project isn't a GitHub repo can be READ here but not
+      // continued: every tool on the phone goes through the GitHub API, and
+      // there is nothing for it to act on. Say so in the list rather than
+      // letting it look identical to a chat that works and only explaining
+      // after it's tapped.
+      if (!c.repo) {
+        li.classList.add("chat-row-local");
+        const tag = document.createElement("span");
+        tag.className = "chat-row-tag";
+        tag.textContent = "on your computer";
+        // First on the meta line, not inside the title: the title is a single
+        // ellipsised line, so a long one would truncate the label away —
+        // exactly on the chats where knowing matters most.
+        meta.prepend(tag);
+      }
       main.addEventListener("click", () => openSyncChat(c.id));
       const del = document.createElement("button");
       del.className = "chat-row-del"; del.type = "button"; del.title = "Delete"; del.textContent = "🗑";

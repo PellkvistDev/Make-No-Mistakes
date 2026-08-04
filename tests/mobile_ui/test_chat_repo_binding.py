@@ -129,3 +129,54 @@ def test_answering_from_the_phone_keeps_the_desktop_fields(phone):
     assert stored["project"] == "notes", \
         f"answering from the phone relabelled the chat: {stored['project']}"
     assert phone.errors == []
+
+
+def test_a_local_only_chat_is_marked_in_the_list_before_you_tap_it(phone):
+    """Refusing on tap is correct but late. A chat that can't be continued here
+    should not look identical to one that can."""
+    phone.setup()
+    seed_foreign_chat(phone, DESKTOP_CHAT)
+    seed_foreign_chat(phone, dict(
+        DESKTOP_CHAT, id="with-repo", title="Repo chat",
+        repo={"owner": "you", "repo": "app", "full_name": "you/app", "branch": "main"}))
+
+    phone.page.click("#btn-back-repo")
+    phone.page.wait_for_selector("#screen-chats:not([hidden])", timeout=15000)
+    phone.page.wait_for_function(
+        "() => document.querySelectorAll('.chat-row').length === 2", timeout=15000)
+
+    rows = phone.page.evaluate("""() => {
+      const out = {};
+      for (const li of document.querySelectorAll('.chat-row')) {
+        const title = li.querySelector('.chat-row-title').textContent;
+        const tag = li.querySelector('.chat-row-tag');
+        out[title] = { local: li.classList.contains('chat-row-local'),
+                       tag: tag ? tag.textContent : null };
+      }
+      return out;
+    }""")
+    assert rows["Local notes chat"]["local"], "the local-only chat is not marked"
+    assert rows["Local notes chat"]["tag"] == "on your computer"
+    assert not rows["Repo chat"]["local"], "a chat that works here was marked as local"
+    assert rows["Repo chat"]["tag"] is None
+    assert phone.errors == []
+
+
+def test_the_marker_survives_a_title_too_long_to_fit(phone):
+    """The title is a single ellipsised line, so the label cannot live inside
+    it -- it would be truncated away exactly where knowing matters most."""
+    phone.setup()
+    seed_foreign_chat(phone, dict(
+        DESKTOP_CHAT, id="longy",
+        title="A conversation with a really quite extraordinarily long title "
+              "that will not fit on a phone screen at all"))
+    phone.page.click("#btn-back-repo")
+    phone.page.wait_for_selector(".chat-row-tag", timeout=15000)
+    visible = phone.page.evaluate("""() => {
+      const tag = document.querySelector('.chat-row-tag');
+      const row = tag.closest('.chat-row');
+      const t = tag.getBoundingClientRect(), r = row.getBoundingClientRect();
+      return t.width > 0 && t.right <= r.right + 1 && t.left >= r.left - 1;
+    }""")
+    assert visible, "the marker was clipped off the row"
+    assert phone.errors == []

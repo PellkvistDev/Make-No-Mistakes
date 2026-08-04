@@ -359,7 +359,13 @@
         const chats = (data.chats || []).filter((c) => c.id !== chat.id);
         chats.push({ id: chat.id, title: chat.title || "Untitled",
           updated: chat.updated, preview: chat.preview || "",
-          project: chat.project || "", device: chat.device || "" });
+          project: chat.project || "",
+          // Just the full_name, not the whole repo object: the index is read in
+          // one piece on every list, so it stays small. Empty means the chat has
+          // no GitHub repo, which is what lets the list say so up front instead
+          // of only finding out once you've tapped it.
+          repo: (chat.repo && chat.repo.full_name) || "",
+          device: chat.device || "" });
         await writeIndex(chats, sha, tombstones(data));
         return chat.updated;
       },

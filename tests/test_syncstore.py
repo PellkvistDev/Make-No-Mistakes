@@ -1501,3 +1501,18 @@ def test_the_repo_survives_the_round_trip_to_the_phone_and_back():
     sess = syncstore.chat_to_session(chat)
     assert sess["id"] == "c1"
     assert chat["repo"]["branch"] == "dev"
+
+
+def test_the_index_says_whether_a_chat_has_a_repo(fake_codec):
+    """The list on the phone is built from the index alone, so the index has to
+    carry enough to tell a chat that can be continued there from one that
+    can't -- otherwise the only way to find out is to tap it."""
+    fake = FakeGitHub()
+    _k, store, _c = open_sync(_repo(fake), "a good passphrase")
+    store.save(syncstore.session_to_chat(
+        {"id": "with", "messages": [], "cwd": "/p"},
+        repo={"owner": "me", "repo": "proj", "full_name": "me/proj", "branch": "main"}))
+    store.save(syncstore.session_to_chat({"id": "without", "messages": [], "cwd": "/notes"}))
+    rows = {r["id"]: r for r in store.list()}
+    assert rows["with"]["repo"] == "me/proj"
+    assert rows["without"]["repo"] == "", "a local-only chat must be identifiable from the index"
