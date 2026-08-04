@@ -355,6 +355,7 @@
     session.compact = null;  // cached summary of trimmed turns, per conversation
     session.toldCompact = false;
     session.pending = [];    // work parked for the desktop, per conversation
+    session.carry = {};      // nothing to carry: this chat starts here
     session.transcript = [];
     const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); haptic(18); };
     // Sub-agent tools have NO spawn (depth 1); the main tools add spawn_agent.
@@ -393,6 +394,7 @@
     session.compact = null;
     session.toldCompact = false;
     session.pending = [];
+    session.carry = {};      // a fresh chat owns all of its own fields
     clearAttachments();
     $("chat-repo-name").textContent = session.repo.full_name;
     $("messages").innerHTML = "";
@@ -467,15 +469,25 @@
     if (!store) return;
     try {
       session.chatTitle = session.chatTitle || deriveTitle();
-      session.syncedAt = await store.save({
+      // save() replaces the whole chat object, so anything this device does
+      // not send is destroyed. The desktop keeps its working directory, todos
+      // and model choice under `desktop`, and its checkout state under
+      // `repo_state`; none of that is the phone's to author, and dropping it
+      // meant a desktop chat lost its cwd the moment the phone answered in it.
+      // Carry the untouched fields back out exactly as they came in.
+      const carry = session.carry || {};
+      session.syncedAt = await store.save(Object.assign({}, carry, {
         id: session.chatId, title: session.chatTitle, preview: lastPreview(),
         repo: session.repo,
-        project: (session.repo && session.repo.full_name) || "",
+        // The project label belongs to whoever owns the chat's repo. Only
+        // claim it when this chat has no label yet, so answering from the
+        // phone can't relabel a desktop chat to a repo name.
+        project: carry.project || (session.repo && session.repo.full_name) || "",
         device: "phone",
         pending: session.pending || [],
         messages: stripImages(session.messages || []),
         transcript: session.transcript || [],
-      });
+      }));
     } catch (e) {
       // Deleted on the other device while this one still had it open. Say so
       // rather than retrying forever, and stop this chat re-uploading itself.
@@ -664,9 +676,30 @@
     // The store is shared across projects now, so a chat may belong to a repo
     // other than the one currently open — follow it there rather than silently
     // re-pointing the conversation at the wrong codebase.
+    // A chat belongs to a repository, and only to that one. Following it there
+    // is right; INHERITING whatever this phone had open is not.
+    //
+    // That is what used to happen when a chat arrived without a repo of its
+    // own (every desktop chat did, until the desktop started publishing one).
+    // The guard below only caught a phone with no repo at all — if one was
+    // left over from an earlier conversation, the chat silently adopted it,
+    // the agent read and committed into a codebase the conversation was never
+    // about, and the next save wrote that repo back to the shared store,
+    // relabelling the chat on every device. Refuse instead: an unanswerable
+    // question is not the phone's to guess at.
     const r = data.repo;
-    if (r && r.full_name && (!session.repo || r.full_name !== session.repo.full_name)) {
-      connectRepo(r.owner, r.repo, r.branch || "main", r.full_name);
+    if (r && r.full_name) {
+      if (!session.repo || r.full_name !== session.repo.full_name) {
+        connectRepo(r.owner, r.repo, r.branch || "main", r.full_name);
+      }
+    } else {
+      // Reported where the person actually is — they never left the hub.
+      $("chats-error").textContent =
+        "“" + (data.title || "This chat") + "” doesn't say which repository it belongs to, " +
+        "so it can't be continued here. The phone works through GitHub, and guessing " +
+        "would mean editing whichever repo you had open last. Open it on the computer " +
+        "that started it, or start a new chat here.";
+      return;
     }
     if (!session.repo) { toast("That chat has no repository — open one first."); return; }
     session.chatId = data.id || id;
@@ -678,6 +711,11 @@
     session.images = {};
     session.compact = null;
     session.toldCompact = false;
+    // Fields this device does not own, kept verbatim so saving from here
+    // doesn't destroy them (see syncSave).
+    session.carry = {
+      desktop: data.desktop, repo_state: data.repo_state, project: data.project,
+    };
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
     // Picking up a chat the desktop was driving: mark the switch, or the model
     // keeps imitating turns that used tools this phone doesn't have.

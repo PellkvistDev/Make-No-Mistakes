@@ -688,7 +688,7 @@ def apply_handoff(messages: list, from_device: str, to_device: str) -> list:
 
 
 def session_to_chat(sess: dict, repo_state: dict | None = None,
-                    pending: list | None = None) -> dict:
+                    pending: list | None = None, repo: dict | None = None) -> dict:
     """A desktop SessionStore record -> a sync chat object the phone can read.
 
     A leading system slot is included at index 0 because the phone overwrites
@@ -710,6 +710,14 @@ def session_to_chat(sess: dict, repo_state: dict | None = None,
         # Which project this chat belongs to, as a short label. All chats now
         # share one repo, so this is what tells them apart in the lists.
         "project": project_label(cwd),
+        # Which GitHub repository this chat is actually about, when the folder
+        # has a GitHub origin. The phone works only through the GitHub API, so
+        # without this it has nothing to check the conversation against -- and
+        # it used to fall back to whatever repo happened to be open on the
+        # phone, binding a desktop chat to an unrelated codebase and letting
+        # the agent edit it. Absent (not guessed) when the folder has no
+        # GitHub remote; the phone refuses rather than picking for you.
+        "repo": dict(repo) if repo else None,
         "device": "desktop",
         "messages": messages,
         "transcript": transcript,

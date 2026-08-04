@@ -2119,7 +2119,9 @@ class Api:
         if err:
             return {"error": err}
         try:
-            updated = store.save(syncstore.session_to_chat(data, self._repo_state(data.get("cwd"))))
+            updated = store.save(syncstore.session_to_chat(
+                data, self._repo_state(data.get("cwd")),
+                repo=self._chat_repo(data.get("cwd"))))
         except syncstore.ChatDeletedElsewhere:
             # Deleted on the phone while this machine still had it open. Saving
             # would bring it back, and keep bringing it back after every turn.
@@ -2132,6 +2134,27 @@ class Api:
         if live:
             live.synced_at = updated or 0
         return {"ok": True, "id": sid}
+
+    def _chat_repo(self, cwd: str) -> dict | None:
+        """The GitHub repo this project lives in, for the phone to work against.
+
+        The phone has no filesystem: every tool it runs goes through the GitHub
+        API, so it needs to know which repository the conversation is about.
+        Returns None when this folder has no GitHub origin -- the phone then
+        says so instead of quietly using whichever repo it had open last.
+        """
+        if not cwd:
+            return None
+        try:
+            st = githubsync.status(Path(cwd))
+            parsed = githubsync.repo_from_remote(st.remote_url)
+            if not parsed:
+                return None
+            owner, repo = parsed
+            return {"owner": owner, "repo": repo, "full_name": f"{owner}/{repo}",
+                    "branch": st.branch or "main"}
+        except Exception:
+            return None   # a chat must never fail to sync over a git hiccup
 
     def _repo_state(self, cwd: str) -> dict:
         """This machine's git state for a project, published with the chat.

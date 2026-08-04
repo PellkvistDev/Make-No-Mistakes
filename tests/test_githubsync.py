@@ -290,3 +290,28 @@ def test_friendly_error_does_not_echo_env_or_token():
     msg = gh._friendly_git_error("fatal: Authentication failed for 'https://...'", "Push")
     assert "token" in msg.lower()          # explains, doesn't leak
     assert "MNM_GIT_TOKEN" not in msg
+
+
+# ------------------------------------------------ naming the repo for the phone
+# The phone works only through the GitHub API, so a chat has to say which
+# repository it is about. Getting this wrong means the agent edits the wrong one.
+
+def test_repo_from_remote_reads_the_shapes_an_origin_actually_takes():
+    f = gh.repo_from_remote
+    assert f("https://github.com/owner/repo.git") == ("owner", "repo")
+    assert f("https://github.com/owner/repo") == ("owner", "repo")
+    assert f("git@github.com:owner/repo.git") == ("owner", "repo")
+    # An origin that still carries a credential from an older setup.
+    assert f("https://x-access-token:tok@github.com/owner/repo.git") == ("owner", "repo")
+    assert f("https://github.com/owner/repo/") == ("owner", "repo")
+
+
+def test_repo_from_remote_admits_when_it_does_not_know():
+    """Guessing is worse than None here: None makes the phone refuse, a guess
+    makes it edit whatever was guessed."""
+    f = gh.repo_from_remote
+    assert f("") is None
+    assert f(None) is None
+    assert f("https://gitlab.com/owner/repo.git") is None, "not GitHub"
+    assert f("/home/me/local-only") is None
+    assert f("https://github.com/owner") is None, "no repo part"
