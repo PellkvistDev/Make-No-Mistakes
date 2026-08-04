@@ -296,13 +296,25 @@
     async function readIndex() {
       try {
         const f = await gh.getFile("index.json");
-        return { data: await aesDecrypt(JSON.parse(f.text), key), sha: f.sha };
-      } catch (e) { return { data: { v: 1, chats: [] }, sha: null }; }
+        const data = await aesDecrypt(JSON.parse(f.text), key);
+        if (!data.deleted) data.deleted = [];   // indexes written before tombstones
+        return { data, sha: f.sha };
+      } catch (e) { return { data: { v: 1, chats: [], deleted: [] }, sha: null }; }
     }
-    async function writeIndex(chats, sha) {
-      const blob = await aesEncrypt({ v: 1, chats }, key);
+    async function writeIndex(chats, sha, deleted) {
+      const blob = await aesEncrypt({ v: 1, chats, deleted: deleted || [] }, key);
       return gh.putFile("index.json", JSON.stringify(blob), "Update session index", sha);
     }
+    // Deleting has to be a RECORD, not an absence. The device that still has
+    // the chat open writes later than the delete by definition, so without a
+    // tombstone its next save quietly brings the chat back — and keeps bringing
+    // it back after every turn. Ids are uuids and never reused, so a tombstone
+    // can simply be permanent (pruned only so the index can't grow forever).
+    const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+    const tombstones = (idx) => ((idx && idx.deleted) || []);
+    const isDeleted = (gone, id) => gone.some((t) => t && t.id === id);
+    const pruneTombstones = (gone, now) =>
+      gone.filter((t) => Number((t && t.at) || 0) >= (now || Date.now()) - TOMBSTONE_TTL_MS);
     async function fileSha(path) {
       try { return (await gh.getFile(path)).sha; } catch (e) { return null; }
     }
@@ -320,7 +332,9 @@
       // Newest-first list of chat summaries (id, title, updated, preview).
       async list() {
         const { data } = await readIndex();
-        return (data.chats || []).slice().sort((a, b) => (b.updated || 0) - (a.updated || 0));
+        const gone = tombstones(data);
+        return (data.chats || []).filter((c) => !isDeleted(gone, c.id))
+          .sort((a, b) => (b.updated || 0) - (a.updated || 0));
       },
       // Full chat object (messages etc.).
       async load(id) {
@@ -331,6 +345,13 @@
       async save(chat) {
         if (!chat || !chat.id) throw new Error("chat needs an id");
         chat.updated = Date.now();
+        // Another device may have deleted this while we still had it open.
+        const pre = await readIndex();
+        if (isDeleted(tombstones(pre.data), chat.id)) {
+          const err = new Error("That chat was deleted on another device.");
+          err.chatDeleted = true;
+          throw err;
+        }
         const path = `chats/${chat.id}.json`;
         const blob = await aesEncrypt(chat, key);
         await gh.putFile(path, JSON.stringify(blob), `Save session ${chat.id}`, await fileSha(path));
@@ -339,7 +360,7 @@
         chats.push({ id: chat.id, title: chat.title || "Untitled",
           updated: chat.updated, preview: chat.preview || "",
           project: chat.project || "", device: chat.device || "" });
-        await writeIndex(chats, sha);
+        await writeIndex(chats, sha, tombstones(data));
         return chat.updated;
       },
       // Delete a chat file and its index entry.
@@ -348,7 +369,10 @@
         const sha = await fileSha(path);
         if (sha) await gh.deleteFile(path, `Delete session ${id}`, sha);
         const { data, sha: isha } = await readIndex();
-        await writeIndex((data.chats || []).filter((c) => c.id !== id), isha);
+        const gone = tombstones(data).filter((t) => t.id !== id);
+        gone.push({ id, at: Date.now() });
+        await writeIndex((data.chats || []).filter((c) => c.id !== id), isha,
+                         pruneTombstones(gone));
       },
       // --- cross-device lock (see DEVICE_LOCK_TTL_MS note above) ------------
       async checkLock(id) {

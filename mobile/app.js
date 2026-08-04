@@ -85,6 +85,15 @@
     $("in-unlock-pin").value = "";
     show("screen-unlock");
   }
+  // A light heartbeat, so a chat open on both devices notices the other within
+  // ~30s rather than only when you switch back to the app. One small index read
+  // per tick, skipped while hidden or mid-turn, so it barely costs anything.
+  const LIVE_POLL_MS = 30000;
+  setInterval(() => {
+    if (document.hidden || currentRun || composing) return;
+    refreshOpenChatFromSync();
+  }, LIVE_POLL_MS);
+
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) { if (session) persistSession(); return; }
     const ms = autolockMs();
@@ -428,7 +437,17 @@
         messages: stripImages(session.messages || []),
         transcript: session.transcript || [],
       });
-    } catch (e) { /* offline / rate-limited — keep the local copy */ }
+    } catch (e) {
+      // Deleted on the other device while this one still had it open. Say so
+      // rather than retrying forever, and stop this chat re-uploading itself.
+      if (e && e.chatDeleted) {
+        session.chatId = null;
+        addBubble("system", "This chat was deleted on your other device. " +
+          "It won't be saved here — start a new one to keep going.", false);
+        return;
+      }
+      /* offline / rate-limited — keep the local copy */
+    }
   }
 
   // ---- catching up with the other device ----

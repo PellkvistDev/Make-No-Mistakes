@@ -2120,6 +2120,12 @@ class Api:
             return {"error": err}
         try:
             updated = store.save(syncstore.session_to_chat(data, self._repo_state(data.get("cwd"))))
+        except syncstore.ChatDeletedElsewhere:
+            # Deleted on the phone while this machine still had it open. Saving
+            # would bring it back, and keep bringing it back after every turn.
+            if live:
+                live.synced_at = 0
+            return {"error": "That chat was deleted on another device, so it wasn't uploaded."}
         except (syncstore.SyncError, githubsync.GitHubError) as e:
             return {"error": str(e)}
         # Remember our own write, so catch-up doesn't mistake it for the phone.

@@ -1408,3 +1408,67 @@ def test_the_phone_writes_a_byte_identical_pending_note():
     got = json.loads(js.stdout)
     assert got["marker"] == syncstore.PENDING_MARKER
     assert got["note"] == syncstore.pending_note(items)
+
+
+# ------------------------------------------------------------- tombstones
+# Deleting used to be an absence, and absence loses to a write: the other
+# device still had the chat open, saved it on its next turn, and brought it
+# back — every time.
+
+def test_deleting_records_a_tombstone(fake_codec):
+    fake = FakeGitHub()
+    _k, store, _c = open_sync(_repo(fake), "delete pass here")
+    store.save({"id": "c1", "title": "Doomed", "messages": []})
+    store.remove("c1")
+    data, _ = store._read_index()
+    assert [t["id"] for t in data["deleted"]] == ["c1"]
+    assert data["deleted"][0]["at"] > 0
+
+
+def test_the_other_device_cannot_resurrect_a_deleted_chat(fake_codec):
+    """The exact reported bug: delete here, the phone still has it open and
+    sends one more message, and the chat comes back."""
+    fake = FakeGitHub()
+    _k, store, _c = open_sync(_repo(fake), "delete pass here")
+    store.save({"id": "c1", "title": "Doomed", "messages": []})
+    store.remove("c1")
+    with pytest.raises(syncstore.ChatDeletedElsewhere):
+        store.save({"id": "c1", "title": "Doomed", "messages": [{"role": "user", "content": "hi"}]})
+    assert [c["id"] for c in store.list()] == []
+
+
+def test_a_deleted_chat_stays_gone_from_the_list(fake_codec):
+    fake = FakeGitHub()
+    _k, store, _c = open_sync(_repo(fake), "delete pass here")
+    store.save({"id": "keep", "title": "Keep", "messages": []})
+    store.save({"id": "drop", "title": "Drop", "messages": []})
+    store.remove("drop")
+    assert [c["id"] for c in store.list()] == ["keep"]
+
+
+def test_saving_another_chat_preserves_the_tombstones(fake_codec):
+    """save() rewrites the index too — it must not wipe the deletions."""
+    fake = FakeGitHub()
+    _k, store, _c = open_sync(_repo(fake), "delete pass here")
+    store.save({"id": "gone", "title": "Gone", "messages": []})
+    store.remove("gone")
+    store.save({"id": "other", "title": "Other", "messages": []})
+    data, _ = store._read_index()
+    assert [t["id"] for t in data["deleted"]] == ["gone"]
+
+
+def test_tombstones_are_pruned_so_the_index_cannot_grow_forever():
+    now = 1_000_000_000_000
+    old = {"id": "ancient", "at": now - syncstore.TOMBSTONE_TTL_MS - 1}
+    fresh = {"id": "recent", "at": now - 1000}
+    assert syncstore._prune_tombstones([old, fresh], now) == [fresh]
+
+
+def test_an_index_written_before_tombstones_still_loads(fake_codec):
+    """Old stores have no 'deleted' key at all."""
+    fake = FakeGitHub()
+    _k, store, _c = open_sync(_repo(fake), "delete pass here")
+    store._write_index([{"id": "c1", "updated": 1}], None)
+    fake.files["index.json"] = json.dumps(
+        syncstore.aes_encrypt({"v": 1, "chats": [{"id": "c1", "updated": 1}]}, store.key))
+    assert [c["id"] for c in store.list()] == ["c1"]
