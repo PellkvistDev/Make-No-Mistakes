@@ -31,14 +31,23 @@ html, body {
   font-family: var(--font); font-size: 16px; line-height: 1.5;
   overscroll-behavior: none;
 }
-/* iOS installed PWA with a black-translucent status bar shifts the document up
-   under the status bar, so height:100% stops short of the screen bottom and a
-   bar appears there. Grow the document by the top inset to cover it.
-   Scoped to iOS WebKit so other browsers are unaffected.
-   Ref: danielpietzsch.com / itnext "Make your PWAs look handsome on iOS". */
-@supports (-webkit-touch-callout: none) {
-  html { min-height: calc(100% + env(safe-area-inset-top)); }
-}
+/* The document itself must NEVER scroll. Everything visible is a fixed,
+   inset:0 layer inside it (#bg-layer, #app) and the only scroller is
+   .messages, so any scrollable height on <html> is pure overflow.
+   iOS will find that overflow and use it — which is what caused both of the
+   bugs this replaced. A previous fix grew the document by the top inset
+   (min-height: 100% + safe-area-inset-top) to paper over a dark band at the
+   bottom of an installed PWA. That handed iOS exactly inset-top pixels of
+   scroll: the page slid up by that much, the fixed layers went with it, and
+   the band reappeared at the bottom — the same height as the inset, which is
+   the tell. Focusing the composer did it too, because iOS scrolls the
+   document to reveal a focused field, shoving the wallpaper and the whole UI
+   up off the screen.
+   Locking the document fixes both, and the band the old hack was aimed at
+   doesn't come back: #bg-layer is position:fixed;inset:0, so it covers the
+   screen regardless of how tall <html> is. */
+html { overflow: hidden; }
+body { position: fixed; inset: 0; width: 100%; overflow: hidden; }
 /* Fill the whole screen (incl. both safe areas under black-translucent) by
    pinning the app to the viewport exactly like #bg-layer — height:100% doesn't
    cover the bottom inset in an installed iOS PWA, which left a dark band. */
@@ -244,15 +253,22 @@ button.link.danger { color: var(--danger); }
   display: flex; flex-direction: column; gap: 10px;
   -webkit-overflow-scrolling: touch;
 }
+/* --kb is how much of the screen the on-screen keyboard covers, measured from
+   visualViewport (see trackKeyboard). The document can't scroll any more, so
+   the dock has to lift itself over the keyboard rather than being shoved there
+   by the browser. --kb is 0 whenever the keyboard is down, which is also the
+   fallback if visualViewport is missing. */
 #composer-dock {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 5;
-  padding-bottom: env(safe-area-inset-bottom);
+  position: fixed; left: 0; right: 0; bottom: var(--kb, 0px); z-index: 5;
+  /* The home indicator is behind the keyboard while it's open, so its inset
+     stops applying — otherwise there's a dead gap above the keys. */
+  padding-bottom: max(0px, calc(env(safe-area-inset-bottom) - var(--kb, 0px)));
 }
 /* Scrim only behind the input row — it STOPS at the top of the home-indicator
    inset, so that area stays pure wallpaper (no bar at the very bottom). */
 #composer-dock::before {
   content: ""; position: absolute; left: 0; right: 0; top: 0;
-  bottom: env(safe-area-inset-bottom); z-index: -1;
+  bottom: max(0px, calc(env(safe-area-inset-bottom) - var(--kb, 0px))); z-index: -1;
   background: linear-gradient(to top, rgba(6,8,12,.5), rgba(6,8,12,.28) 55%, transparent);
   pointer-events: none;
 }
@@ -450,17 +466,29 @@ pre.code, pre.tool-out, .preview {
   border: 1px solid var(--glass-brd); border-bottom: none; box-shadow: var(--glass-hi), 0 -12px 40px rgba(0,0,0,.4);
   border-radius: 22px 22px 0 0; width: 100%; max-width: 720px;
   padding: 18px 18px calc(18px + env(safe-area-inset-bottom)); animation: rise .2s ease;
+  /* A grid item's default min-width is min-content, not 0, so a dialog holding
+     an unwrappable line -- a long file path, or a <pre> of committed content --
+     grew as wide as that line instead of scrolling it. On a phone that pushed
+     the confirm button clean off the right edge, so the sheet couldn't be
+     accepted at all. Let it shrink; the offenders below scroll or wrap. */
+  min-width: 0;
 }
 .dialog h3 { margin: 0 0 8px; font-size: 16px; }
 .mono { font-family: var(--mono); font-size: 13px; color: var(--accent); word-break: break-all; }
-.preview { max-height: 40vh; overflow: auto; margin-top: 10px; }
+/* overflow:auto only scrolls once the box is allowed to be narrower than its
+   content -- without min-width it just reports a huge min-content width and
+   widens everything above it. */
+.preview { max-height: 40vh; overflow: auto; margin-top: 10px; min-width: 0; }
 .dialog-actions { display: flex; gap: 10px; margin-top: 14px; }
-.dialog-actions button { flex: 1; }
+/* Same rule for flex items: min-width:auto would keep a long button label from
+   ever shrinking, which is the other way the actions row overflowed. */
+.dialog-actions button { flex: 1; min-width: 0; }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
 /* ---------- toast ---------- */
 .toast {
-  position: fixed; left: 50%; bottom: calc(78px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(78px + var(--kb, 0px) + max(0px, calc(env(safe-area-inset-bottom) - var(--kb, 0px))));
   background: var(--glass-strong); -webkit-backdrop-filter: var(--blur-strong); backdrop-filter: var(--blur-strong);
   border: 1px solid var(--glass-brd); color: var(--text);
   padding: 9px 15px; border-radius: 999px; font-size: 13px; z-index: 50;
