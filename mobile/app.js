@@ -639,7 +639,6 @@
     session.images = {};
     session.compact = null;
     session.toldCompact = false;
-    session.pending = [];
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
     // Picking up a chat the desktop was driving: mark the switch, or the model
     // keeps imitating turns that used tools this phone doesn't have.
