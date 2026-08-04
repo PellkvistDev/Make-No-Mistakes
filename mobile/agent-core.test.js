@@ -1279,3 +1279,16 @@ test("steer: a stop still wins over a queued message", async () => {
   assert.deepEqual(events, ["stopped"]);
   assert.ok(!msgs.some((m) => m.content === "too late"));
 });
+
+test("index: says whether a chat has a repo, so the list can tell them apart", async () => {
+  // The phone's chat list is built from the index alone. Without this the only
+  // way to learn a chat can't be continued here is to tap it.
+  const { gh } = fakeSyncGh(null);
+  const { store } = await C.openSync(gh, "index pass here");
+  await store.save({ id: "with", title: "Repo chat", messages: [],
+                     repo: { owner: "me", repo: "proj", full_name: "me/proj" } });
+  await store.save({ id: "without", title: "Local chat", messages: [] });
+  const rows = Object.fromEntries((await store.list()).map((r) => [r.id, r]));
+  assert.equal(rows.with.repo, "me/proj");
+  assert.equal(rows.without.repo, "", "a local-only chat must be identifiable from the index");
+});

@@ -371,6 +371,12 @@ class SyncStore:
         chats.append({"id": chat["id"], "title": chat.get("title") or "Untitled",
                       "updated": chat["updated"], "preview": chat.get("preview") or "",
                       "project": chat.get("project") or "",
+                      # Just the full_name, not the whole repo object: the index
+                      # is read in one piece on every list, so it stays small.
+                      # Empty means the chat has no GitHub repo, which is what
+                      # lets the phone say so in the list instead of only
+                      # finding out once you've tapped it.
+                      "repo": ((chat.get("repo") or {}).get("full_name") or ""),
                       "device": chat.get("device") or ""})
         self._write_index(chats, sha, _tombstones(data))
         return chat["updated"]

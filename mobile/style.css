@@ -234,6 +234,16 @@ button.link.danger { color: var(--danger); }
 .chat-row-main { flex: 1; min-width: 0; padding: 12px 4px 12px 15px; cursor: pointer; }
 .chat-row-title { font-size: 14.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .chat-row-meta { font-size: 12px; color: var(--muted); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A chat whose project isn't a GitHub repo: readable here, but the agent has
+   nothing to act on, so it can't be continued from the phone. Dimmed and
+   labelled so it doesn't look like one that works. */
+.chat-row-local .chat-row-title, .chat-row-local .chat-row-meta { opacity: .62; }
+.chat-row-tag {
+  margin-right: 7px; padding: 1px 7px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+  vertical-align: 1px; color: var(--muted);
+  background: rgba(255,255,255,.09); border: 1px solid var(--glass-brd);
+}
 .chat-row-del { padding: 12px 15px; font-size: 16px; color: var(--muted); background: none; align-self: stretch; }
 .chat-row-del:active { color: var(--danger, #ff6b6b); background: rgba(255,255,255,.08); }
 .new-repo { margin-top: 4px; display: flex; flex-direction: column; gap: 10px; }
