@@ -31,22 +31,31 @@ html, body {
   font-family: var(--font); font-size: 16px; line-height: 1.5;
   overscroll-behavior: none;
 }
-/* The document itself must NEVER scroll. Everything visible is a fixed,
-   inset:0 layer inside it (#bg-layer, #app) and the only scroller is
-   .messages, so any scrollable height on <html> is pure overflow.
-   iOS will find that overflow and use it — which is what caused both of the
-   bugs this replaced. A previous fix grew the document by the top inset
-   (min-height: 100% + safe-area-inset-top) to paper over a dark band at the
-   bottom of an installed PWA. That handed iOS exactly inset-top pixels of
-   scroll: the page slid up by that much, the fixed layers went with it, and
-   the band reappeared at the bottom — the same height as the inset, which is
-   the tell. Focusing the composer did it too, because iOS scrolls the
-   document to reveal a focused field, shoving the wallpaper and the whole UI
-   up off the screen.
-   Locking the document fixes both, and the band the old hack was aimed at
-   doesn't come back: #bg-layer is position:fixed;inset:0, so it covers the
-   screen regardless of how tall <html> is. */
-html { overflow: hidden; }
+/* THE BOTTOM OF THE SCREEN, in an installed iOS PWA with a black-translucent
+   status bar. Two different things go wrong down there and they need two
+   different fixes — conflating them is how this got broken twice.
+   In this mode iOS keeps the layout viewport its normal height (screen minus
+   status bar) but positions it at the very top of the screen. The bottom
+   safe-area-inset-top pixels of the glass are therefore OUTSIDE the layout
+   viewport. Consequences:
+     1. A flat strip of --bg shows there, because nothing lays out that far
+        down. Only the canvas background reaches it, and only when <html> is
+        tall enough to have one — hence the min-height below.
+     2. position:fixed;inset:0 does NOT cover it. Fixed positioning resolves
+        against the layout viewport, which stops short. So the wallpaper ends
+        above the screen bottom even once the strip is no longer grey — that
+        is the separate #bg-layer rule further down.
+   The min-height is the old fix and it is correct; what was wrong with it was
+   that it also made the document SCROLLABLE by exactly that many pixels, and
+   iOS used them — sliding the page up (the band came back, same height, which
+   was the tell) and shoving the whole UI up whenever the composer was focused.
+   overflow:hidden keeps the height and takes away the scroll. */
+html {
+  overflow: hidden;
+  min-height: calc(100% + env(safe-area-inset-top));
+}
+/* Nothing in this app should ever scroll the document — the only scroller is
+   .messages. Pinning body as well means no amount of overflow can move it. */
 body { position: fixed; inset: 0; width: 100%; overflow: hidden; }
 /* Fill the whole screen (incl. both safe areas under black-translucent) by
    pinning the app to the viewport exactly like #bg-layer — height:100% doesn't
@@ -60,8 +69,22 @@ button { cursor: pointer; border: none; background: none; }
    so make hidden win explicitly — otherwise send + stop both show. */
 [hidden] { display: none !important; }
 
-/* The wallpaper: fills the viewport, sits behind the app, and is never dimmed. */
-#bg-layer { position: fixed; inset: 0; z-index: 0; pointer-events: none; background-size: cover; background-position: center; }
+/* The wallpaper: fills the viewport, sits behind the app, and is never dimmed.
+   It extends BELOW the layout viewport by the top inset so that its box is the
+   same height as <html>'s. That matters more than it looks: applyBg() paints
+   the same image on both this layer and the root, and the root's copy is what
+   reaches the strip of screen below the shifted viewport in an installed iOS
+   PWA. `cover` scales to the box it is painting into, so two boxes of
+   different heights scale the same image differently and meet in a visible
+   line — which is the "gradient ends above the bottom of the screen" seam.
+   Same box height, same scale, no seam; and if fixed layers do reach down
+   there, this covers it outright. Elsewhere the inset is 0 and this is a
+   no-op. */
+#bg-layer {
+  position: fixed; left: 0; right: 0; top: 0; z-index: 0; pointer-events: none;
+  bottom: calc(-1 * env(safe-area-inset-top));
+  background-size: cover; background-position: center;
+}
 
 /* A reusable glass helper. */
 .glass, .dialog, .toast,

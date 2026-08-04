@@ -63,6 +63,17 @@
   // instead. visualViewport is the only thing that reports this: on iOS the
   // layout viewport does not change when the keyboard opens, only the visual
   // one shrinks.
+  // <html> is deliberately taller than the viewport (see style.css: it is what
+  // lets the canvas background paint the strip of screen below the shifted
+  // layout viewport in an installed iOS PWA). That height is scrollable, and
+  // overflow:hidden on the root does NOT reliably stop it — Chromium still
+  // honours a programmatic scroll, and iOS scrolls the document by itself to
+  // reveal a focused field. Either way the whole UI slides up. So put it back.
+  function pinDocument() {
+    if (window.scrollY || document.documentElement.scrollTop) window.scrollTo(0, 0);
+  }
+  window.addEventListener("scroll", pinDocument, { passive: true });
+
   function trackKeyboard() {
     const vv = window.visualViewport;
     if (!vv) return;                       // --kb stays 0; layout is unchanged
@@ -72,6 +83,7 @@
       // Ignore small deltas so a browser's collapsing address bar doesn't read
       // as a keyboard.
       document.documentElement.style.setProperty("--kb", (covered > 80 ? covered : 0) + "px");
+      pinDocument();     // opening the keyboard is when iOS tries to scroll
       fitMessages();
     };
     vv.addEventListener("resize", apply);
