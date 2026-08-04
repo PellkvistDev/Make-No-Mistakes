@@ -292,13 +292,23 @@ def read_file(path: str, offset: int = 1, limit: int = MAX_READ_LINES) -> str:
 _MAX_CHECK_BYTES = 512_000  # don't compile-check huge generated files
 
 
+def _unchecked(reason: str) -> str:
+    """Say the check didn't happen. Deliberately NOT '': that is the value
+    meaning "checked, and fine", and the whole point of this function is that
+    the agent trusts it. A check that fell over has to look different from one
+    that passed, or a broken file sails through under a reassuring silence."""
+    return (f"\nNote: couldn't syntax-check this file ({reason}), "
+            "so it was saved unchecked -- give it a read.")
+
+
 def _syntax_feedback(p: Path) -> str:
-    """Best-effort syntax check of a just-written file. Returns '' when fine
-    (or uncheckable); otherwise a WARNING line for the tool result. Must
+    """Best-effort syntax check of a just-written file. Returns '' when fine or
+    when there is deliberately nothing to check; a WARNING line when the file is
+    broken; a "saved unchecked" note when the check itself couldn't run. Must
     never raise -- a broken checker must not break the write itself."""
     try:
         if p.stat().st_size > _MAX_CHECK_BYTES:
-            return ""
+            return ""                       # deliberately skipped, not failed
         ext = p.suffix.lower()
         if ext == ".py":
             try:
@@ -311,7 +321,10 @@ def _syntax_feedback(p: Path) -> str:
             except json.JSONDecodeError as e:
                 return _syntax_warn(f"invalid JSON: {e}")
         elif ext == ".toml":
-            import tomllib
+            try:
+                import tomllib
+            except ImportError:
+                return _unchecked("no TOML parser on this Python")
             try:
                 tomllib.loads(p.read_text(encoding="utf-8", errors="replace"))
             except tomllib.TOMLDecodeError as e:
@@ -320,20 +333,21 @@ def _syntax_feedback(p: Path) -> str:
             node = shutil.which("node")
             if node:
                 # Node's cold start can be slow on a loaded machine (Windows
-                # Defender scanning a fresh temp file, say), so give it room --
-                # and if it still runs out, say the check didn't happen rather
-                # than returning the same '' that means "looks fine".
+                # Defender scanning a fresh temp file, say), so give it room.
                 try:
                     r = subprocess.run([node, "--check", str(p)], capture_output=True,
                                        text=True, timeout=30, **NO_WINDOW_KWARGS)
                 except subprocess.TimeoutExpired:
-                    return ("\nNote: couldn't syntax-check this file (node took too long), "
-                            "so it was saved unchecked -- give it a read.")
+                    return _unchecked("node took too long")
+                except OSError as e:
+                    return _unchecked(f"node wouldn't run: {e}")
                 if r.returncode != 0:
                     err = " ".join((r.stderr or "").strip().splitlines()[:3])[:300]
                     return _syntax_warn(f"JavaScript syntax error: {err}")
-    except Exception:
-        return ""
+    except Exception as e:
+        # Anything unforeseen -- an unreadable file, a checker blowing up. It
+        # must not break the write, and it must not be mistaken for a pass.
+        return _unchecked(f"{type(e).__name__}")
     return ""
 
 
