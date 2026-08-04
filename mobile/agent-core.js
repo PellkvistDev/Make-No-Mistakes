@@ -88,6 +88,49 @@
     return JSON.parse(fromUtf8(pt));
   }
 
+  // --- pairing (set up by scanning the desktop's QR) -----------------------
+  // The desktop seals your keys under a short code shown as TEXT, never encoded
+  // into the image, and the payload rides in the URL fragment — which browsers
+  // never send to a server. So the secrets reach this phone without touching a
+  // network, and a screenshot of the QR on its own is useless.
+  //
+  // Wire layout, matching glmcode/pairing.py exactly:
+  //   byte 0     version (1)
+  //   bytes 1..16   PBKDF2 salt
+  //   bytes 17..28  AES-GCM iv
+  //   rest          ciphertext
+  const PAIR_WIRE_V = 1, PAIR_SALT_LEN = 16, PAIR_IV_LEN = 12;
+
+  function normalizePairCode(code) {
+    return String(code || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  }
+
+  async function openPairToken(token, code, now) {
+    let raw;
+    try {
+      const b64 = String(token || "").replace(/-/g, "+").replace(/_/g, "/");
+      raw = b64ToBytes(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+    } catch (e) { throw new Error("That pairing link is damaged."); }
+    if (raw.length < 1 + PAIR_SALT_LEN + PAIR_IV_LEN + 16 || raw[0] !== PAIR_WIRE_V) {
+      throw new Error("That pairing link is damaged.");
+    }
+    const salt = raw.slice(1, 1 + PAIR_SALT_LEN);
+    const iv = raw.slice(1 + PAIR_SALT_LEN, 1 + PAIR_SALT_LEN + PAIR_IV_LEN);
+    const ct = raw.slice(1 + PAIR_SALT_LEN + PAIR_IV_LEN);
+    const key = await deriveKey(normalizePairCode(code), salt);
+    let data;
+    try {
+      data = await aesDecrypt({ v: 1, iv: bytesToB64(iv), ct: bytesToB64(ct) }, key);
+    } catch (e) {
+      // AES-GCM authentication failing IS the wrong-code signal.
+      throw new Error("That code doesn't match. Check the six characters on your computer.");
+    }
+    if (Number(data.exp || 0) < (now || Date.now())) {
+      throw new Error("That pairing code has expired — show a new one on your computer.");
+    }
+    return data;
+  }
+
   // --- GitHub client (the "filesystem") -----------------------------------
   function makeGitHub(opts) {
     const { token, owner, repo, branch = "main" } = opts;
@@ -944,6 +987,7 @@
     aesEncrypt, aesDecrypt, exportRawKey, importRawKey,
     makeGitHub, makeModel, makeTools, runAgent, TOOL_SCHEMAS, SPAWN_SCHEMA, VIEW_IMAGE_SCHEMA,
     NEEDS_DESKTOP_SCHEMA, pendingNote, PENDING_MARKER,
+    openPairToken, normalizePairCode,
     SYSTEM_PROMPT, SUBAGENT_PROMPT,
     openSync, makeSyncStore, ensureSyncRepo,
     SYNC_REPO_NAME, SYNC_REPO_BRANCH, STATE_BRANCH,

@@ -3726,28 +3726,98 @@ $("gh-open-remote").addEventListener("click", () => { if (ghRemoteUrl) api().ope
 $("gh-phone-setup").addEventListener("click", async () => {
   const res = await ghAction($("gh-phone-setup"), () => api().github_setup_phone_access(), false);
   if (!res) return;
-  toast(`Added ${res.path}. Now: Sync it up, add a ZAI_API_KEY secret (opening that page), ` +
-        `then comment "/agent …" on any issue from your phone.`, "info", 9000);
+  toast(`Added ${res.path}. Next: press Sync to push it, add a ZAI_API_KEY secret on the page ` +
+        `that just opened, then comment "/agent …" on any issue or PR.`, "info", 9000);
   if (res.secrets_url) api().open_external(res.secrets_url);
   refreshGithubRepo();
 });
 
-// --- Get the phone app (QR + URL) ---
+// --- Set up the phone (pairing QR, or a plain install link) ---
+// Pairing is the default because the alternative people actually reach for is
+// mailing themselves a GitHub token or using a cloud clipboard. Here the keys
+// go screen → camera and the link is never shown or copyable: there is no safe
+// way to paste it around, so the UI doesn't offer one.
+let pairTimer = 0;
+
+function resetPhoneSheet() {
+  clearInterval(pairTimer); pairTimer = 0;
+  $("phoneapp-qr").innerHTML = "";
+  $("phoneapp-error").hidden = true;
+  $("phoneapp-code-wrap").hidden = true;
+  $("phoneapp-url").textContent = "";
+  $("phoneapp-url").removeAttribute("href");
+}
+
 async function openPhoneApp() {
-  const box = $("phoneapp-qr"), urlEl = $("phoneapp-url"), err = $("phoneapp-error");
-  box.innerHTML = ""; err.hidden = true;
-  urlEl.textContent = "loading…"; urlEl.removeAttribute("href");
+  resetPhoneSheet();
   $("phoneapp-backdrop").hidden = false;
+  $("phoneapp-plain").hidden = false;
+  $("phoneapp-copy").hidden = true;
+  $("phoneapp-open").hidden = true;
+  $("phoneapp-hint").textContent = "Building a one-time pairing code…";
+  let res;
+  try { res = await api().get_pair_phone(); }
+  catch (e) { res = { error: "Couldn't reach the app." }; }
+  if (res.error) {
+    // Can't pair (no URL set, no keys yet, no crypto) — say why, and fall back
+    // to the plain link so the phone is still installable.
+    $("phoneapp-error").textContent = res.error;
+    $("phoneapp-error").hidden = false;
+    return showPlainLink();
+  }
+  // The SVG is generated locally by our own code (segno), not user/model input.
+  $("phoneapp-qr").innerHTML = res.svg;
+  $("phoneapp-code-wrap").hidden = false;
+  $("phoneapp-code").textContent = res.code;
+  const inc = res.includes || {};
+  const parts = [];
+  if (inc.model_key) parts.push("model key");
+  if (inc.github) parts.push("GitHub token");
+  if (inc.sync) parts.push("shared chats");
+  $("phoneapp-includes").textContent =
+    `Scan, then type this code on the phone. Sends: ${parts.join(", ") || "nothing yet"}. ` +
+    `The code isn't in the image, so a photo of the QR on its own is useless.`;
+  // Count the window down, then make it stop working rather than sit there
+  // looking valid — the phone refuses a stale payload anyway.
+  let left = res.ttl || 300;
+  const hint = $("phoneapp-hint");
+  const tick = () => {
+    if (left <= 0) {
+      clearInterval(pairTimer); pairTimer = 0;
+      resetPhoneSheet();
+      $("phoneapp-hint").textContent = "That code expired. Close and reopen for a new one.";
+      return;
+    }
+    hint.textContent = `Scan with your phone's camera. Expires in ${Math.floor(left / 60)}:` +
+                       String(left % 60).padStart(2, "0");
+    left -= 1;
+  };
+  tick();
+  pairTimer = setInterval(tick, 1000);
+}
+
+// The install link with no secrets in it — for typing keys in by hand.
+async function showPlainLink() {
+  clearInterval(pairTimer); pairTimer = 0;
+  $("phoneapp-code-wrap").hidden = true;
+  $("phoneapp-plain").hidden = true;
+  $("phoneapp-copy").hidden = false;
+  $("phoneapp-open").hidden = false;
+  $("phoneapp-hint").textContent =
+    "Install only — you'll type your keys in on the phone. Scan, then “Add to Home Screen”.";
+  const urlEl = $("phoneapp-url");
+  urlEl.textContent = "loading…";
   let res;
   try { res = await api().get_phone_app(); }
   catch (e) { res = { error: "Couldn't reach the app." }; }
   urlEl.textContent = res.url || "";
   if (res.url) { urlEl.href = res.url; $("phoneapp-url-input").value = res.url; }
-  // The SVG is generated locally by our own code (segno), not user/model input.
-  if (res.svg) box.innerHTML = res.svg;
-  else { err.textContent = res.error || "Couldn't build the QR code."; err.hidden = false; }
+  if (res.svg) $("phoneapp-qr").innerHTML = res.svg;
+  else if (res.error) { $("phoneapp-error").textContent = res.error; $("phoneapp-error").hidden = false; }
 }
+
 $("gh-get-app").addEventListener("click", openPhoneApp);
+$("phoneapp-plain").addEventListener("click", showPlainLink);
 
 // --- Cross-device chat sync (shared encrypted store with the phone app) ---
 // The passphrase is typed here and handed straight to the backend, which
@@ -3817,9 +3887,12 @@ $("sync-pass-forget").addEventListener("click", async () => {
   toast("Sync passphrase removed from this computer.", "info", 3000);
 });
 
-$("phoneapp-close").addEventListener("click", () => { $("phoneapp-backdrop").hidden = true; });
+// Closing must wipe the code and QR, not leave a live pairing payload
+// sitting in the DOM for the next person who opens the sheet.
+function closePhoneSheet() { $("phoneapp-backdrop").hidden = true; resetPhoneSheet(); }
+$("phoneapp-close").addEventListener("click", closePhoneSheet);
 $("phoneapp-backdrop").addEventListener("click", (e) => {
-  if (e.target === $("phoneapp-backdrop")) $("phoneapp-backdrop").hidden = true;
+  if (e.target === $("phoneapp-backdrop")) closePhoneSheet();
 });
 $("phoneapp-open").addEventListener("click", () => {
   const u = $("phoneapp-url").textContent.trim(); if (u.startsWith("http")) api().open_external(u);

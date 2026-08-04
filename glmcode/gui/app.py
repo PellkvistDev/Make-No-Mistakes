@@ -31,6 +31,7 @@ from ..config import (BUILTIN_PROVIDER_NAME, CONFIG_DIR, PERMISSION_MODES, Confi
                       all_providers, find_provider, load_config, save_config)
 from ..events import AgentEvents
 from .. import githubsync
+from .. import pairing
 from .. import qrcode_util
 from .. import syncstore
 from ..notify import APP_NAME, notify
@@ -1870,6 +1871,49 @@ class Api:
         except Exception as e:
             return {"url": url, "error": str(e)}
         return {"url": url, "svg": svg}
+
+    def get_pair_phone(self):
+        """A QR that sets the phone up by scanning, plus the code to unlock it.
+
+        The alternative people actually reach for is mailing themselves a
+        GitHub PAT or leaning on a cloud clipboard, which hands the raw secret
+        to a third party. This goes screen -> camera instead: generated offline,
+        carried in the URL fragment browsers never transmit.
+
+        The code is returned separately and deliberately NOT encoded in the
+        image, so a screenshot or photo of the QR alone is useless. The link
+        isn't returned at all -- there is no safe way to paste it around, so the
+        UI shouldn't offer one.
+        """
+        url = (self._cfg.phone_app_url or "").strip()
+        if not url:
+            return {"error": "Set the phone-app URL first (Change the URL, below)."}
+        if not syncstore.crypto_available():
+            return {"error": "Encryption isn't available in this build, so a pairing "
+                             "code can't be protected. Install the 'cryptography' package "
+                             "and restart, or type the keys into the phone by hand."}
+        token_gh = self._gh_token() or ""
+        passphrase = syncstore.load_passphrase() or ""
+        payload = pairing.build_payload(
+            model_key=self._cfg.resolve_api_key(),
+            base_url=self._cfg.base_url,
+            model=self._cfg.model,
+            github_token=token_gh,
+            sync_passphrase=passphrase,
+        )
+        if len(payload) <= 2:   # only v + exp: nothing worth sending
+            return {"error": "Nothing to send yet — add your model key first."}
+        code = pairing.make_code()
+        try:
+            link = pairing.pair_url(url, pairing.seal(payload, code))
+            # Level L: the redundancy that helps a printed code survive a scuff
+            # is wasted on a screen, and dropping it keeps the modules readable.
+            svg = qrcode_util.qr_svg(link, error="l", scale=5, border=2)
+        except Exception as e:
+            return {"error": f"Couldn't build the pairing code: {e}"}
+        return {"code": code, "svg": svg, "ttl": pairing.PAIR_TTL_SECONDS,
+                "includes": {"model_key": bool(self._cfg.resolve_api_key()),
+                             "github": bool(token_gh), "sync": bool(passphrase)}}
 
     # -- Cross-device session sync (shared with the phone app) --------------- #
     #

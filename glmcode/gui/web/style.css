@@ -1403,6 +1403,19 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
   box-shadow: 0 6px 22px rgba(0,0,0,0.28); animation: rise 0.2s ease;
 }
 .qr-box svg { display: block; width: 216px; height: 216px; }
+/* A pairing QR carries far more than a URL, so its modules are much finer --
+   give it more room or a phone camera struggles to resolve them. */
+#phoneapp-code-wrap:not([hidden]) ~ * .qr-box svg,
+.qr-box.pairing svg { width: 280px; height: 280px; }
+
+/* The pairing code: shown as text, never encoded into the image. Big and
+   monospaced because it gets read off the screen and typed on a phone. */
+.pair-code {
+  font-family: var(--mono); font-size: 30px; font-weight: 700;
+  letter-spacing: .22em; text-align: center; margin: 12px 0 4px;
+  color: var(--accent); text-indent: .22em;
+}
+.pair-note { text-align: center; margin: 0 auto 4px; max-width: 46ch; }
 .qr-url {
   display: block; text-align: center; font-size: 12.5px; word-break: break-all;
   color: var(--accent, #7aa2ff); text-decoration: none; margin-bottom: 4px;
