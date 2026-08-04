@@ -141,6 +141,54 @@ def test_the_document_is_tall_enough_to_paint_the_strip_but_still_cannot_scroll(
     assert phone.errors == []
 
 
+GRADIENT = "linear-gradient(160deg, rgb(91, 47, 176) 0%, rgb(22, 211, 200) 100%)"
+
+
+def with_wallpaper(phone, app_url, bg):
+    """Boot the app with a wallpaper already chosen. applyBg runs before the
+    PIN screen, so nothing needs unlocking to inspect the result."""
+    phone.page.evaluate("(bg) => localStorage.setItem('mnm.bg.v1', JSON.stringify(bg))", bg)
+    phone.open_at(app_url)
+    phone.page.wait_for_timeout(200)
+
+
+def test_exactly_one_surface_paints_the_wallpaper(phone, app_url):
+    """The seam was two of them painting the same image at different scales.
+
+    Only the root canvas can reach the strip of screen below the layout
+    viewport in an installed iOS PWA -- a position:fixed layer cannot, which
+    was tried and did nothing. So the canvas has to paint it, and anything else
+    painting the same image over the viewport re-creates the mismatch. This is
+    the invariant that makes the seam impossible rather than merely tuned away.
+    """
+    with_wallpaper(phone, app_url, {"type": "color", "value": GRADIENT})
+    who = phone.page.evaluate("""() => {
+      const cs = (el) => getComputedStyle(el);
+      return { root: cs(document.documentElement).backgroundImage,
+               layer: cs(document.getElementById('bg-layer')).backgroundImage,
+               body: cs(document.body).backgroundColor };
+    }""")
+    assert who["root"].startswith("linear-gradient"), f"the canvas is not painting it: {who}"
+    assert who["layer"] == "none", f"#bg-layer paints it too -- that is the seam: {who}"
+    # An opaque body would hide the canvas over the viewport and leave it
+    # showing only in the strip, which is the same two-surface split again.
+    assert who["body"] in ("rgba(0, 0, 0, 0)", "transparent"), \
+        f"body hides the canvas over the viewport: {who}"
+    assert phone.errors == []
+
+
+def test_a_gradient_preset_actually_applies(phone, app_url):
+    """applyBg set the `background` shorthand and then cleared background-image
+    immediately after, which wiped out the gradient it had just set. Photo
+    wallpapers passed an explicit image so they survived; gradient presets came
+    out blank."""
+    with_wallpaper(phone, app_url, {"type": "color", "value": GRADIENT})
+    painted = phone.page.evaluate(
+        "() => getComputedStyle(document.documentElement).backgroundImage")
+    assert "gradient" in painted, f"the gradient preset did not apply: {painted!r}"
+    assert phone.errors == []
+
+
 def test_the_dock_lifts_over_the_keyboard(phone):
     """--kb is what replaces the browser's own shoving, now that the document
     is pinned. No headless keyboard exists, so drive the variable directly and
