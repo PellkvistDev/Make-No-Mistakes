@@ -4086,6 +4086,19 @@ function notePendingFromPhone(res) {
   if (n > 0) toast(`Your phone left ${n} thing${n === 1 ? "" : "s"} to run here.`, "info", 6000);
 }
 
+// A light heartbeat so a second open device notices within ~30s instead of
+// only when you refocus the window. One small index read per tick, skipped
+// while busy or hidden, so it costs almost nothing and never fights a turn.
+const LIVE_POLL_MS = 30000;
+let livePoll = 0;
+function startLivePoll() {
+  if (livePoll) return;
+  livePoll = setInterval(() => {
+    if (document.hidden || busy) return;
+    catchUpFromSync();
+  }, LIVE_POLL_MS);
+}
+
 let catchUpBusy = false;
 async function catchUpFromSync() {
   if (catchUpBusy || busy) return;
@@ -4626,6 +4639,7 @@ async function boot() {
   // window focus current, starting from the real state right now.
   const reportFocus = (f) => { try { api().set_window_focus(f); } catch (e) { /* ignore */ } };
   window.addEventListener("focus", () => { reportFocus(true); catchUpFromSync(); });
+  startLivePoll();
   window.addEventListener("blur", () => reportFocus(false));
   reportFocus(document.hasFocus());
   try { api().log && api().log("boot:done"); } catch (e) { /* ignore */ }

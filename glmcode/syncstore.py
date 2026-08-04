@@ -87,6 +87,41 @@ class SyncError(Exception):
     """A user-safe sync failure (wrong passphrase, network, unavailable crypto)."""
 
 
+class ChatDeletedElsewhere(SyncError):
+    """This chat was deleted on another device, so it must not be re-uploaded."""
+
+    def __init__(self, chat_id: str):
+        self.chat_id = chat_id
+        super().__init__("That chat was deleted on another device.")
+
+
+# How long a deletion is remembered. Long enough that every device has certainly
+# seen it; bounded so the index can't grow without limit. A device that has been
+# offline longer than this could still resurrect a chat -- the alternative is an
+# index that never stops growing, which is worse.
+TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+
+def _tombstones(index: dict) -> list:
+    return list((index or {}).get("deleted") or [])
+
+
+def _is_deleted(gone: list, chat_id: str) -> bool:
+    """Deleting is permanent for that id.
+
+    Not "newest write wins": the device that still has the chat open writes
+    LATER than the delete by definition, so letting the newer write win is
+    exactly the bug -- the chat comes back, and keeps coming back after every
+    turn. Chat ids are uuids and never reused, so nothing legitimate is lost.
+    """
+    return any(t.get("id") == chat_id for t in gone)
+
+
+def _prune_tombstones(gone: list, now: int | None = None) -> list:
+    cutoff = (now if now is not None else _now_ms()) - TOMBSTONE_TTL_MS
+    return [t for t in gone if int(t.get("at") or 0) >= cutoff]
+
+
 class LockedElsewhere(SyncError):
     """Another device holds a live lock on this chat right now."""
 
@@ -281,14 +316,18 @@ class SyncStore:
     def _read_index(self) -> tuple[dict, str | None]:
         obj, sha = _read_json(self.repo, "index.json")
         if not obj:
-            return {"v": 1, "chats": []}, None
+            return {"v": 1, "chats": [], "deleted": []}, None
         try:
-            return aes_decrypt(obj, self.key), sha
+            data = aes_decrypt(obj, self.key)
+            data.setdefault("deleted", [])   # indexes written before tombstones
+            return data, sha
         except SyncError:
-            return {"v": 1, "chats": []}, sha
+            return {"v": 1, "chats": [], "deleted": []}, sha
 
-    def _write_index(self, chats: list, sha: str | None) -> None:
-        blob = aes_encrypt({"v": 1, "chats": chats}, self.key)
+    def _write_index(self, chats: list, sha: str | None,
+                     deleted: list | None = None) -> None:
+        payload = {"v": 1, "chats": chats, "deleted": list(deleted or [])}
+        blob = aes_encrypt(payload, self.key)
         self.repo.put_file("index.json", json.dumps(blob), "Update session index", sha)
 
     def _file_sha(self, path: str) -> str | None:
@@ -298,7 +337,9 @@ class SyncStore:
     def list(self) -> list[dict]:
         """Newest-first chat summaries (id, title, updated, preview)."""
         data, _ = self._read_index()
-        chats = list(data.get("chats") or [])
+        gone = _tombstones(data)
+        chats = [c for c in (data.get("chats") or [])
+                 if not _is_deleted(gone, c.get("id"))]
         chats.sort(key=lambda c: c.get("updated") or 0, reverse=True)
         return chats
 
@@ -314,6 +355,13 @@ class SyncStore:
         if not chat.get("id"):
             raise SyncError("chat needs an id")
         chat["updated"] = int(time.time() * 1000)
+        # Another device may have deleted this chat while we still had it open.
+        # Saving would quietly bring it back -- and it would keep coming back,
+        # since every later turn re-uploads it. A delete has to outrank a write
+        # that started before it.
+        idx, _ = self._read_index()
+        if _is_deleted(_tombstones(idx), chat["id"]):
+            raise ChatDeletedElsewhere(chat["id"])
         path = f"chats/{chat['id']}.json"
         blob = aes_encrypt(chat, self.key)
         self.repo.put_file(path, json.dumps(blob),
@@ -324,7 +372,7 @@ class SyncStore:
                       "updated": chat["updated"], "preview": chat.get("preview") or "",
                       "project": chat.get("project") or "",
                       "device": chat.get("device") or ""})
-        self._write_index(chats, sha)
+        self._write_index(chats, sha, _tombstones(data))
         return chat["updated"]
 
     def remove(self, chat_id: str) -> None:
@@ -333,8 +381,11 @@ class SyncStore:
         if sha:
             self.repo.delete_file(path, f"Delete session {chat_id}", sha)
         data, isha = self._read_index()
+        gone = [t for t in _tombstones(data) if t.get("id") != chat_id]
+        gone.append({"id": chat_id, "at": _now_ms()})
         self._write_index([c for c in (data.get("chats") or [])
-                           if c.get("id") != chat_id], isha)
+                           if c.get("id") != chat_id], isha,
+                          _prune_tombstones(gone))
 
     # ------------------------------------------------------------- locking --
     def _lock_path(self, chat_id: str) -> str:

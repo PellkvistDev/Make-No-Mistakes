@@ -1153,3 +1153,57 @@ test("pending note: stale ones are cleared like the other per-open notes", () =>
   const out = C.applyHandoff(msgs, "desktop", "phone");
   assert.ok(!out.some((m) => String(m.content).startsWith("[from-your-phone]")));
 });
+
+// ------------------------------------------------------------ tombstones --
+// Deleting used to be an absence, and absence loses to a write: the other
+// device still had the chat open, saved it on its next turn, and brought it
+// back — every time.
+
+test("delete: records a tombstone", async () => {
+  const { gh } = fakeSyncGh(null);
+  const { store } = await C.openSync(gh, "delete pass here");
+  await store.save({ id: "c1", title: "Doomed", messages: [] });
+  await store.remove("c1");
+  assert.deepEqual(await store.list(), []);
+});
+
+test("delete: the other device cannot resurrect a deleted chat", async () => {
+  // The exact reported bug: delete on one device, the other still has it open
+  // and sends one more message, and it comes back.
+  const { gh } = fakeSyncGh(null);
+  const { store } = await C.openSync(gh, "delete pass here");
+  await store.save({ id: "c1", title: "Doomed", messages: [] });
+  await store.remove("c1");
+  await assert.rejects(
+    () => store.save({ id: "c1", title: "Doomed", messages: [{ role: "user", content: "hi" }] }),
+    (e) => { assert.equal(e.chatDeleted, true); assert.match(e.message, /deleted on another device/); return true; });
+  assert.deepEqual(await store.list(), []);
+});
+
+test("delete: other chats are unaffected", async () => {
+  const { gh } = fakeSyncGh(null);
+  const { store } = await C.openSync(gh, "delete pass here");
+  await store.save({ id: "keep", title: "Keep", messages: [] });
+  await store.save({ id: "drop", title: "Drop", messages: [] });
+  await store.remove("drop");
+  assert.deepEqual((await store.list()).map((c) => c.id), ["keep"]);
+});
+
+test("delete: saving another chat preserves the tombstones", async () => {
+  // save() rewrites the index too — it must not wipe the deletions.
+  const { gh } = fakeSyncGh(null);
+  const { store } = await C.openSync(gh, "delete pass here");
+  await store.save({ id: "gone", title: "Gone", messages: [] });
+  await store.remove("gone");
+  await store.save({ id: "other", title: "Other", messages: [] });
+  await assert.rejects(() => store.save({ id: "gone", title: "Gone", messages: [] }),
+                       /deleted on another device/);
+});
+
+test("delete: an index written before tombstones still loads", async () => {
+  const { gh } = fakeSyncGh(null);
+  const { key, store } = await C.openSync(gh, "delete pass here");
+  const blob = await C.aesEncrypt({ v: 1, chats: [{ id: "c1", updated: 1 }] }, key);
+  await gh.putFile("index.json", JSON.stringify(blob), "old-style index");
+  assert.deepEqual((await store.list()).map((c) => c.id), ["c1"]);
+});
