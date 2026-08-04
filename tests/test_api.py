@@ -91,7 +91,13 @@ def test_non_retryable_fails_immediately(recorded_sleeps):
 
 
 def test_rate_limiter_spaces_out_concurrent_threads():
-    limiter = RateLimiter(min_interval=0.05)
+    # 0.2s, not 0.05s. Windows' clock ticks roughly every 15.6ms, so at 50ms
+    # spacing a perfectly correct limiter can *measure* gaps as short as ~31ms
+    # and fail a tight per-gap assertion -- which it did in CI, with every
+    # observed gap landing on a multiple of the tick. Measuring at 4x the
+    # granularity turns that quantisation back into noise instead of signal.
+    interval = 0.2
+    limiter = RateLimiter(min_interval=interval)
     stamps = []
     lock = threading.Lock()
 
@@ -107,9 +113,14 @@ def test_rate_limiter_spaces_out_concurrent_threads():
         t.join()
     stamps.sort()
     gaps = [b - a for a, b in zip(stamps, stamps[1:])]
-    # Every consecutive pair must be spaced by ~min_interval (small slack for
-    # scheduler wobble).
-    assert all(g >= 0.04 for g in gaps), gaps
+    # The property that actually matters: four calls cannot be squeezed into
+    # less than three intervals' worth of wall clock. Totals are the robust
+    # measurement here -- per-gap quantisation errors average out across the
+    # span rather than compounding.
+    assert stamps[-1] - stamps[0] >= interval * 3 * 0.8, stamps
+    # And no two were allowed to bunch up, which a limiter that slept once and
+    # then released everything at once would show.
+    assert all(g >= interval * 0.6 for g in gaps), gaps
 
 
 # ---------------------------------------------------------- token counting
