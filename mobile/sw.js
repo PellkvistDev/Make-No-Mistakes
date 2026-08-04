@@ -9,13 +9,16 @@
  * to the model API and GitHub (cross-origin, and/or non-GET) bypass the SW
  * entirely and are never stored.
  */
-const CACHE = "mnm-shell-v3";
+const CACHE = "mnm-shell-v4";   // bumped: adds vendor/jsQR.js to the shell
 const SHELL = [
   "./index.html",
   "./app.js",
   "./agent-core.js",
   "./style.css",
   "./manifest.webmanifest",
+  // Precached so pairing works on a phone that's offline — which is exactly
+  // when you're setting one up. Only loaded when the scanner actually opens.
+  "./vendor/jsQR.js",
 ];
 
 self.addEventListener("install", (e) => {

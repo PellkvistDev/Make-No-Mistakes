@@ -469,3 +469,41 @@ pre.code, pre.tool-out, .preview {
 .toast[hidden] { display: none; }
 
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+
+/* ---------- pairing scanner ---------- */
+/* Scanning happens inside the app rather than by following a QR link: on iOS a
+   home-screen app has storage separate from the browser, so keys paired in
+   Safari never reach the installed app. */
+.scan-cta {
+  width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px;
+  margin: 2px 0 6px;
+}
+.scan-or {
+  text-align: center; margin: 0 0 4px; opacity: .75;
+}
+.scan-backdrop {
+  position: fixed; inset: 0; z-index: 90; background: #000;
+  display: flex; align-items: center; justify-content: center;
+}
+.scan-backdrop[hidden] { display: none; }
+#scan-video {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; background: #000;
+}
+/* A window onto the middle of the frame, so people know where to aim. */
+.scan-frame {
+  position: relative; width: min(72vw, 320px); aspect-ratio: 1;
+  border: 2px solid rgba(255,255,255,.9); border-radius: 18px;
+  box-shadow: 0 0 0 100vmax rgba(0,0,0,.45);
+}
+.scan-bar {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  padding: 18px 18px calc(18px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  background: linear-gradient(to top, rgba(0,0,0,.75), transparent);
+}
+#scan-status {
+  margin: 0; text-align: center; color: #fff; font-size: 14px;
+  text-shadow: 0 1px 4px rgba(0,0,0,.8); max-width: 30ch;
+}
+.scan-bar .ghost { color: #fff; border-color: rgba(255,255,255,.4); }
