@@ -186,6 +186,7 @@
         repo: session.repo, baseSystem: session.baseSystem,
         chatId: session.chatId || null, chatTitle: session.chatTitle || "",
         messages: stripImages(session.messages || []), transcript: session.transcript || [],
+        pending: session.pending || [],
       }, session.cryptoKey);
       localStorage.setItem(SESSION_KEY, JSON.stringify(blob));
     } catch (e) { /* quota / crypto — skip silently */ }
@@ -204,6 +205,7 @@
     session.chatTitle = data.chatTitle || "";
     session.messages = data.messages;
     session.transcript = data.transcript || [];
+    session.pending = data.pending || [];
     $("chat-repo-name").textContent = r.full_name;
     $("messages").innerHTML = "";
     for (const b of session.transcript) addBubble(b.role, b.text, false);
@@ -292,11 +294,12 @@
     session.images = {};   // name -> data URL, for view_image
     session.compact = null;  // cached summary of trimmed turns, per conversation
     session.toldCompact = false;
+    session.pending = [];    // work parked for the desktop, per conversation
     session.transcript = [];
     const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); haptic(18); };
     // Sub-agent tools have NO spawn (depth 1); the main tools add spawn_agent.
-    session.subTools = AC.makeTools(session.gh, { confirmWrite, onCommit, viewImage });
-    session.tools = AC.makeTools(session.gh, { confirmWrite, onCommit, spawn: runSubAgent, viewImage });
+    session.subTools = AC.makeTools(session.gh, { confirmWrite, onCommit, viewImage, needsDesktop });
+    session.tools = AC.makeTools(session.gh, { confirmWrite, onCommit, spawn: runSubAgent, viewImage, needsDesktop });
     session.readTools = {};
     for (const n of READ_TOOL_NAMES) session.readTools[n] = session.tools[n];
     session.readTools.view_image = session.tools.view_image;   // let planning look at images too
@@ -329,6 +332,7 @@
     session.images = {};
     session.compact = null;
     session.toldCompact = false;
+    session.pending = [];
     clearAttachments();
     $("chat-repo-name").textContent = session.repo.full_name;
     $("messages").innerHTML = "";
@@ -408,6 +412,7 @@
         repo: session.repo,
         project: (session.repo && session.repo.full_name) || "",
         device: "phone",
+        pending: session.pending || [],
         messages: stripImages(session.messages || []),
         transcript: session.transcript || [],
       });
@@ -599,9 +604,11 @@
     session.messages = data.messages;
     session.transcript = data.transcript || [];
     session.syncedAt = data.updated || 0;
+    session.pending = data.pending || [];
     session.images = {};
     session.compact = null;
     session.toldCompact = false;
+    session.pending = [];
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
     // Picking up a chat the desktop was driving: mark the switch, or the model
     // keeps imitating turns that used tools this phone doesn't have.
@@ -1018,12 +1025,31 @@
   // even a vision model can't fetch one from GitHub by itself. (Uploads are the
   // one case a vision model handles directly — they're already in its context.)
   function visionSchemas(base) {
-    return base.concat([AC.VIEW_IMAGE_SCHEMA]);
+    return base.concat([AC.VIEW_IMAGE_SCHEMA, AC.NEEDS_DESKTOP_SCHEMA]);
   }
   // Advertise spawn_agent on the main turn only when sub-agents are enabled.
   function mainSchemas() {
     const base = subagentsOn() ? AC.TOOL_SCHEMAS.concat([AC.SPAWN_SCHEMA]) : AC.TOOL_SCHEMAS;
     return visionSchemas(base);
+  }
+
+  // needs_desktop: park something that needs a real machine. It rides along
+  // with the synced chat and is put in front of the desktop agent when the chat
+  // opens there, so "run the tests when you're back" survives the trip instead
+  // of scrolling away.
+  async function needsDesktop(task, why) {
+    if (!task) return "Nothing recorded — say what needs running.";
+    session.pending = session.pending || [];
+    // Don't stack the same ask twice if the agent repeats itself.
+    if (session.pending.some((p) => p.task.toLowerCase() === task.toLowerCase())) {
+      return "Already on the list for the desktop: " + task;
+    }
+    session.pending.push({ task, why: why || "", created: Date.now() });
+    addBubble("system", "📌 For your desktop: " + task, false);
+    haptic(10);
+    persistSession();
+    return "Noted for the desktop. It'll see this when the chat opens there. " +
+           "Carry on with anything you can do here.";
   }
 
   // Resolve an image that lives in the REPO to a data URL. getFile() decodes as

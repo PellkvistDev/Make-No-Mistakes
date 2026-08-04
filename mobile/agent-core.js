@@ -379,6 +379,23 @@
   //
   // Mirrors glmcode/syncstore.py's handoff_note/apply_handoff word for word.
   const HANDOFF_MARKER = "[device-handoff]";
+  // Work the phone couldn't run, handed to the machine that can. Mirrors
+  // syncstore.pending_note word for word.
+  const PENDING_MARKER = "[from-your-phone]";
+  function pendingNote(items) {
+    const lines = [];
+    (items || []).forEach((it) => {
+      const task = String((it && it.task) || "").trim();
+      if (!task) return;
+      const why = String((it && it.why) || "").trim();
+      lines.push(`${lines.length + 1}. ${task}` + (why ? ` -- ${why}` : ""));
+    });
+    if (!lines.length) return "";
+    return `${PENDING_MARKER} Earlier turns of this chat ran on the phone, which has no shell. ` +
+      `These were left for this machine, which does:\n` + lines.join("\n") +
+      `\nPick them up if they still make sense -- check the code first, since it may have ` +
+      `moved on since. If one no longer applies, say so instead of doing it anyway.`;
+  }
   const DEVICE_FACTS = {
     desktop: "a real machine: you can run commands, tests, servers and a browser here",
     phone: "the phone: there is no shell here, so you cannot run commands, tests or " +
@@ -400,7 +417,8 @@
   const DESKTOP_STATE_MARKER = "[desktop-state]";
   const isStaleNote = (m) => m.role === "system" &&
     (String(m.content || "").startsWith(HANDOFF_MARKER) ||
-     String(m.content || "").startsWith(DESKTOP_STATE_MARKER));
+     String(m.content || "").startsWith(DESKTOP_STATE_MARKER) ||
+     String(m.content || "").startsWith(PENDING_MARKER));
   // Strip any stale marker, then add one if the device changed. Index 0 (the
   // live system prompt) is left alone — the caller owns it.
   function applyHandoff(messages, fromDevice, toDevice) {
@@ -787,6 +805,13 @@
     if (opts.viewImage) {
       api.view_image = async (a) => String(await opts.viewImage(a.name || "", a.question || ""));
     }
+    // Hand work to the machine that can actually run it. Saying "run the tests
+    // later" in prose loses the intent the moment the reply scrolls away; this
+    // travels with the chat and is put in front of the desktop agent on open.
+    if (opts.needsDesktop) {
+      api.needs_desktop = async (a) =>
+        String(await opts.needsDesktop(String(a.task || "").trim(), String(a.why || "").trim()));
+    }
     return api;
   }
 
@@ -811,6 +836,19 @@
     "(e.g. 'add tests for X', 'refactor Y'). It can read and edit files but cannot spawn further sub-agents. " +
     "Use it to keep big tasks organised; do the work yourself for small ones.",
     { task: str("The self-contained task for the sub-agent"), context: str("Anything it should know: constraints, files, goals") },
+    ["task"]);
+
+  // The phone has no shell, so anything needing one has to travel to the
+  // desktop. Recording it beats mentioning it: a line of prose is lost as soon
+  // as the reply scrolls away, but this is put in front of the desktop agent
+  // the moment the chat opens there.
+  const NEEDS_DESKTOP_SCHEMA = tool("needs_desktop",
+    "Leave a task for the user's desktop, which has a shell. Use it whenever something needs to be " +
+    "RUN or VERIFIED on a real machine — tests, a build, a server, a command — since you cannot do " +
+    "any of that here. Record it as you go rather than only mentioning it in your reply; the desktop " +
+    "is shown these the moment this chat opens there. One call per task.",
+    { task: str("What to run or verify, concretely (e.g. 'run pytest tests/test_sync.py')"),
+      why: str("Why it matters (optional) — e.g. what it would confirm") },
     ["task"]);
 
   // Vision. Routes an image through the vision model for a writeup, so a text
@@ -905,6 +943,7 @@
     encryptVault, decryptVault, deriveKey, PBKDF2_ITERS,
     aesEncrypt, aesDecrypt, exportRawKey, importRawKey,
     makeGitHub, makeModel, makeTools, runAgent, TOOL_SCHEMAS, SPAWN_SCHEMA, VIEW_IMAGE_SCHEMA,
+    NEEDS_DESKTOP_SCHEMA, pendingNote, PENDING_MARKER,
     SYSTEM_PROMPT, SUBAGENT_PROMPT,
     openSync, makeSyncStore, ensureSyncRepo,
     SYNC_REPO_NAME, SYNC_REPO_BRANCH, STATE_BRANCH,
