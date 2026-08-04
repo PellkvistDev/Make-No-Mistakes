@@ -1472,3 +1472,32 @@ def test_an_index_written_before_tombstones_still_loads(fake_codec):
     fake.files["index.json"] = json.dumps(
         syncstore.aes_encrypt({"v": 1, "chats": [{"id": "c1", "updated": 1}]}, store.key))
     assert [c["id"] for c in store.list()] == ["c1"]
+
+
+# ------------------------------------------------- which repo a chat is about
+# Reported: a desktop chat opened on the phone answered, ran tools, and got
+# relabelled to an unrelated GitHub repo. Desktop chats carried no repo at all,
+# so the phone fell back to whichever one it had open last -- and then wrote
+# that back to the shared store.
+
+def test_a_desktop_chat_publishes_the_repo_it_is_about():
+    chat = syncstore.session_to_chat(
+        {"id": "c1", "messages": [], "cwd": "/home/me/proj"},
+        repo={"owner": "me", "repo": "proj", "full_name": "me/proj", "branch": "main"})
+    assert chat["repo"]["full_name"] == "me/proj"
+
+
+def test_a_chat_with_no_github_remote_says_so_rather_than_guessing():
+    """None, not a guess. The phone refuses on None; anything invented here
+    would be a repo the agent then edits."""
+    chat = syncstore.session_to_chat({"id": "c1", "messages": [], "cwd": "/home/me/notes"})
+    assert chat["repo"] is None
+
+
+def test_the_repo_survives_the_round_trip_to_the_phone_and_back():
+    chat = syncstore.session_to_chat(
+        {"id": "c1", "messages": [{"role": "user", "content": "hi"}], "cwd": "/p"},
+        repo={"owner": "me", "repo": "proj", "full_name": "me/proj", "branch": "dev"})
+    sess = syncstore.chat_to_session(chat)
+    assert sess["id"] == "c1"
+    assert chat["repo"]["branch"] == "dev"

@@ -100,6 +100,31 @@ def clean_remote_url(host: str, owner: str, repo: str) -> str:
     return f"https://{host}/{owner}/{repo}.git"
 
 
+def repo_from_remote(url: str) -> tuple[str, str] | None:
+    """(owner, repo) for a GitHub origin URL, or None if it isn't one.
+
+    Used to tell the phone which repository a desktop chat is actually about.
+    Without it the chat arrives with no repo at all, and the phone has nothing
+    to check the conversation against.
+
+    Handles the three shapes an origin realistically takes: https, ssh, and
+    https carrying an embedded credential. A non-GitHub host returns None on
+    purpose -- guessing would be worse than admitting we don't know.
+    """
+    u = (url or "").strip()
+    if not u:
+        return None
+    m = re.match(r"^(?:https?://)?(?:[^@/]*@)?([^/:]+)[/:]([^/]+)/(.+?)(?:\.git)?/?$", u)
+    if not m:
+        return None
+    host, owner, repo = m.group(1), m.group(2), m.group(3)
+    if host.lower() not in ("github.com", "www.github.com"):
+        return None
+    if not owner or not repo or "/" in repo:
+        return None
+    return owner, repo
+
+
 def target_dir(clone_root: Path, owner: str, repo: str) -> Path:
     """A collision-safe destination under clone_root. Prefers <repo>, then
     <owner>-<repo>, then numbered suffixes -- and never escapes clone_root."""
