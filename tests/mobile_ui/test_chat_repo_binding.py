@@ -55,21 +55,26 @@ def open_chat_named(phone, title):
     phone.page.wait_for_timeout(600)
 
 
-def test_a_chat_without_a_repo_is_refused_not_adopted(phone):
-    """The reported bug. The phone had you/app open; the desktop chat is about
-    a local folder with no GitHub repo at all."""
+def test_a_chat_without_a_repo_is_never_bound_to_the_phones_own(phone):
+    """The reported bug. The phone had you/app open; the desktop chat is about a
+    local folder with no GitHub repo at all.
+
+    It may open -- reading it is the point of syncing it -- but it must not
+    become a working chat against you/app. The header naming the project rather
+    than a repo, and the composer being a note box rather than a prompt, are how
+    that is visible: there is no route from here to the agent.
+    """
     phone.setup()                       # leaves you/app connected
     seed_foreign_chat(phone, DESKTOP_CHAT)
     open_chat_named(phone, "Local notes chat")
 
     state = phone.page.evaluate("""() => ({
-      onChatScreen: !document.getElementById('screen-chat').hidden,
-      error: document.getElementById('chats-error').textContent,
+      readOnly: document.getElementById('screen-chat').classList.contains('read-only'),
+      header: document.getElementById('chat-repo-name').textContent,
     })""")
-    assert not state["onChatScreen"], \
-        "the chat opened against whichever repo the phone had open"
-    assert "repository" in state["error"].lower(), \
-        f"refused, but without saying why: {state['error']!r}"
+    assert state["readOnly"], "the chat opened as a working chat"
+    assert state["header"] != "you/app", \
+        "the chat was bound to whichever repo the phone had open"
     assert phone.errors == []
 
 
@@ -179,4 +184,102 @@ def test_the_marker_survives_a_title_too_long_to_fit(phone):
       return t.width > 0 && t.right <= r.right + 1 && t.left >= r.left - 1;
     }""")
     assert visible, "the marker was clipped off the row"
+    assert phone.errors == []
+
+
+# ------------------------------------------------------------- read-only --
+# Marking a chat you can't use is only half an answer: a labelled dead end is
+# still a dead end. These chats sync, so they should at least be readable, and
+# the one useful thing you can do without a repo is leave work for the machine
+# that has one.
+
+def test_a_local_only_chat_opens_for_reading(phone):
+    phone.setup()
+    seed_foreign_chat(phone, dict(DESKTOP_CHAT, transcript=[
+        {"role": "user", "text": "what did we settle on for the schema?"},
+        {"role": "assistant", "text": "One table, keyed by run id."}]))
+    open_chat_named(phone, "Local notes chat")
+
+    state = phone.page.evaluate("""() => ({
+      onChatScreen: !document.getElementById('screen-chat').hidden,
+      readOnly: document.getElementById('screen-chat').classList.contains('read-only'),
+      bubbles: [...document.querySelectorAll('.bubble')].map((b) => b.textContent),
+      placeholder: document.getElementById('in-prompt').placeholder,
+      attachHidden: document.getElementById('btn-attach').hidden,
+    })""")
+    assert state["onChatScreen"], "a chat that syncs should at least be readable"
+    assert state["readOnly"]
+    assert any("keyed by run id" in b for b in state["bubbles"]), "the transcript isn't shown"
+    assert "note for your computer" in state["placeholder"]
+    assert state["attachHidden"], "nothing can be attached without a repo"
+    assert phone.errors == []
+
+
+def test_a_note_left_here_waits_on_the_computer(phone):
+    """The composer is repurposed, not disabled: what you send becomes a task in
+    the same queue needs_desktop writes, so the desktop surfaces it on open."""
+    phone.setup()
+    seed_foreign_chat(phone, DESKTOP_CHAT)
+    open_chat_named(phone, "Local notes chat")
+
+    phone.page.fill("#in-prompt", "run the migration script")
+    phone.page.click("#btn-send")
+    phone.page.wait_for_function(
+        """() => [...document.querySelectorAll('.bubble')]
+             .some((b) => b.textContent.includes('run the migration script'))""",
+        timeout=15000)
+    phone.page.wait_for_timeout(400)
+
+    stored = next(c for c in phone.stored_chats() if c["id"] == "from-desktop")
+    assert [p["task"] for p in stored["pending"]] == ["run the migration script"]
+    # Only `pending` was ours to touch.
+    assert stored["device"] == "desktop", "leaving a note claimed the chat for the phone"
+    assert stored["project"] == "notes", "leaving a note relabelled the chat"
+    assert stored["desktop"]["cwd"] == "/home/me/notes"
+    assert phone.errors == []
+
+
+def test_reading_a_local_chat_does_not_disturb_the_working_one(phone):
+    """Read-only leaves session.repo alone, so the guards that key off it don't
+    fire. Going back to a real chat has to still work."""
+    phone.setup()
+    seed_foreign_chat(phone, DESKTOP_CHAT)
+    seed_foreign_chat(phone, dict(
+        DESKTOP_CHAT, id="with-repo", title="Repo chat",
+        repo={"owner": "you", "repo": "app", "full_name": "you/app", "branch": "main"}))
+    open_chat_named(phone, "Local notes chat")
+    open_chat_named(phone, "Repo chat")
+
+    state = phone.page.evaluate("""() => ({
+      readOnly: document.getElementById('screen-chat').classList.contains('read-only'),
+      placeholder: document.getElementById('in-prompt').placeholder,
+      attachHidden: document.getElementById('btn-attach').hidden,
+      repoName: document.getElementById('chat-repo-name').textContent,
+    })""")
+    assert not state["readOnly"], "read-only chrome stuck on a working chat"
+    assert state["placeholder"] == "Message the agent…"
+    assert not state["attachHidden"]
+    assert state["repoName"] == "you/app"
+
+    phone.reply({"role": "assistant", "content": "still working"})
+    phone.send("are you there")
+    phone.wait_idle()
+    assert any("still working" in b for b in phone.page.eval_on_selector_all(
+        ".bubble.assistant", "els => els.map(e => e.textContent)"))
+    assert phone.errors == []
+
+
+def test_a_read_only_chat_offers_no_edit_or_retry(phone):
+    """Caught by rendering it, not by an assertion: the tail actions were on
+    the bubbles. There is no agent behind a read-only chat and its message list
+    is empty, so both buttons lead nowhere."""
+    phone.setup()
+    seed_foreign_chat(phone, dict(DESKTOP_CHAT, transcript=[
+        {"role": "user", "text": "where did we put it?"},
+        {"role": "assistant", "text": "under receipts/2026"}]))
+    open_chat_named(phone, "Local notes chat")
+
+    actions = phone.page.eval_on_selector_all(
+        ".tail-action", "els => els.map(e => e.textContent)")
+    assert actions == [], f"read-only chat offered dead actions: {actions}"
     assert phone.errors == []
