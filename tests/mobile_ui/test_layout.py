@@ -189,6 +189,59 @@ def test_a_gradient_preset_actually_applies(phone, app_url):
     assert phone.errors == []
 
 
+# iPhone 14 Pro, the device the reports came from.
+IPHONE_T, IPHONE_B = 59, 34
+
+
+def simulate_insets(phone, top=IPHONE_T, bottom=IPHONE_B):
+    """Give the headless browser a phone's safe areas.
+
+    env() is always 0 here, which is why every inset-dependent bug in this file
+    was found by screenshot rather than by test. The stylesheet reads the insets
+    through --safe-t/--safe-b precisely so this is possible.
+    """
+    phone.page.evaluate("""([t, b]) => {
+      const r = document.documentElement.style;
+      r.setProperty('--safe-t', t + 'px');
+      r.setProperty('--safe-b', b + 'px');
+    }""", [top, bottom])
+    phone.page.wait_for_timeout(80)
+
+
+def test_the_composer_scrim_reaches_the_bottom_edge(phone):
+    """The reported band. The scrim is darkest at its bottom, so cutting it off
+    above the home indicator left a hard line with brighter wallpaper below --
+    measured at ~33 CSS px tall in the screenshot, i.e. the bottom inset."""
+    phone.setup()
+    simulate_insets(phone)
+    gap = phone.page.evaluate("""() => {
+      const dock = document.getElementById('composer-dock');
+      const cs = getComputedStyle(dock, '::before');
+      return { scrimBottom: cs.bottom, dockPad: getComputedStyle(dock).paddingBottom };
+    }""")
+    assert gap["scrimBottom"] in ("0px", "auto"), (
+        f"the scrim stops short of the dock's bottom edge, which is the band: {gap}")
+    # The dock still keeps clear of the home indicator; only the scrim changed.
+    assert gap["dockPad"] == f"{IPHONE_B}px", f"the dock lost its home-indicator inset: {gap}"
+    assert phone.errors == []
+
+
+def test_the_insets_are_readable_from_one_place(phone):
+    """Guard for the indirection itself: if a later edit goes back to calling
+    env() at the use site, this simulation silently stops working and every
+    test built on it turns green for the wrong reason."""
+    phone.setup()
+    simulate_insets(phone, top=41, bottom=21)
+    seen = phone.page.evaluate("""() => {
+      const dock = document.getElementById('composer-dock');
+      return { pad: getComputedStyle(dock).paddingBottom,
+               htmlMin: getComputedStyle(document.documentElement).minHeight };
+    }""")
+    assert seen["pad"] == "21px", f"--safe-b is not reaching the dock: {seen}"
+    assert seen["htmlMin"] != "0px", f"--safe-t is not reaching <html>: {seen}"
+    assert phone.errors == []
+
+
 def test_the_dock_lifts_over_the_keyboard(phone):
     """--kb is what replaces the browser's own shoving, now that the document
     is pinned. No headless keyboard exists, so drive the variable directly and
