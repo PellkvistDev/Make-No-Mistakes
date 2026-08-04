@@ -69,22 +69,26 @@ button { cursor: pointer; border: none; background: none; }
    so make hidden win explicitly — otherwise send + stop both show. */
 [hidden] { display: none !important; }
 
-/* The wallpaper: fills the viewport, sits behind the app, and is never dimmed.
-   It extends BELOW the layout viewport by the top inset so that its box is the
-   same height as <html>'s. That matters more than it looks: applyBg() paints
-   the same image on both this layer and the root, and the root's copy is what
-   reaches the strip of screen below the shifted viewport in an installed iOS
-   PWA. `cover` scales to the box it is painting into, so two boxes of
-   different heights scale the same image differently and meet in a visible
-   line — which is the "gradient ends above the bottom of the screen" seam.
-   Same box height, same scale, no seam; and if fixed layers do reach down
-   there, this covers it outright. Elsewhere the inset is 0 and this is a
-   no-op. */
+/* The wallpaper is painted by exactly ONE thing: the root canvas.
+   This layer stays for the plain-colour default and as a positioned slot, but
+   applyBg() deliberately leaves it empty whenever there is a wallpaper.
+   Why one painter: in an installed iOS PWA with a black-translucent status bar
+   the layout viewport is shorter than the screen, and a position:fixed element
+   cannot paint the strip of glass below it — pushing this layer's bottom past
+   the viewport was tried and did nothing. Only the canvas reaches down there.
+   So the canvas has to paint the strip, and if anything else painted the same
+   image over the viewport as well, the two boxes would scale `cover`
+   differently and meet in a visible line. That line was the "gradient ends
+   above the bottom of the screen" seam. One painter, one box, no seam that
+   two numbers have to be kept in agreement to avoid. */
 #bg-layer {
-  position: fixed; left: 0; right: 0; top: 0; z-index: 0; pointer-events: none;
-  bottom: calc(-1 * env(safe-area-inset-top));
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
   background-size: cover; background-position: center;
 }
+/* With a wallpaper up, body must not paint over the canvas — it is pinned to
+   the viewport, so its opaque --bg would hide the canvas everywhere except the
+   strip, which is precisely the two-painter split described above. */
+body.has-bg { background: transparent; }
 
 /* A reusable glass helper. */
 .glass, .dialog, .toast,

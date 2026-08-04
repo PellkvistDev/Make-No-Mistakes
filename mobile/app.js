@@ -1723,25 +1723,44 @@
     if (bg.type === "color") { const L = hexLuminance(bg.value); return L != null && L > 0.6; } // gradients (not hex) are dark presets
     return false;
   }
+  // The wallpaper goes on <html> ONLY, never on #bg-layer as well.
+  //
+  // <html>'s background propagates to the root canvas, which is the one
+  // surface that reaches the strip of screen below the layout viewport in an
+  // installed iOS PWA — a position:fixed layer cannot, which was tried. If
+  // #bg-layer painted the same image too, it would scale `cover` to its own
+  // (viewport-sized) box while the canvas scaled to <html>'s taller box, and
+  // the two would meet in a visible line just above the bottom of the screen.
+  // That line was the reported "gradient offset". One painter, no seam.
   function applyBg(bg) {
     const layer = $("bg-layer");
-    const root = document.documentElement;   // also paint <html> so the bottom
-                                             // safe-area strip matches (not #0b0d10)
+    const root = document.documentElement;
     layer.classList.remove("image");
     document.body.classList.toggle("light-bg", bgIsLight(bg));
-    const set = (el, css, img) => { el.style.background = css; el.style.backgroundImage = img || ""; };
+    // Assigning the `background` shorthand already resets background-image, so
+    // there is nothing to clear afterwards — and clearing it unconditionally
+    // wiped out the gradient the shorthand had just set, which is why the
+    // gradient presets came out blank while photo wallpapers worked.
+    const set = (el, css, img) => {
+      el.style.background = css;
+      if (img) el.style.backgroundImage = img;
+    };
+    set(layer, "");                       // never paints while a wallpaper is up
     if (!bg || bg.type === "default") {
       document.body.classList.remove("has-bg");
-      set(layer, ""); set(root, "");
+      set(root, "");
       return;
     }
+    // body.has-bg turns body transparent so the canvas shows through it; while
+    // body still had an opaque background it covered the canvas over the whole
+    // viewport, leaving the canvas visible only in the strip. That split is
+    // exactly what produced two differently-scaled copies of the image.
     document.body.classList.add("has-bg");
     if (bg.type === "image") {
       layer.classList.add("image");
-      set(layer, "#0b0d10 center/cover no-repeat", 'url("' + bg.value + '")');
       set(root, "#0b0d10 center/cover no-repeat", 'url("' + bg.value + '")');
     } else {
-      set(layer, bg.value); set(root, bg.value);
+      set(root, bg.value);
     }
   }
   function sameBg(a, b) {
