@@ -50,6 +50,15 @@
         <h1 class="brand">Make&nbsp;No&nbsp;Mistakes</h1>
         <p class="sub">Set up your phone workspace. Your keys are encrypted on this device with a PIN and never sent anywhere but the two services below.</p>
 
+        <!-- Scanning happens HERE, inside the app, on purpose. Following a
+             QR link opens the browser instead, and on iOS a home-screen app
+             has its own storage — so anything paired in the browser never
+             reaches the installed app. -->
+        <button id="btn-scan-setup" class="primary scan-cta" type="button">
+          <span aria-hidden="true">⌁</span> Scan the code on my computer
+        </button>
+        <p class="hint scan-or">or fill it in yourself</p>
+
         <label class="field">
           <span>z.ai / model API key</span>
           <input id="in-model-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="paste your model key" />
@@ -195,6 +204,16 @@
         </form>
       </div>
     </section>
+
+    <!-- ===================== PAIRING SCANNER ===================== -->
+    <div id="scan-backdrop" class="scan-backdrop" hidden>
+      <video id="scan-video" playsinline muted autoplay></video>
+      <div class="scan-frame" aria-hidden="true"></div>
+      <div class="scan-bar">
+        <p id="scan-status">Point at the QR code on your computer.</p>
+        <button id="scan-cancel" class="ghost" type="button">Cancel</button>
+      </div>
+    </div>
 
     <!-- ===================== WRITE CONFIRM DIALOG ===================== -->
     <div id="confirm-backdrop" class="backdrop" hidden>

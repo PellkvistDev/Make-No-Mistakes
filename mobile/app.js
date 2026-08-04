@@ -1782,16 +1782,18 @@
   // bar. The pairing code is NOT in the link; it's the six characters shown on
   // the computer, which is what makes a captured QR useless on its own.
   let pendingSyncPass = "";
-  async function consumePairLink() {
-    const m = /[#&]pair=([A-Za-z0-9_-]+)/.exec(location.hash || "");
-    if (!m) return;
-    const token = m[1];
-    history.replaceState(null, "", location.pathname + location.search);
+
+  // Ask for the code and fill the setup form in. Shared by both ways a token
+  // can arrive: scanned in-app (the good path) or carried in the URL.
+  async function applyPairToken(token) {
     for (;;) {
-      const code = prompt(
+      // window.prompt explicitly: `prompt` is the composer textarea in this
+      // scope (const prompt = $("in-prompt")), so a bare call reaches a DOM
+      // element and throws — which broke pairing entirely, by both routes.
+      const code = window.prompt(
         "Setting up from your computer.\n\n" +
         "Type the 6-character pairing code shown next to the QR code.");
-      if (code === null) { toast("Set-up cancelled — you can still type your keys in."); return; }
+      if (code === null) { toast("Set-up cancelled — you can still type your keys in."); return false; }
       try {
         const data = await AC.openPairToken(token, code);
         if (data.modelKey) $("in-model-key").value = data.modelKey;
@@ -1804,16 +1806,149 @@
         // Sync needs the vault key, which doesn't exist until a PIN is set —
         // so hold it and turn sync on once the vault is unlocked.
         pendingSyncPass = data.syncPass || "";
+        haptic(14);
         toast(pendingSyncPass
           ? "Keys filled in from your computer. Pick a PIN and your chats will sync too."
           : "Keys filled in from your computer. Now pick a PIN.");
-        return;
+        return true;
       } catch (e) {
         // Wrong or stale code: say which, and let them try again.
-        if (!confirm((e && e.message ? e.message : e) + "\n\nTry again?")) return;
+        if (!confirm((e && e.message ? e.message : e) + "\n\nTry again?")) return false;
       }
     }
   }
+
+  // A token can also arrive in the URL, from following the QR link in a
+  // browser. That works, but on iOS a home-screen app has its own storage, so
+  // anything paired that way stays in the browser and never reaches the
+  // installed app — which is why the in-app scanner exists and is offered first.
+  async function consumePairLink() {
+    const m = /[#&]pair=([A-Za-z0-9_-]+)/.exec(location.hash || "");
+    if (!m) return;
+    const token = m[1];
+    // Out of the URL before anything else, so it can't linger in history or a
+    // bookmark. Keeping it would also mean re-pairing on every launch.
+    history.replaceState(null, "", location.pathname + location.search);
+    if (loadVault()) {
+      // Previously this did nothing at all here, so scanning just showed the
+      // PIN prompt with no explanation. Ask instead of silently ignoring.
+      if (!confirm("This device already has keys set up.\n\n" +
+                   "Replace them with the ones from your computer?")) return;
+      clearVault(); clearSession(); localStorage.removeItem(KEEPKEY_KEY);
+      show("screen-setup");
+    }
+    await applyPairToken(token);
+  }
+
+  // ---- in-app scanner ----
+  // Uses the platform decoder when there is one (Chrome/Android) and falls back
+  // to a bundled decoder, because Safari has no BarcodeDetector — and iOS is
+  // exactly where scanning in-app matters most.
+  let scanStop = null;
+  let jsQRLoading = null;
+  function loadJsQR() {
+    if (window.jsQR) return Promise.resolve(window.jsQR);
+    if (jsQRLoading) return jsQRLoading;
+    jsQRLoading = new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = "vendor/jsQR.js";           // same-origin, so CSP script-src 'self' allows it
+      s.onload = () => res(window.jsQR);
+      s.onerror = () => rej(new Error("Couldn't load the QR decoder."));
+      document.head.appendChild(s);
+    });
+    return jsQRLoading;
+  }
+
+  async function startScan() {
+    const back = $("scan-backdrop"), video = $("scan-video"), status = $("scan-status");
+    status.textContent = "Starting the camera…";
+    back.hidden = false;
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: "environment" } }, audio: false });
+    } catch (e) {
+      back.hidden = true;
+      toast(e && e.name === "NotAllowedError"
+        ? "Camera access was denied — allow it, or type your keys in below."
+        : "No camera available here — type your keys in below.");
+      return;
+    }
+    video.srcObject = stream;
+    try { await video.play(); } catch (e) { /* autoplay attr covers most cases */ }
+
+    let detector = null;
+    try {
+      if (window.BarcodeDetector) detector = new BarcodeDetector({ formats: ["qr_code"] });
+    } catch (e) { detector = null; }
+    let decode = null;
+    if (!detector) {
+      status.textContent = "Getting ready…";
+      try { await loadJsQR(); } catch (e) { stop(); toast(e.message); return; }
+    }
+    status.textContent = "Point at the QR code on your computer.";
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    let raf = 0, busy = false, done = false;
+
+    function stop() {
+      done = true;
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      try { stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+      video.srcObject = null;
+      back.hidden = true;
+      scanStop = null;
+    }
+    scanStop = stop;
+
+    async function frame() {
+      raf = 0;
+      if (done) return;
+      if (!busy && video.videoWidth) {
+        busy = true;
+        try {
+          // Cap the working size: a 4K frame costs far more to scan than it
+          // adds in detail, and the phone has to do this every frame.
+          const scale = Math.min(1, 720 / video.videoWidth);
+          canvas.width = Math.round(video.videoWidth * scale);
+          canvas.height = Math.round(video.videoHeight * scale);
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          let text = "";
+          // ONLY the decode is allowed to fail quietly — an unreadable frame is
+          // completely normal. Everything after it is real work, and swallowing
+          // an error there would leave the scanner dead with nothing said.
+          try {
+            if (detector) {
+              const hits = await detector.detect(canvas);
+              text = hits && hits.length ? hits[0].rawValue : "";
+            } else {
+              const d = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              const r = window.jsQR(d.data, d.width, d.height);
+              text = r ? r.data : "";
+            }
+          } catch (e) { text = ""; }
+          if (text) {
+            const m = /[#&]pair=([A-Za-z0-9_-]+)/.exec(text);
+            if (m) { stop(); haptic(20); await applyPairToken(m[1]); return; }
+            // A QR that isn't ours: say so rather than looking broken.
+            status.textContent = "That's a QR code, but not a set-up code from your computer.";
+          }
+        } catch (e) {
+          stop();
+          toast("Set-up failed: " + (e && e.message ? e.message : e));
+          return;
+        }
+        busy = false;
+      }
+      if (!done) raf = requestAnimationFrame(frame);
+    }
+    raf = requestAnimationFrame(frame);
+  }
+
+  $("btn-scan-setup").addEventListener("click", startScan);
+  $("scan-cancel").addEventListener("click", () => { if (scanStop) scanStop(); });
 
   // ================================================================ BOOT
   async function boot() {
@@ -1832,10 +1967,8 @@
       } catch { localStorage.removeItem(KEEPKEY_KEY); }
     }
     if (blob) show("screen-unlock"); else show("screen-setup");
-    // After the screen is up, so the prefilled fields are visible behind the
-    // code prompt. Only meaningful on a fresh set-up; an existing vault keeps
-    // the keys it already has rather than being silently overwritten.
-    if (!blob) await consumePairLink();
+    // After the screen is up, so prefilled fields are visible behind the prompt.
+    await consumePairLink();
   }
   boot();
 })();
