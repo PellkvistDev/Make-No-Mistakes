@@ -74,6 +74,28 @@
   }
   window.addEventListener("scroll", pinDocument, { passive: true });
 
+  // Correcting the scroll is a frame too late — you see the lurch and the snap
+  // back. So remove the thing being scrolled first: focusin fires before the
+  // keyboard animates in, and html.kb-open drops the spare inset of height that
+  // is the only scrollable slack there is. The listener above stays as a
+  // backstop for anything that scrolls the document by another route.
+  const TYPES = /^(input|textarea|select)$/i;
+  document.addEventListener("focusin", (e) => {
+    if (e.target && TYPES.test(e.target.tagName)) {
+      document.documentElement.classList.add("kb-open");
+      pinDocument();
+    }
+  });
+  document.addEventListener("focusout", (e) => {
+    if (!e.target || !TYPES.test(e.target.tagName)) return;
+    // Only once nothing else has taken focus, or moving between two fields
+    // would put the height back for a frame — the same flash, in miniature.
+    setTimeout(() => {
+      const el = document.activeElement;
+      if (!el || !TYPES.test(el.tagName)) document.documentElement.classList.remove("kb-open");
+    }, 0);
+  });
+
   function trackKeyboard() {
     const vv = window.visualViewport;
     if (!vv) return;                       // --kb stays 0; layout is unchanged

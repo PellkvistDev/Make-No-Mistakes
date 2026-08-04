@@ -64,6 +64,16 @@ html {
   overflow: hidden;
   min-height: calc(100% + var(--safe-t));
 }
+/* While a field is focused, give the document no spare height at all.
+   The extra inset above is the ONLY thing iOS can scroll, and it scrolls it to
+   reveal a focused field. Snapping back afterwards (which is what the scroll
+   listener does) works, but you see it: the UI lurches up and returns, once per
+   tap. Taking the height away on focus — before the keyboard is even up — means
+   there is nothing to scroll and nothing to correct.
+   Nothing is lost by dropping it: that height exists to let the canvas paint the
+   strip of screen below the viewport, and while the keyboard is open the
+   keyboard is covering that strip. */
+html.kb-open { min-height: 100%; }
 /* Nothing in this app should ever scroll the document — the only scroller is
    .messages. Pinning body as well means no amount of overflow can move it. */
 body { position: fixed; inset: 0; width: 100%; overflow: hidden; }
