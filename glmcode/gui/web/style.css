@@ -1395,18 +1395,22 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 
 .sheet-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 14px; }
 
-/* Phone-app QR sheet */
+/* Phone-app QR sheet. It's opened FROM the settings sheet, so it has to sit
+   above it — every .backdrop shares one z-index, which left DOM order to decide,
+   and the settings markup happens to come later. */
+#phoneapp-backdrop { z-index: calc(var(--z-sheet) + 2); }
 .qr-box {
   background: #ffffff; border-radius: 14px; padding: 14px;
   width: max-content; max-width: 100%; margin: 6px auto 12px;
   display: flex; align-items: center; justify-content: center;
   box-shadow: 0 6px 22px rgba(0,0,0,0.28); animation: rise 0.2s ease;
 }
+/* The SVG carries a viewBox and no intrinsic size (see qrcode_util), so these
+   are the real dimensions rather than a box the drawing overflows. */
 .qr-box svg { display: block; width: 216px; height: 216px; }
 /* A pairing QR carries far more than a URL, so its modules are much finer --
    give it more room or a phone camera struggles to resolve them. */
-#phoneapp-code-wrap:not([hidden]) ~ * .qr-box svg,
-.qr-box.pairing svg { width: 280px; height: 280px; }
+.qr-box.pairing svg { width: min(300px, 68vh); height: min(300px, 68vh); }
 
 /* The pairing code: shown as text, never encoded into the image. Big and
    monospaced because it gets read off the screen and typed on a phone. */

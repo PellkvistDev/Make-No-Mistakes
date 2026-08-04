@@ -3742,6 +3742,7 @@ let pairTimer = 0;
 function resetPhoneSheet() {
   clearInterval(pairTimer); pairTimer = 0;
   $("phoneapp-qr").innerHTML = "";
+  $("phoneapp-qr").classList.remove("pairing");
   $("phoneapp-error").hidden = true;
   $("phoneapp-code-wrap").hidden = true;
   $("phoneapp-url").textContent = "";
@@ -3767,6 +3768,8 @@ async function openPhoneApp() {
   }
   // The SVG is generated locally by our own code (segno), not user/model input.
   $("phoneapp-qr").innerHTML = res.svg;
+  // A pairing QR has far finer modules than a plain URL — it needs the room.
+  $("phoneapp-qr").classList.add("pairing");
   $("phoneapp-code-wrap").hidden = false;
   $("phoneapp-code").textContent = res.code;
   const inc = res.includes || {};
@@ -3800,6 +3803,8 @@ async function openPhoneApp() {
 async function showPlainLink() {
   clearInterval(pairTimer); pairTimer = 0;
   $("phoneapp-code-wrap").hidden = true;
+  // A plain URL QR is far coarser than a pairing one — back to the normal size.
+  $("phoneapp-qr").classList.remove("pairing");
   $("phoneapp-plain").hidden = true;
   $("phoneapp-copy").hidden = false;
   $("phoneapp-open").hidden = false;
