@@ -241,6 +241,10 @@
   }
   async function persistSession() {
     if (!session || !session.repo || !session.cryptoKey) return;
+    // session.repo is still whatever was connected before a read-only chat was
+    // opened, so the guard above doesn't catch this: persisting here would
+    // write the read-only chat's empty message list over the restorable one.
+    if (session.readOnly) return;
     try {
       const blob = await AC.aesEncrypt({
         repo: session.repo, baseSystem: session.baseSystem,
@@ -356,6 +360,8 @@
     session.toldCompact = false;
     session.pending = [];    // work parked for the desktop, per conversation
     session.carry = {};      // nothing to carry: this chat starts here
+    session.readOnly = false;
+    applyReadOnlyChrome(false);
     session.transcript = [];
     const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); haptic(18); };
     // Sub-agent tools have NO spawn (depth 1); the main tools add spawn_agent.
@@ -395,6 +401,8 @@
     session.toldCompact = false;
     session.pending = [];
     session.carry = {};      // a fresh chat owns all of its own fields
+    session.readOnly = false;
+    applyReadOnlyChrome(false);
     clearAttachments();
     $("chat-repo-name").textContent = session.repo.full_name;
     $("messages").innerHTML = "";
@@ -464,6 +472,10 @@
   // always saved regardless, so an offline/rate-limited push loses nothing).
   async function syncSave() {
     if (!syncOn() || !session || !session.chatId) return;
+    // A read-only chat has no turns to save, and this payload would claim it
+    // for the phone and drop the fields the desktop owns. Notes left here go
+    // through parkNoteForDesktop, which writes only `pending`.
+    if (session.readOnly) return;
     let store;
     try { store = await ensureSyncStore(); } catch (e) { return; }
     if (!store) return;
@@ -708,12 +720,10 @@
         connectRepo(r.owner, r.repo, r.branch || "main", r.full_name);
       }
     } else {
-      // Reported where the person actually is — they never left the hub.
-      $("chats-error").textContent =
-        "“" + (data.title || "This chat") + "” doesn't say which repository it belongs to, " +
-        "so it can't be continued here. The phone works through GitHub, and guessing " +
-        "would mean editing whichever repo you had open last. Open it on the computer " +
-        "that started it, or start a new chat here.";
+      // No repo: the agent has nothing to act on here, but the conversation is
+      // still worth reading, and work can still be left for the machine that
+      // CAN act. Opening it read-only is the whole reason it syncs at all.
+      openReadOnlyChat(data, id);
       return;
     }
     if (!session.repo) { toast("That chat has no repository — open one first."); return; }
@@ -731,6 +741,8 @@
     session.carry = {
       desktop: data.desktop, repo_state: data.repo_state, project: data.project,
     };
+    session.readOnly = false;
+    applyReadOnlyChrome(false);
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
     // Picking up a chat the desktop was driving: mark the switch, or the model
     // keeps imitating turns that used tools this phone doesn't have.
@@ -744,6 +756,77 @@
     show("screen-chat");
     renderContextMeter();
     persistSession();
+  }
+  // ---- read-only: a chat whose project this phone can't reach ----
+  // It syncs, so it should be readable — looking up what you decided is most of
+  // what you want a phone for. And the one useful thing you CAN do without a
+  // repo is leave work for the machine that has one, which is the same pending
+  // queue the agent uses via needs_desktop.
+  function openReadOnlyChat(data, id) {
+    session.readOnly = true;
+    session.chatId = data.id || id;
+    session.chatTitle = data.title || "";
+    session.messages = [];             // nothing runs here; keep none of it live
+    session.transcript = data.transcript || [];
+    session.syncedAt = data.updated || 0;
+    session.pending = data.pending || [];
+    session.images = {};
+    session.compact = null;
+    session.carry = {
+      desktop: data.desktop, repo_state: data.repo_state, project: data.project,
+      repo: data.repo, device: data.device, title: data.title,
+      messages: data.messages, preview: data.preview,
+    };
+    clearAttachments();
+    $("chat-repo-name").textContent = data.project || "on your computer";
+    $("messages").innerHTML = "";
+    for (const b of session.transcript) addBubble(b.role, b.text, false);
+    for (const p of session.pending) {
+      addBubble("system", "📌 For your computer: " + p.task, false);
+    }
+    addBubble("system",
+      "This chat is about a folder on your computer, so the agent can't work on it " +
+      "here. You can read it — and anything you send becomes a note waiting on your " +
+      "computer when you open the chat there.", false);
+    show("screen-chat");
+    applyReadOnlyChrome(true);
+    scroll();
+  }
+  // Read-only changes what the composer is FOR, rather than taking it away: an
+  // empty box you can't type in explains nothing.
+  function applyReadOnlyChrome(on) {
+    $("btn-attach").hidden = on;        // nothing to attach without a repo
+    $("ctx-foot").hidden = on;          // no context is being spent here
+    prompt.placeholder = on ? "Leave a note for your computer…" : "Message the agent…";
+    $("btn-send").title = on ? "Leave a note for your computer" : "Send";
+    document.getElementById("screen-chat").classList.toggle("read-only", on);
+  }
+  // A note left here goes into the same queue needs_desktop writes, so the
+  // desktop surfaces it the same way when the chat is opened there.
+  async function parkNoteForDesktop(text) {
+    session.pending = session.pending || [];
+    if (session.pending.some((p) => p.task.toLowerCase() === text.toLowerCase())) {
+      toast("Already waiting on your computer.");
+      return;
+    }
+    session.pending.push({ task: text, why: "left from your phone", created: Date.now() });
+    addBubble("system", "📌 For your computer: " + text, false);
+    haptic(12);
+    const store = await ensureSyncStore().catch(() => null);
+    if (!store) { toast("Saved here — it'll sync when you're back online."); return; }
+    try {
+      // Only `pending` is ours to change. Everything else goes back exactly as
+      // it came in — including `device`, so the desktop doesn't read this as
+      // the phone having driven the conversation.
+      const carry = session.carry || {};
+      session.syncedAt = await store.save(Object.assign({}, carry, {
+        id: session.chatId, pending: session.pending,
+      }));
+      toast("Waiting on your computer.");
+    } catch (e) {
+      toast(e && e.chatDeleted ? "That chat was deleted on your other device."
+                               : "Couldn't sync that note: " + friendlyGhError(e, "list"));
+    }
   }
   async function deleteSyncChat(id, title) {
     if (!confirm("Delete “" + (title || "this chat") + "” from all your devices?")) return;
@@ -1369,6 +1452,13 @@
       return;
     }
     const text = prompt.value.trim();
+    if (session && session.readOnly) {
+      // No agent to send to; the send button parks a note instead.
+      if (!text) return;
+      prompt.value = ""; prompt.style.height = "auto"; fitMessages();
+      await parkNoteForDesktop(text);
+      return;
+    }
     if (!text && !attachments.length) return;
     const savedAttachments = attachments.slice();
     prompt.value = ""; prompt.style.height = "auto"; fitMessages();
@@ -1539,6 +1629,10 @@
   // instead of the message the user actually pointed at.
   function refreshTailActions() {
     for (const b of messages.querySelectorAll(".tail-action")) b.remove();
+    // Nothing to edit or re-run in a read-only chat: there is no agent behind
+    // it and session.messages is empty, so both buttons lead nowhere. Offering
+    // them is worse than not having them.
+    if (session && session.readOnly) return;
     const mk = (bubble, label, fn) => {
       if (!bubble) return;
       let act = bubble.querySelector(".bubble-actions");
