@@ -948,9 +948,19 @@
   // --- the agent loop ------------------------------------------------------
   async function runAgent(cfg) {
     const { model, tools, messages, onEvent = () => {}, maxSteps = 24, shouldStop = () => false,
-      toolSchemas = TOOL_SCHEMAS } = cfg;
+      takeSteer = () => "", toolSchemas = TOOL_SCHEMAS } = cfg;
     for (let step = 0; step < maxSteps; step++) {
       if (shouldStop()) { onEvent({ type: "stopped" }); return messages; }
+      // Steering: a message typed while the turn was already running. Injected
+      // BETWEEN steps, never mid-batch, so the model always sees a complete
+      // tool round before the new instruction — the same point the desktop
+      // picks. Anything still queued when the turn ends is handed back rather
+      // than dropped, so a redirect that arrived a moment too late isn't lost.
+      const steer = takeSteer();
+      if (steer) {
+        messages.push({ role: "user", content: steer });
+        onEvent({ type: "steered", text: steer });
+      }
       onEvent({ type: "thinking" });
       let msg;
       // Stream only when the host actually renders deltas, so sub-agents (whose
