@@ -174,6 +174,19 @@ class Phone:
         self.errors = []
         page.on("pageerror", lambda e: self.errors.append(str(e)))
 
+    def open_at(self, url):
+        """Re-open the app at a URL that differs only by fragment.
+
+        goto() alone would be a same-document navigation -- the hash changes,
+        no script re-runs, and the app never sees the pairing token. The reload
+        is what makes it a real launch. The fetch stub is an init script, so it
+        is redefined automatically; it still has to be invoked.
+        """
+        self.page.goto(url, wait_until="domcontentloaded")
+        self.page.reload(wait_until="domcontentloaded")
+        self.page.evaluate("window.__fakeGitHub()")
+        return self
+
     def setup(self, sync_pass="sync passphrase"):
         """Through first-run setup and into a connected repo, with sync on."""
         p = self.page

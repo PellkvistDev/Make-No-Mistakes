@@ -27,7 +27,12 @@ jobs:
       # The test suite exercises the core only (agent loop, API retry,
       # steering, sub-agents, backups, sessions, memory) -- it needs no GUI
       # deps, no ML deps, and makes no network calls.
-      - run: pip install requests pytest
+      #
+      # cryptography is not optional here even though the app degrades without
+      # it: every test of the sync store's encryption, the secret store, and
+      # the pairing wire format is gated on it being importable, and a gated
+      # test that never runs is indistinguishable from one that passes.
+      - run: pip install requests pytest cryptography
       - run: python -m pytest tests/ -q
       # The phone's logic layer: crypto, the sync store, context budgeting,
       # the agent loop. It had never run here, so every green check on every
@@ -45,6 +50,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest playwright
+      # cryptography because the pairing tests seal a token with the desktop's
+      # own code and open it in the real phone app -- that is what pins the two
+      # halves of the wire format together.
+      - run: pip install pytest playwright cryptography
       - run: python -m playwright install --with-deps chromium
       - run: python -m pytest tests/mobile_ui -q
