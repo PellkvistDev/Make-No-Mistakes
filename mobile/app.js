@@ -760,9 +760,9 @@
     session.toldCompact = false;
     // Fields this device does not own, kept verbatim so saving from here
     // doesn't destroy them (see syncSave).
-    session.carry = {
-      desktop: data.desktop, repo_state: data.repo_state, project: data.project,
-    };
+    // Everything this chat arrived with; syncSave overlays the parts the phone
+    // owns. See openReadOnlyChat for why this is not an enumerated list.
+    session.carry = Object.assign({}, data);
     session.readOnly = false;
     applyReadOnlyChrome(false);
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
@@ -794,11 +794,12 @@
     session.pending = data.pending || [];
     session.images = {};
     session.compact = null;
-    session.carry = {
-      desktop: data.desktop, repo_state: data.repo_state, project: data.project,
-      repo: data.repo, device: data.device, title: data.title,
-      messages: data.messages, preview: data.preview,
-    };
+    // The WHOLE chat, not a list of fields to remember. An enumerated carry is
+    // one someone forgets to extend: the first version of this omitted
+    // `transcript`, so leaving a note blanked the conversation you were reading.
+    // Carrying everything and overlaying only what this device owns cannot have
+    // that failure mode, including for fields added later.
+    session.carry = Object.assign({}, data);
     clearAttachments();
     $("chat-repo-name").textContent = data.project || "on your computer";
     $("messages").innerHTML = "";
