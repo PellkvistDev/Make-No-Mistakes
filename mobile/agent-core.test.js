@@ -1292,3 +1292,28 @@ test("index: says whether a chat has a repo, so the list can tell them apart", a
   assert.equal(rows.with.repo, "me/proj");
   assert.equal(rows.without.repo, "", "a local-only chat must be identifiable from the index");
 });
+
+test("save: merges over what's stored, so an older device can't delete newer fields", async () => {
+  // The two ends of this store are separate programs, released separately, so
+  // one is routinely older. Absent must mean "nothing to say", not "delete".
+  const { gh } = fakeSyncGh(null);
+  const { store } = await C.openSync(gh, "merge pass here");
+  await store.save({ id: "c1", title: "Chat", messages: [], transcript: [{ role: "user", text: "hi" }],
+                     from_a_newer_build: { kept: true } });
+  // A write that knows nothing about transcript or the newer field.
+  await store.save({ id: "c1", title: "Renamed", messages: [] });
+  const back = await store.load("c1");
+  assert.equal(back.title, "Renamed", "fields that ARE sent must still win");
+  assert.deepEqual(back.transcript, [{ role: "user", text: "hi" }]);
+  assert.deepEqual(back.from_a_newer_build, { kept: true });
+});
+
+test("save: sending a field explicitly still clears it", async () => {
+  // The desktop empties `pending` this way after acting on it; merging must not
+  // turn that into a queue nothing can ever drain.
+  const { gh } = fakeSyncGh(null);
+  const { store } = await C.openSync(gh, "merge pass here");
+  await store.save({ id: "c1", messages: [], pending: [{ task: "run the tests" }] });
+  await store.save({ id: "c1", messages: [], pending: [] });
+  assert.deepEqual((await store.load("c1")).pending, []);
+});

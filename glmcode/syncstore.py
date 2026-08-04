@@ -363,9 +363,27 @@ class SyncStore:
         if _is_deleted(_tombstones(idx), chat["id"]):
             raise ChatDeletedElsewhere(chat["id"])
         path = f"chats/{chat['id']}.json"
-        blob = aes_encrypt(chat, self.key)
+        # Merge over whatever is already stored, rather than replacing it.
+        #
+        # A write only carries the fields the writing device knows about, and
+        # the two ends of this store are different programs released
+        # separately -- the desktop is routinely older than the phone, or the
+        # other way round. Replacing wholesale means the older side silently
+        # deletes every field the newer one added, which is how a chat lost the
+        # repo it belonged to and how another lost its transcript.
+        # Absent means "I have nothing to say about this", not "delete it".
+        # Clearing something is still possible by sending it explicitly: the
+        # desktop empties `pending` by passing [], which is present and wins.
+        existing, sha = _read_json(self.repo, path)
+        merged = chat
+        if existing is not None:
+            try:
+                merged = {**aes_decrypt(existing, self.key), **chat}
+            except SyncError:
+                merged = chat   # unreadable (rotated key): this write is the truth
+        blob = aes_encrypt(merged, self.key)
         self.repo.put_file(path, json.dumps(blob),
-                           f"Save session {chat['id']}", self._file_sha(path))
+                           f"Save session {chat['id']}", sha)
         data, sha = self._read_index()
         chats = [c for c in (data.get("chats") or []) if c.get("id") != chat["id"]]
         chats.append({"id": chat["id"], "title": chat.get("title") or "Untitled",
