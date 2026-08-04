@@ -895,6 +895,7 @@
     stream = null;
     s.bubble.classList.remove("streaming");
     addBubbleActions(s.bubble, text);
+    refreshTailActions();
     if (session) {
       session.transcript = session.transcript || [];
       session.transcript.push({ role: "assistant", text });
@@ -1022,6 +1023,7 @@
       tools: tools || session.tools,
       messages,
       shouldStop,
+      takeSteer: () => { const t = steerQueued; steerQueued = ""; return t; },
       toolSchemas,
       stream: true,
       onEvent: (ev) => {
@@ -1036,6 +1038,7 @@
           if (!endStream(ev.text) && ev.text) addBubble("assistant", ev.text);
           haptic(12);
         }
+        else if (ev.type === "steered") { endStream(); steerAccepted(ev.text); setStatus("taking that in…"); }
         else if (ev.type === "usage") noteUsage(ev.sent, ev.usage);
         else if (ev.type === "error") { setStatus(""); endStream(); addBubble("error", ev.text); }
         else if (ev.type === "stopped") { setStatus(""); endStream(); addBubble("system", "Stopped."); }
@@ -1205,6 +1208,9 @@
       setRunning(false); currentRun = null; persistSession(); renderContextMeter();
       await syncSave();
       if (chatId) await releaseDeviceLock(chatId);
+      // After currentRun is cleared, so this starts a turn rather than
+      // re-queueing itself against the run that just ended.
+      if (steerQueued) await steerLeftOver();
     }
   }
 
@@ -1229,8 +1235,48 @@
     renderChips();
   }
 
+  // A message typed while a turn is running redirects that turn instead of
+  // starting another. Typing is slow on a phone, so the thing you forgot to
+  // say usually arrives after you've already hit send.
+  let steerQueued = "";
+  let steerBubble = null;
+  function queueSteer(text) {
+    if (steerQueued) {
+      // One at a time, so the model isn't handed a pile of contradictions.
+      toast("Already queued — that'll go in at the next step.");
+      return;
+    }
+    steerQueued = text;
+    prompt.value = ""; prompt.style.height = "auto"; fitMessages();
+    steerBubble = addBubble("user", text, false);
+    steerBubble.classList.add("queued");
+    haptic(8);
+  }
+  // Consumed by the run: it's a real part of the conversation now.
+  function steerAccepted(text) {
+    if (steerBubble) { steerBubble.classList.remove("queued"); steerBubble = null; }
+    session.transcript = session.transcript || [];
+    session.transcript.push({ role: "user", text });
+    refreshTailActions();
+  }
+  // The turn ended before it was picked up. Don't drop it — send it as the
+  // next message, which is what was wanted anyway.
+  async function steerLeftOver() {
+    const text = steerQueued;
+    steerQueued = "";
+    if (!text) return;
+    if (steerBubble) { steerBubble.remove(); steerBubble = null; }
+    prompt.value = text;
+    await sendPrompt();
+  }
+
   async function sendPrompt(force) {
-    if (currentRun || composing) return;
+    if (composing) return;
+    if (currentRun) {                    // mid-turn: steer instead of queueing a turn
+      const t = prompt.value.trim();
+      if (t) queueSteer(t);
+      return;
+    }
     const text = prompt.value.trim();
     if (!text && !attachments.length) return;
     const savedAttachments = attachments.slice();
@@ -1289,11 +1335,13 @@
   }
 
   function setRunning(on) {
-    $("btn-send").hidden = on;
+    // The send button stays available while a turn runs: what it does changes
+    // from "start a turn" to "steer the one in flight". Stop sits beside it.
     $("btn-stop").hidden = !on;
     $("btn-stop").disabled = false;
-    $("btn-attach").disabled = on;
-    prompt.disabled = on;
+    $("btn-attach").disabled = on;   // attachments compose a fresh message
+    prompt.disabled = false;
+    prompt.placeholder = on ? "Add something to the run…" : "Message the agent…";
   }
 
   // ------------------------------------------------------------- rendering
@@ -1320,6 +1368,69 @@
   });
   // A quiet "Copy" affordance on assistant replies — the phone equivalent of
   // the desktop's hover actions, where there's no hover to rely on.
+  // ---- rewinding the tail of a conversation ----
+  // Edit-and-resend and Retry are deliberately limited to the LAST exchange.
+  // Reaching further back would mean mapping a bubble to a position in
+  // session.messages, which tool calls and compaction both shift underneath —
+  // and the last turn is where essentially all of the need is: you spot the
+  // typo you just made, or the answer you just got was wrong.
+  function lastUserIndex() {
+    const m = session.messages || [];
+    for (let i = m.length - 1; i >= 1; i--) if (m[i].role === "user") return i;
+    return -1;
+  }
+  // Re-render the visible conversation from the transcript. Tool lines aren't
+  // in the transcript, so they don't come back — the same as resuming a chat.
+  function replayTranscript() {
+    $("messages").innerHTML = "";
+    for (const b of session.transcript || []) addBubble(b.role, b.text, false);
+    refreshTailActions();
+    scroll();
+    syncToBottomBtn();
+  }
+  // Drop the transcript back to just before its last entry of `role`.
+  function trimTranscriptFromLast(role) {
+    const t = session.transcript || [];
+    for (let i = t.length - 1; i >= 0; i--) {
+      if (t[i].role === role) { session.transcript = t.slice(0, i); return; }
+    }
+  }
+
+  async function regenerateLast() {
+    if (currentRun || composing) return;
+    const at = lastUserIndex();
+    if (at < 0) { toast("Nothing to retry yet."); return; }
+    // Keep the user's message, drop everything the model said after it.
+    session.messages = session.messages.slice(0, at + 1);
+    trimTranscriptFromLast("assistant");
+    session.compact = null;          // the summary described messages that are gone
+    replayTranscript();
+    haptic(10);
+    await withRun((getStopped) => runBuild(getStopped));
+  }
+
+  async function editLast() {
+    if (currentRun || composing) return;
+    const at = lastUserIndex();
+    if (at < 0) { toast("Nothing to edit yet."); return; }
+    const original = session.messages[at];
+    // Attachments were folded into the message text when it was composed, so
+    // only the typed part can be handed back — say so instead of pretending.
+    const text = typeof original.content === "string"
+      ? original.content
+      : (original.content || []).filter((p) => p.type === "text").map((p) => p.text).join(" ");
+    session.messages = session.messages.slice(0, at);
+    trimTranscriptFromLast("user");
+    session.compact = null;
+    replayTranscript();
+    prompt.value = text;
+    prompt.style.height = "auto";
+    prompt.style.height = Math.min(prompt.scrollHeight, 160) + "px";
+    prompt.focus();
+    persistSession();
+    toast("Edit and send again. Any files already committed stay committed.");
+  }
+
   function addBubbleActions(bubble, text) {
     const act = document.createElement("div");
     act.className = "bubble-actions";
@@ -1332,6 +1443,32 @@
     bubble.appendChild(act);
   }
 
+  // Edit and Retry belong ONLY on the newest exchange, since that's all they
+  // can act on. Showing them on older bubbles would quietly rewind the tail
+  // instead of the message the user actually pointed at.
+  function refreshTailActions() {
+    for (const b of messages.querySelectorAll(".tail-action")) b.remove();
+    const mk = (bubble, label, fn) => {
+      if (!bubble) return;
+      let act = bubble.querySelector(".bubble-actions");
+      if (!act) {
+        act = document.createElement("div");
+        act.className = "bubble-actions";
+        bubble.appendChild(act);
+      }
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "bubble-copy tail-action";
+      btn.textContent = label;
+      btn.addEventListener("click", fn);
+      act.insertBefore(btn, act.firstChild);
+    };
+    const users = messages.querySelectorAll(".bubble.user");
+    const bots = messages.querySelectorAll(".bubble.assistant:not(.streaming)");
+    mk(users[users.length - 1], "Edit", editLast);
+    mk(bots[bots.length - 1], "Retry", regenerateLast);
+  }
+
   function addBubble(role, text, record) {
     const near = atBottom();
     const div = document.createElement("div");
@@ -1341,6 +1478,7 @@
     messages.appendChild(div);
     if (near) scroll();
     syncToBottomBtn();
+    if (role === "user" || role === "assistant") refreshTailActions();
     // Record durable bubbles so the conversation can be re-rendered on resume.
     // (record defaults to true; the transcript replay passes false.)
     if (record !== false && session && (role === "user" || role === "assistant" || role === "system")) {

@@ -1207,3 +1207,75 @@ test("delete: an index written before tombstones still loads", async () => {
   await gh.putFile("index.json", JSON.stringify(blob), "old-style index");
   assert.deepEqual((await store.list()).map((c) => c.id), ["c1"]);
 });
+
+// ------------------------------------------------------------- steering --
+// A message typed while a turn is already running redirects that turn instead
+// of starting another. Typing is slow on a phone, so the thing you forgot to
+// say usually arrives after you've hit send.
+
+test("steer: an injected message reaches the model on the next step", async () => {
+  const seen = [];
+  let turn = 0;
+  const model = { async chat(messages) {
+    seen.push(messages.map((m) => m.content));
+    if (++turn === 1) {
+      return { role: "assistant", content: "", tool_calls: [
+        { id: "t1", type: "function", function: { name: "read_file", arguments: "{}" } }] };
+    }
+    return { role: "assistant", content: "done" };
+  } };
+  let pending = "also rename it";
+  const events = [];
+  const msgs = [{ role: "user", content: "refactor this" }];
+  await C.runAgent({ model, tools: { read_file: async () => "ok" }, messages: msgs,
+    takeSteer: () => { const t = pending; pending = ""; return t; },
+    onEvent: (e) => { if (e.type === "steered") events.push(e.text); } });
+  assert.deepEqual(events, ["also rename it"]);
+  assert.ok(msgs.some((m) => m.role === "user" && m.content === "also rename it"));
+});
+
+test("steer: goes in between steps, never inside a tool batch", async () => {
+  // The model must see a complete tool round before the new instruction.
+  const order = [];
+  let turn = 0;
+  const model = { async chat(messages) {
+    order.push("chat:" + messages.length);
+    if (++turn === 1) {
+      return { role: "assistant", content: "", tool_calls: [
+        { id: "a", type: "function", function: { name: "t", arguments: "{}" } },
+        { id: "b", type: "function", function: { name: "t", arguments: "{}" } }] };
+    }
+    return { role: "assistant", content: "done" };
+  } };
+  let pending = "";
+  await C.runAgent({ model, messages: [{ role: "user", content: "go" }],
+    tools: { t: async () => { order.push("tool"); pending = "steer now"; return "x"; } },
+    takeSteer: () => { const t = pending; pending = ""; return t; },
+    onEvent: (e) => { if (e.type === "steered") order.push("steered"); } });
+  // Both tools run, THEN the steer lands, then the next model call.
+  assert.deepEqual(order.slice(0, 4), ["chat:1", "tool", "tool", "steered"]);
+});
+
+test("steer: nothing queued changes nothing", async () => {
+  const model = { async chat() { return { role: "assistant", content: "hi" }; } };
+  const msgs = [{ role: "user", content: "go" }];
+  await C.runAgent({ model, tools: {}, messages: msgs, takeSteer: () => "" });
+  assert.equal(msgs.filter((m) => m.role === "user").length, 1);
+});
+
+test("steer: absent hook is harmless (sub-agents don't steer)", async () => {
+  const model = { async chat() { return { role: "assistant", content: "hi" }; } };
+  const msgs = [{ role: "user", content: "go" }];
+  await C.runAgent({ model, tools: {}, messages: msgs });
+  assert.equal(msgs[msgs.length - 1].content, "hi");
+});
+
+test("steer: a stop still wins over a queued message", async () => {
+  const model = { async chat() { return { role: "assistant", content: "hi" }; } };
+  const msgs = [{ role: "user", content: "go" }];
+  const events = [];
+  await C.runAgent({ model, tools: {}, messages: msgs, shouldStop: () => true,
+    takeSteer: () => "too late", onEvent: (e) => events.push(e.type) });
+  assert.deepEqual(events, ["stopped"]);
+  assert.ok(!msgs.some((m) => m.content === "too late"));
+});

@@ -507,3 +507,11 @@ pre.code, pre.tool-out, .preview {
   text-shadow: 0 1px 4px rgba(0,0,0,.8); max-width: 30ch;
 }
 .scan-bar .ghost { color: #fff; border-color: rgba(255,255,255,.4); }
+
+/* A steering message waiting to go in at the next step: present, but visibly
+   not yet part of the conversation. */
+.bubble.user.queued { opacity: .6; border-style: dashed; }
+.bubble.user.queued::after {
+  content: "queued"; display: block; margin-top: 4px;
+  font-size: 11px; letter-spacing: .04em; opacity: .8;
+}
