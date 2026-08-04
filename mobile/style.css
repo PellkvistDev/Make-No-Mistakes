@@ -24,6 +24,16 @@
   --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
 }
+/* The safe-area insets, routed through variables instead of being read from
+   env() at each use site. Two reasons. Every layout bug at the top and bottom
+   of this app has been inset-dependent, and env() reports 0 in every headless
+   browser — so nothing about them could be tested, and each fix was guesswork
+   checked by screenshot. A test can override these. And it keeps the handful
+   of places that have to agree about an inset reading from one source. */
+:root {
+  --safe-t: env(safe-area-inset-top);
+  --safe-b: env(safe-area-inset-bottom);
+}
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body {
   margin: 0; height: 100%;
@@ -52,7 +62,7 @@ html, body {
    overflow:hidden keeps the height and takes away the scroll. */
 html {
   overflow: hidden;
-  min-height: calc(100% + env(safe-area-inset-top));
+  min-height: calc(100% + var(--safe-t));
 }
 /* Nothing in this app should ever scroll the document — the only scroller is
    .messages. Pinning body as well means no amount of overflow can move it. */
@@ -142,7 +152,7 @@ body.light-bg #composer-dock::before {
 /* ---------- panes / setup / unlock ---------- */
 .pane {
   flex: 1; overflow-y: auto;
-  padding: max(28px, env(safe-area-inset-top)) 22px calc(28px + env(safe-area-inset-bottom));
+  padding: max(28px, var(--safe-t)) 22px calc(28px + var(--safe-b));
   display: flex; flex-direction: column; gap: 14px;
   width: 100%; max-width: 520px; margin: 0 auto;
 }
@@ -196,7 +206,7 @@ button.link.danger { color: var(--danger); }
    keeps the title/status text legible over the wallpaper. */
 .bar {
   display: flex; align-items: center; gap: 10px;
-  padding: max(10px, env(safe-area-inset-top)) 14px 16px;
+  padding: max(10px, var(--safe-t)) 14px 16px;
   background: linear-gradient(to bottom, rgba(6,8,12,.66) 0, rgba(6,8,12,.24) 55%, transparent 100%);
   position: sticky; top: 0; z-index: 5;
 }
@@ -289,13 +299,20 @@ button.link.danger { color: var(--danger); }
   position: fixed; left: 0; right: 0; bottom: var(--kb, 0px); z-index: 5;
   /* The home indicator is behind the keyboard while it's open, so its inset
      stops applying — otherwise there's a dead gap above the keys. */
-  padding-bottom: max(0px, calc(env(safe-area-inset-bottom) - var(--kb, 0px)));
+  padding-bottom: max(0px, calc(var(--safe-b) - var(--kb, 0px)));
 }
-/* Scrim only behind the input row — it STOPS at the top of the home-indicator
-   inset, so that area stays pure wallpaper (no bar at the very bottom). */
+/* The scrim runs all the way to the bottom of the dock.
+   It used to stop at the top of the home-indicator inset, on the theory that
+   leaving that band as pure wallpaper avoided "a bar at the very bottom". It
+   did the opposite: the scrim is at its darkest exactly where it was cut off,
+   so it ended in a hard horizontal line with brighter, undimmed wallpaper
+   below it — a band the height of the bottom inset, which is what measuring
+   the reported screenshot showed (a clean jump from rgb(3,2,82) to rgb(4,5,50)
+   about 33 CSS px up from the bottom edge). A gradient that reaches the edge
+   has no line to see. */
 #composer-dock::before {
   content: ""; position: absolute; left: 0; right: 0; top: 0;
-  bottom: max(0px, calc(env(safe-area-inset-bottom) - var(--kb, 0px))); z-index: -1;
+  bottom: 0; z-index: -1;
   background: linear-gradient(to top, rgba(6,8,12,.5), rgba(6,8,12,.28) 55%, transparent);
   pointer-events: none;
 }
@@ -485,14 +502,14 @@ pre.code, pre.tool-out, .preview {
 .backdrop {
   position: fixed; inset: 0; background: rgba(0,0,0,.4);
   display: grid; place-items: end center; z-index: 40; animation: fade .15s ease;
-  padding: 0 0 env(safe-area-inset-bottom);
+  padding: 0 0 var(--safe-b);
 }
 .backdrop[hidden] { display: none; }
 .dialog {
   background: var(--glass-strong); -webkit-backdrop-filter: var(--blur-strong); backdrop-filter: var(--blur-strong);
   border: 1px solid var(--glass-brd); border-bottom: none; box-shadow: var(--glass-hi), 0 -12px 40px rgba(0,0,0,.4);
   border-radius: 22px 22px 0 0; width: 100%; max-width: 720px;
-  padding: 18px 18px calc(18px + env(safe-area-inset-bottom)); animation: rise .2s ease;
+  padding: 18px 18px calc(18px + var(--safe-b)); animation: rise .2s ease;
   /* A grid item's default min-width is min-content, not 0, so a dialog holding
      an unwrappable line -- a long file path, or a <pre> of committed content --
      grew as wide as that line instead of scrolling it. On a phone that pushed
@@ -515,7 +532,7 @@ pre.code, pre.tool-out, .preview {
 /* ---------- toast ---------- */
 .toast {
   position: fixed; left: 50%; transform: translateX(-50%);
-  bottom: calc(78px + var(--kb, 0px) + max(0px, calc(env(safe-area-inset-bottom) - var(--kb, 0px))));
+  bottom: calc(78px + var(--kb, 0px) + max(0px, calc(var(--safe-b) - var(--kb, 0px))));
   background: var(--glass-strong); -webkit-backdrop-filter: var(--blur-strong); backdrop-filter: var(--blur-strong);
   border: 1px solid var(--glass-brd); color: var(--text);
   padding: 9px 15px; border-radius: 999px; font-size: 13px; z-index: 50;
@@ -553,7 +570,7 @@ pre.code, pre.tool-out, .preview {
 }
 .scan-bar {
   position: absolute; left: 0; right: 0; bottom: 0;
-  padding: 18px 18px calc(18px + env(safe-area-inset-bottom));
+  padding: 18px 18px calc(18px + var(--safe-b));
   display: flex; flex-direction: column; align-items: center; gap: 12px;
   background: linear-gradient(to top, rgba(0,0,0,.75), transparent);
 }
