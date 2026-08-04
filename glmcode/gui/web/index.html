@@ -362,14 +362,21 @@
 <!-- Phone-app QR sheet -->
 <div id="phoneapp-backdrop" class="backdrop" hidden>
   <div class="sheet glass-strong" role="dialog" aria-modal="true" aria-labelledby="phoneapp-title">
-    <div class="sheet-head"><h2 id="phoneapp-title">Get the phone app</h2></div>
-    <p class="row-sub">Scan with your phone's camera, then “Add to Home Screen”.</p>
+    <div class="sheet-head"><h2 id="phoneapp-title">Set up your phone</h2></div>
+    <p class="row-sub" id="phoneapp-hint">Scan with your phone's camera, then “Add to Home Screen”.</p>
     <div id="phoneapp-qr" class="qr-box" aria-label="QR code for the phone app"></div>
+    <!-- The code is shown as TEXT and never encoded into the image: that is what
+         makes a screenshot or photo of the QR alone useless. -->
+    <div id="phoneapp-code-wrap" hidden>
+      <div class="pair-code" id="phoneapp-code">------</div>
+      <p class="row-sub pair-note" id="phoneapp-includes"></p>
+    </div>
     <a id="phoneapp-url" class="qr-url mono" target="_blank" rel="noopener"></a>
     <p id="phoneapp-error" class="row-sub" style="color:var(--danger,#ff6b6b)" hidden></p>
     <div class="sheet-actions">
-      <button id="phoneapp-copy" class="btn btn-ghost">Copy link</button>
-      <button id="phoneapp-open" class="btn btn-ghost">Open in browser</button>
+      <button id="phoneapp-plain" class="btn btn-ghost">Just the link, no keys</button>
+      <button id="phoneapp-copy" class="btn btn-ghost" hidden>Copy link</button>
+      <button id="phoneapp-open" class="btn btn-ghost" hidden>Open in browser</button>
       <button id="phoneapp-close" class="btn btn-primary">Done</button>
     </div>
     <details class="qr-edit"><summary>Change the URL</summary>
@@ -794,16 +801,17 @@
       </div>
 
       <h3 style="margin-top:22px">Your phone</h3>
-      <p class="row-sub">Two steps: install the app, then turn on sync so the same chats are on both.</p>
-      <div class="row"><div class="row-text"><label>1. Install the app</label>
-        <span class="row-sub">Scan with your phone's camera, then “Add to Home Screen”. The agent runs
-          on the phone itself, with your keys encrypted on-device.</span></div>
-        <div class="row-actions"><button id="gh-get-app" class="btn btn-primary">Show QR code</button></div>
+      <div class="row"><div class="row-text"><label>Set up your phone</label>
+        <span class="row-sub">One scan: installs the app, fills in your keys, and turns on shared
+          chats. The agent then runs on the phone itself. Your keys go from screen to camera — they
+          never touch the network — and the code beside the QR is what unlocks it, so a photo of the
+          code alone is no use to anyone.</span></div>
+        <div class="row-actions"><button id="gh-get-app" class="btn btn-primary">Set up my phone</button></div>
       </div>
-      <div class="row"><div class="row-text"><label>2. Share your chats</label>
+      <div class="row"><div class="row-text"><label>Shared chats</label>
         <span class="row-sub">A chat you start on your phone continues here, in the same list — and
-          the other way round. Encrypted on your device before upload, so GitHub only ever stores
-          ciphertext. Use the <em>same</em> passphrase on every device.</span></div>
+          the other way round. Encrypted on this machine before upload, so GitHub only ever stores
+          ciphertext. Turn it on here <em>before</em> pairing and the phone gets it automatically.</span></div>
       </div>
       <div id="sync-unavailable" hidden>
         <p class="row-sub" id="sync-unavailable-why"></p>

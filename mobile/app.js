@@ -165,6 +165,18 @@
     armIdle();
     if (keepSignedIn()) { try { localStorage.setItem(KEEPKEY_KEY, await AC.exportRawKey(key)); } catch {} }
     else localStorage.removeItem(KEEPKEY_KEY);
+    // A passphrase that came over from the desktop can only be stored now: it
+    // is kept encrypted under the vault key, which didn't exist until the PIN
+    // was set. Doing it here is what makes "install the app" and "share your
+    // chats" one act instead of two.
+    if (pendingSyncPass) {
+      try {
+        await storeSyncPass(pendingSyncPass);
+        localStorage.setItem("mnm.sync", "1");
+        toast("Your chats will sync with your computer.");
+      } catch (e) { toast("Couldn't turn on sync — set the passphrase in Settings."); }
+      pendingSyncPass = "";
+    }
     if (await tryRestoreSession()) return;
     if (syncOn() && hasSyncPass()) await enterChatList();
     else await enterRepoPicker();
@@ -1762,6 +1774,47 @@
     }
   }
 
+  // ================================================================ PAIRING
+  // Arriving from the desktop's QR: the sealed payload is in the URL fragment,
+  // which the browser never sends to the server — so the keys got here without
+  // touching the network. Take it out of the URL before anything else, so it
+  // can't linger in history, a bookmark, or a shared screenshot of the address
+  // bar. The pairing code is NOT in the link; it's the six characters shown on
+  // the computer, which is what makes a captured QR useless on its own.
+  let pendingSyncPass = "";
+  async function consumePairLink() {
+    const m = /[#&]pair=([A-Za-z0-9_-]+)/.exec(location.hash || "");
+    if (!m) return;
+    const token = m[1];
+    history.replaceState(null, "", location.pathname + location.search);
+    for (;;) {
+      const code = prompt(
+        "Setting up from your computer.\n\n" +
+        "Type the 6-character pairing code shown next to the QR code.");
+      if (code === null) { toast("Set-up cancelled — you can still type your keys in."); return; }
+      try {
+        const data = await AC.openPairToken(token, code);
+        if (data.modelKey) $("in-model-key").value = data.modelKey;
+        if (data.githubToken) $("in-gh-token").value = data.githubToken;
+        if (data.model) $("in-model").value = data.model;
+        if (data.baseUrl) {
+          const sel = $("in-base-url");
+          if ([...sel.options].some((o) => o.value === data.baseUrl)) sel.value = data.baseUrl;
+        }
+        // Sync needs the vault key, which doesn't exist until a PIN is set —
+        // so hold it and turn sync on once the vault is unlocked.
+        pendingSyncPass = data.syncPass || "";
+        toast(pendingSyncPass
+          ? "Keys filled in from your computer. Pick a PIN and your chats will sync too."
+          : "Keys filled in from your computer. Now pick a PIN.");
+        return;
+      } catch (e) {
+        // Wrong or stale code: say which, and let them try again.
+        if (!confirm((e && e.message ? e.message : e) + "\n\nTry again?")) return;
+      }
+    }
+  }
+
   // ================================================================ BOOT
   async function boot() {
     applyBg(loadBg());
@@ -1779,6 +1832,10 @@
       } catch { localStorage.removeItem(KEEPKEY_KEY); }
     }
     if (blob) show("screen-unlock"); else show("screen-setup");
+    // After the screen is up, so the prefilled fields are visible behind the
+    // code prompt. Only meaningful on a fresh set-up; an existing vault keeps
+    // the keys it already has rather than being silently overwritten.
+    if (!blob) await consumePairLink();
   }
   boot();
 })();
