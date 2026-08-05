@@ -39,11 +39,11 @@ jobs:
       # phone change was green without it.
       - run: node --test mobile/agent-core.test.js
 
-  # The phone's UI wiring is a separate job because it needs a browser. It is
-  # the layer agent-core.test.js cannot reach -- and the layer where a chat
-  # resume silently wiped the desktop handoff queue, because nothing drove the
-  # real app end to end.
-  mobile-ui:
+  # The UI layers, in a separate job because they need a browser. These are what
+  # unit tests cannot reach: the phone's wiring (where a chat resume silently
+  # wiped the desktop handoff queue) and the desktop's 5591-line app.js, which
+  # had no coverage of any kind until now.
+  browser-ui:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -55,4 +55,4 @@ jobs:
       # halves of the wire format together.
       - run: pip install pytest playwright cryptography
       - run: python -m playwright install --with-deps chromium
-      - run: python -m pytest tests/mobile_ui -q
+      - run: python -m pytest tests/mobile_ui tests/desktop_ui -q
