@@ -202,7 +202,7 @@ function md(src, fast) {
         `<div class="code-wrap code-diff">` +
         `<button class="code-copy" title="Copy code" aria-label="Copy code">Copy</button>` +
         `<pre><code data-lang="${esc(lang)}">${colorDiff(body)}</code></pre></div></details>`);
-      return ` ${codeBlocks.length - 1} `;
+      return `\u0000${codeBlocks.length - 1}\u0000`;
     }
     // Long non-diff pastes (whole files) still dominate the chat, so anything
     // past a screenful collapses to a preview with a one-click "Show all".

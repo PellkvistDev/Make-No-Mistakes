@@ -2,6 +2,7 @@
 run→commit→push→PR flow against a local bare repo with a fake agent (no GitHub,
 no real model)."""
 
+from pathlib import Path
 import subprocess
 
 import pytest
@@ -114,3 +115,33 @@ def test_run_ci_task_no_changes_comments_and_skips_pr(tmp_path, monkeypatch):
     assert result["changed"] is False
     assert pr_called["n"] == 0
     assert comments and "didn't need to change" in comments[0]
+
+
+# ------------------------------------------------- source files stay text --
+
+def test_no_source_file_contains_a_literal_nul_byte():
+    """A single NUL makes a file binary to grep, ripgrep and most editors, and
+    it fails silently: the search returns nothing and looks like no match.
+
+    glmcode/gui/web/app.js had two, used as placeholder delimiters in the
+    markdown renderer. The same file already wrote them as \\u0000 escapes two
+    lines further down -- identical at runtime, and the escape leaves the file
+    searchable. Git did not notice either, because its binary check only reads
+    the first 8000 bytes and these were past that.
+    """
+    import glmcode
+    roots = [Path(glmcode.__file__).parent, Path(__file__).parent.parent / "mobile"]
+    exts = {".py", ".js", ".mjs", ".cjs", ".css", ".html", ".json", ".md", ".webmanifest"}
+    offenders = []
+    for root in roots:
+        for p in root.rglob("*"):
+            if not p.is_file() or p.suffix.lower() not in exts:
+                continue
+            if "__pycache__" in p.parts:
+                continue
+            data = p.read_bytes()
+            if b"\x00" in data:
+                offenders.append(f"{p}: {data.count(chr(0).encode())} NUL byte(s)")
+    assert not offenders, (
+        "source files must stay searchable; write \\u0000 rather than the byte:\n"
+        + "\n".join(offenders))
