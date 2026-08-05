@@ -254,3 +254,56 @@ def test_the_dock_lifts_over_the_keyboard(phone):
     assert abs((rest - lifted) - 300) <= 2, (
         f"the dock did not clear a 300px keyboard: {rest} -> {lifted}")
     assert phone.errors == []
+
+
+def test_focusing_a_field_removes_the_slack_before_anything_can_scroll_it(phone):
+    """The reported flash: the UI lurched up and snapped back on every tap.
+
+    The scroll listener fixed the position but a frame too late, so the lurch
+    was visible. The document's only scrollable slack is the extra inset of
+    height on <html>; dropping it on focusin means there is nothing to scroll,
+    so nothing to correct and nothing to see.
+    """
+    phone.setup()
+    p = phone.page
+    simulate_insets(phone)
+
+    before = p.evaluate("() => document.documentElement.scrollHeight - "
+                        "document.documentElement.clientHeight")
+    assert before > 0, "no slack to begin with — this test would prove nothing"
+
+    p.click("#in-prompt")
+    p.wait_for_function("() => document.documentElement.classList.contains('kb-open')",
+                        timeout=5000)
+    during = p.evaluate("() => document.documentElement.scrollHeight - "
+                        "document.documentElement.clientHeight")
+    assert during <= 1, f"the document can still be scrolled while typing ({during}px)"
+
+    # And it comes back once the field is left, so the strip is painted again.
+    p.evaluate("() => document.getElementById('in-prompt').blur()")
+    p.wait_for_function("() => !document.documentElement.classList.contains('kb-open')",
+                        timeout=5000)
+    after = p.evaluate("() => document.documentElement.scrollHeight - "
+                       "document.documentElement.clientHeight")
+    assert after == before, f"the height didn't come back after blur ({after} vs {before})"
+    assert phone.errors == []
+
+
+def test_moving_between_two_fields_does_not_restore_the_slack_in_between(phone):
+    """focusout fires before focusin on the next field. Restoring immediately
+    would hand the slack back for a frame — the same flash, in miniature."""
+    phone.setup()
+    p = phone.page
+    simulate_insets(phone)
+    p.click("#in-prompt")
+    p.wait_for_function("() => document.documentElement.classList.contains('kb-open')",
+                        timeout=5000)
+    # Settings has its own text fields; move focus straight to one.
+    p.click("#btn-chat-settings")
+    p.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
+    p.evaluate("() => document.getElementById('set-model').focus()")
+    p.wait_for_timeout(120)
+    assert p.evaluate("() => document.documentElement.classList.contains('kb-open')"), \
+        "the slack came back while moving between two fields"
+    assert phone.errors == []
+

@@ -74,6 +74,28 @@
   }
   window.addEventListener("scroll", pinDocument, { passive: true });
 
+  // Correcting the scroll is a frame too late — you see the lurch and the snap
+  // back. So remove the thing being scrolled first: focusin fires before the
+  // keyboard animates in, and html.kb-open drops the spare inset of height that
+  // is the only scrollable slack there is. The listener above stays as a
+  // backstop for anything that scrolls the document by another route.
+  const TYPES = /^(input|textarea|select)$/i;
+  document.addEventListener("focusin", (e) => {
+    if (e.target && TYPES.test(e.target.tagName)) {
+      document.documentElement.classList.add("kb-open");
+      pinDocument();
+    }
+  });
+  document.addEventListener("focusout", (e) => {
+    if (!e.target || !TYPES.test(e.target.tagName)) return;
+    // Only once nothing else has taken focus, or moving between two fields
+    // would put the height back for a frame — the same flash, in miniature.
+    setTimeout(() => {
+      const el = document.activeElement;
+      if (!el || !TYPES.test(el.tagName)) document.documentElement.classList.remove("kb-open");
+    }, 0);
+  });
+
   function trackKeyboard() {
     const vv = window.visualViewport;
     if (!vv) return;                       // --kb stays 0; layout is unchanged
@@ -738,9 +760,9 @@
     session.toldCompact = false;
     // Fields this device does not own, kept verbatim so saving from here
     // doesn't destroy them (see syncSave).
-    session.carry = {
-      desktop: data.desktop, repo_state: data.repo_state, project: data.project,
-    };
+    // Everything this chat arrived with; syncSave overlays the parts the phone
+    // owns. See openReadOnlyChat for why this is not an enumerated list.
+    session.carry = Object.assign({}, data);
     session.readOnly = false;
     applyReadOnlyChrome(false);
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
@@ -772,11 +794,12 @@
     session.pending = data.pending || [];
     session.images = {};
     session.compact = null;
-    session.carry = {
-      desktop: data.desktop, repo_state: data.repo_state, project: data.project,
-      repo: data.repo, device: data.device, title: data.title,
-      messages: data.messages, preview: data.preview,
-    };
+    // The WHOLE chat, not a list of fields to remember. An enumerated carry is
+    // one someone forgets to extend: the first version of this omitted
+    // `transcript`, so leaving a note blanked the conversation you were reading.
+    // Carrying everything and overlaying only what this device owns cannot have
+    // that failure mode, including for fields added later.
+    session.carry = Object.assign({}, data);
     clearAttachments();
     $("chat-repo-name").textContent = data.project || "on your computer";
     $("messages").innerHTML = "";
@@ -2122,7 +2145,18 @@
 
   function registerSW() {
     if (!("serviceWorker" in navigator)) return;
-    navigator.serviceWorker.register("sw.js").catch(() => {});
+    navigator.serviceWorker.register("sw.js").then((reg) => {
+      // Ask whether there's a new build whenever the app comes back to the
+      // foreground. Without this, an installed PWA only looks on a fresh
+      // navigation — so one left open for days keeps running old code, and the
+      // only way out is knowing to close and reopen it. Nobody should have to
+      // know that the app has a cache.
+      const check = () => {
+        if (document.visibilityState === "visible") reg.update().catch(() => {});
+      };
+      document.addEventListener("visibilitychange", check);
+      window.addEventListener("focus", check);
+    }).catch(() => {});
     // When a new SW takes control (a fresh deploy), reload once so the page runs
     // the new code. Guarded on an existing controller so a first install doesn't loop.
     if (navigator.serviceWorker.controller) {
@@ -2130,7 +2164,16 @@
       navigator.serviceWorker.addEventListener("controllerchange", () => {
         if (refreshing) return;
         refreshing = true;
-        location.reload();
+        // Never mid-turn. The agent's reply is in flight and lives only in this
+        // page; reloading now throws away work the user is waiting for, and a
+        // deploy landing at that moment is pure bad luck they didn't cause.
+        // Wait for the turn to finish — the new code is one reload away either
+        // way, and this one can be a quiet one.
+        const whenIdle = () => {
+          if (currentRun || composing) return setTimeout(whenIdle, 1000);
+          location.reload();
+        };
+        whenIdle();
       });
     }
   }

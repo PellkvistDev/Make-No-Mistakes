@@ -283,3 +283,53 @@ def test_a_read_only_chat_offers_no_edit_or_retry(phone):
         ".tail-action", "els => els.map(e => e.textContent)")
     assert actions == [], f"read-only chat offered dead actions: {actions}"
     assert phone.errors == []
+
+
+def test_leaving_a_note_keeps_the_conversation_it_was_left_on(phone):
+    """The first version of the carry list forgot `transcript`, so parking a
+    note blanked the chat you were reading. The test that shipped with it only
+    checked the fields I had remembered — which is the same mistake twice."""
+    phone.setup()
+    seed_foreign_chat(phone, dict(DESKTOP_CHAT, transcript=[
+        {"role": "user", "text": "where did we put it?"},
+        {"role": "assistant", "text": "under receipts/2026"}]))
+    open_chat_named(phone, "Local notes chat")
+
+    phone.page.fill("#in-prompt", "check the totals")
+    phone.page.click("#btn-send")
+    phone.page.wait_for_timeout(700)
+
+    stored = next(c for c in phone.stored_chats() if c["id"] == "from-desktop")
+    assert [t["text"] for t in stored["transcript"]] == [
+        "where did we put it?", "under receipts/2026"], \
+        f"leaving a note destroyed the transcript: {stored.get('transcript')}"
+    assert stored["title"] == "Local notes chat"
+    assert phone.errors == []
+
+
+def test_a_phone_save_preserves_fields_it_has_never_heard_of(phone):
+    """The general form, so this can't recur by someone adding a field.
+
+    A device must not delete what it doesn't understand: save() replaces the
+    whole object, and the two ends of this store are written in different
+    languages and released separately, so one side will always be older than
+    the other.
+    """
+    phone.setup()
+    seed_foreign_chat(phone, dict(
+        DESKTOP_CHAT, id="with-repo", title="Repo chat",
+        repo={"owner": "you", "repo": "app", "full_name": "you/app", "branch": "main"},
+        # Pretend a later desktop release added these.
+        some_future_field={"kept": True},
+        another_one="also kept"))
+    open_chat_named(phone, "Repo chat")
+
+    phone.reply({"role": "assistant", "content": "sure"})
+    phone.send("do a thing")
+    phone.wait_idle()
+
+    stored = next(c for c in phone.stored_chats() if c["id"] == "with-repo")
+    assert stored.get("some_future_field") == {"kept": True}, \
+        f"the phone deleted a field it didn't recognise: {sorted(stored)}"
+    assert stored.get("another_one") == "also kept"
+    assert phone.errors == []

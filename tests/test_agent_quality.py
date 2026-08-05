@@ -108,3 +108,60 @@ def test_js_check_timeout_says_so_instead_of_looking_clean(tmp_path, monkeypatch
 
     out = tools.write_file(str(tmp_path / "app.js"), "function f() {}\n")
     assert "couldn't syntax-check" in out
+
+
+# ------------------------------------------- a check that fell over vs passed
+# '' means "checked, and it's fine", and the agent trusts that. Anything that
+# stops the check from running has to look different, or a broken file sails
+# through under a reassuring silence -- which is exactly how a node timeout
+# once reported success.
+
+def test_source_with_nul_bytes_is_reported_not_silently_passed(tmp_path, monkeypatch):
+    """Already handled -- compile() raises SyntaxError for this on supported
+    Pythons, so the existing branch catches it. Kept because it is a file the
+    agent must never be told is fine, and because it is the kind of thing that
+    would otherwise depend on which exception a future Python chooses; the
+    catch-all now reports rather than passes either way."""
+    monkeypatch.chdir(tmp_path)
+    f = tmp_path / "broken.py"
+    f.write_bytes(b"x = 1\n\x00\ny = 2\n")
+    out = tools._syntax_feedback(f)
+    assert out.strip(), "a file Python cannot compile came back as fine"
+    assert "WARNING" in out or "unchecked" in out
+
+
+def test_a_checker_that_blows_up_says_so_instead_of_passing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    f = tmp_path / "mod.py"
+    f.write_text("x = 1\n", encoding="utf-8")
+
+    def boom(*a, **k):
+        raise OSError("disk went away")
+
+    monkeypatch.setattr(type(f), "read_text", boom)
+    out = tools._syntax_feedback(f)
+    assert "unchecked" in out, f"an unreadable file was reported as fine: {out!r}"
+    assert "OSError" in out
+
+
+def test_node_that_cannot_run_says_so_instead_of_passing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    f = tmp_path / "mod.js"
+    f.write_text("var x = 1;\n", encoding="utf-8")
+    monkeypatch.setattr(tools.shutil, "which", lambda name: "/usr/bin/node")
+
+    def boom(*a, **k):
+        raise OSError("exec format error")
+
+    monkeypatch.setattr(tools.subprocess, "run", boom)
+    out = tools._syntax_feedback(f)
+    assert "unchecked" in out, f"an unrunnable checker was reported as fine: {out!r}"
+
+
+def test_a_file_too_big_to_check_is_still_silent(tmp_path, monkeypatch):
+    """Deliberately skipping is not the same as failing: no note for this."""
+    monkeypatch.chdir(tmp_path)
+    f = tmp_path / "huge.py"
+    f.write_text("x = 1\n" * 200_000, encoding="utf-8")
+    assert f.stat().st_size > tools._MAX_CHECK_BYTES
+    assert tools._syntax_feedback(f) == ""

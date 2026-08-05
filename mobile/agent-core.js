@@ -353,8 +353,25 @@
           throw err;
         }
         const path = `chats/${chat.id}.json`;
-        const blob = await aesEncrypt(chat, key);
-        await gh.putFile(path, JSON.stringify(blob), `Save session ${chat.id}`, await fileSha(path));
+        // Merge over whatever is already stored, rather than replacing it.
+        //
+        // A write only carries the fields the writing device knows about, and
+        // the two ends of this store are different programs released
+        // separately -- the desktop is routinely older than the phone, or the
+        // other way round. Replacing wholesale means the older side silently
+        // deletes every field the newer one added, which is how a chat lost the
+        // repo it belonged to and how another lost its transcript.
+        // Absent means "I have nothing to say about this", not "delete it".
+        // Clearing something is still possible by sending it explicitly: the
+        // desktop empties `pending` by passing [], which is present and wins.
+        let merged = chat, priorSha = null;
+        try {
+          const f = await gh.getFile(path);
+          priorSha = f.sha;
+          merged = Object.assign({}, await aesDecrypt(JSON.parse(f.text), key), chat);
+        } catch (e) { /* absent, or unreadable under a rotated key: chat wins */ }
+        const blob = await aesEncrypt(merged, key);
+        await gh.putFile(path, JSON.stringify(blob), `Save session ${chat.id}`, priorSha);
         const { data, sha } = await readIndex();
         const chats = (data.chats || []).filter((c) => c.id !== chat.id);
         chats.push({ id: chat.id, title: chat.title || "Untitled",

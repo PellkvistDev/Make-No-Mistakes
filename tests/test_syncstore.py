@@ -1516,3 +1516,29 @@ def test_the_index_says_whether_a_chat_has_a_repo(fake_codec):
     rows = {r["id"]: r for r in store.list()}
     assert rows["with"]["repo"] == "me/proj"
     assert rows["without"]["repo"] == "", "a local-only chat must be identifiable from the index"
+
+
+def test_save_merges_over_what_is_stored(fake_codec):
+    """The desktop and the phone are separate programs released separately, so
+    one is routinely older than the other. A write carries only the fields its
+    author knows about; absent must mean "nothing to say", not "delete"."""
+    fake = FakeGitHub()
+    _k, store, _c = open_sync(_repo(fake), "merge passphrase")
+    store.save({"id": "c1", "title": "Chat", "messages": [],
+                "transcript": [{"role": "user", "text": "hi"}],
+                "from_a_newer_build": {"kept": True}})
+    store.save({"id": "c1", "title": "Renamed", "messages": []})
+    back = store.load("c1")
+    assert back["title"] == "Renamed", "fields that ARE sent must still win"
+    assert back["transcript"] == [{"role": "user", "text": "hi"}]
+    assert back["from_a_newer_build"] == {"kept": True}
+
+
+def test_save_can_still_clear_a_field_by_sending_it(fake_codec):
+    """The desktop empties `pending` after acting on it. Merging must not turn
+    that into a queue nothing can ever drain."""
+    fake = FakeGitHub()
+    _k, store, _c = open_sync(_repo(fake), "merge passphrase")
+    store.save({"id": "c1", "messages": [], "pending": [{"task": "run the tests"}]})
+    store.save({"id": "c1", "messages": [], "pending": []})
+    assert store.load("c1")["pending"] == []
