@@ -2145,7 +2145,18 @@
 
   function registerSW() {
     if (!("serviceWorker" in navigator)) return;
-    navigator.serviceWorker.register("sw.js").catch(() => {});
+    navigator.serviceWorker.register("sw.js").then((reg) => {
+      // Ask whether there's a new build whenever the app comes back to the
+      // foreground. Without this, an installed PWA only looks on a fresh
+      // navigation — so one left open for days keeps running old code, and the
+      // only way out is knowing to close and reopen it. Nobody should have to
+      // know that the app has a cache.
+      const check = () => {
+        if (document.visibilityState === "visible") reg.update().catch(() => {});
+      };
+      document.addEventListener("visibilitychange", check);
+      window.addEventListener("focus", check);
+    }).catch(() => {});
     // When a new SW takes control (a fresh deploy), reload once so the page runs
     // the new code. Guarded on an existing controller so a first install doesn't loop.
     if (navigator.serviceWorker.controller) {
@@ -2153,7 +2164,16 @@
       navigator.serviceWorker.addEventListener("controllerchange", () => {
         if (refreshing) return;
         refreshing = true;
-        location.reload();
+        // Never mid-turn. The agent's reply is in flight and lives only in this
+        // page; reloading now throws away work the user is waiting for, and a
+        // deploy landing at that moment is pure bad luck they didn't cause.
+        // Wait for the turn to finish — the new code is one reload away either
+        // way, and this one can be a quiet one.
+        const whenIdle = () => {
+          if (currentRun || composing) return setTimeout(whenIdle, 1000);
+          location.reload();
+        };
+        whenIdle();
       });
     }
   }

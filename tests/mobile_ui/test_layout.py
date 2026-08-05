@@ -306,3 +306,4 @@ def test_moving_between_two_fields_does_not_restore_the_slack_in_between(phone):
     assert p.evaluate("() => document.documentElement.classList.contains('kb-open')"), \
         "the slack came back while moving between two fields"
     assert phone.errors == []
+
