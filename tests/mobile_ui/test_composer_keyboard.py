@@ -108,3 +108,43 @@ def test_a_collapsing_address_bar_is_still_not_mistaken_for_a_keyboard(phone, ap
     60px browser chrome change would become a 104px phantom keyboard."""
     assert kb_on(phone, app_url, "iPhone", covered=60) == "0px"
     assert phone.errors == []
+
+
+def kb_when_inner_height_also_shrinks(phone, app_url, platform, covered=300):
+    """The installed-PWA case: window.innerHeight tracks the VISUAL viewport,
+    so it shrinks with the keyboard too and innerHeight - vv.height is ~0.
+
+    This is the one that mattered. The dock never lifted; iOS scrolling the
+    document to reveal the focused field was putting the composer on screen by
+    accident, and removing that shove is what exposed it.
+    """
+    phone.page.add_init_script(
+        "Object.defineProperty(navigator, 'platform', { get: () => %r });" % platform)
+    phone.open_at(app_url)
+    phone.page.wait_for_selector("#screen-setup:not([hidden])", timeout=15000)
+    return phone.page.evaluate("""(covered) => {
+      const vv = window.visualViewport;
+      const layout = document.documentElement.clientHeight;
+      Object.defineProperty(vv, 'height',
+        { configurable: true, get: () => layout - covered });
+      // The engine under test: innerHeight follows the visible area, not the
+      // layout viewport.
+      Object.defineProperty(window, 'innerHeight',
+        { configurable: true, get: () => layout - covered });
+      vv.dispatchEvent(new Event('resize'));
+      return getComputedStyle(document.documentElement).getPropertyValue('--kb').trim();
+    }""", covered)
+
+
+def test_the_dock_still_lifts_when_innerheight_shrinks_with_the_keyboard(phone, app_url):
+    got = kb_when_inner_height_also_shrinks(phone, app_url, "iPhone")
+    assert got == "344px", (
+        "the dock did not lift: the measurement used a reference that shrinks "
+        f"with the keyboard, so it saw nothing covered (--kb = {got})")
+    assert phone.errors == []
+
+
+def test_the_same_holds_where_there_is_no_accessory_bar(phone, app_url):
+    got = kb_when_inner_height_also_shrinks(phone, app_url, "Linux x86_64")
+    assert got == "300px", f"--kb = {got}"
+    assert phone.errors == []

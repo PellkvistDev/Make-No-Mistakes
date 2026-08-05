@@ -111,8 +111,23 @@
     const vv = window.visualViewport;
     if (!vv) return;                       // --kb stays 0; layout is unchanged
     const apply = () => {
-      // offsetTop covers the case where the visual viewport has been panned.
-      let covered = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      // How much of the screen is hidden = (where the layout viewport ends)
+      // minus (where the visible area ends). The dock is position:fixed, so it
+      // is laid out against the LAYOUT viewport, and that is the reference this
+      // subtraction needs.
+      //
+      // window.innerHeight alone was wrong: in an installed iOS PWA it tracks
+      // the visual viewport, so it shrinks with the keyboard and the difference
+      // comes out ~0 — the dock never lifted at all. That was hidden until now
+      // because iOS was scrolling the whole document up to reveal the focused
+      // field, which put the composer on screen by accident; removing that
+      // shove is what exposed it.
+      //
+      // Taking the larger of the two references is right whichever one this
+      // engine keeps stable, and needs no per-platform guess.
+      const layoutH = Math.max(document.documentElement.clientHeight || 0,
+                               window.innerHeight || 0);
+      let covered = Math.max(0, layoutH - vv.height - vv.offsetTop);
       // Ignore small deltas so a browser's collapsing address bar doesn't read
       // as a keyboard.
       if (covered <= 80) covered = 0;
