@@ -96,15 +96,28 @@
     }, 0);
   });
 
+  // iOS draws its own bar above the keyboard for form fields — the one with the
+  // prev/next chevrons and Done. It belongs to the system, not to this app,
+  // there is no web API to remove it, and visualViewport does NOT count it: the
+  // viewport shrinks by the keyboard only. So the composer was positioned
+  // correctly and still ended up underneath it, invisible while typing.
+  // 44 is that bar's height in points, which is fixed on iPhone. Applied only
+  // while the keyboard is actually up, and only where the bar exists.
+  const IOS_ACCESSORY_BAR_PX = 44;
+  const hasAccessoryBar = /iPad|iPhone|iPod/.test(navigator.platform || "") ||
+    (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform || ""));
+
   function trackKeyboard() {
     const vv = window.visualViewport;
     if (!vv) return;                       // --kb stays 0; layout is unchanged
     const apply = () => {
       // offsetTop covers the case where the visual viewport has been panned.
-      const covered = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
+      let covered = Math.max(0, window.innerHeight - vv.height - vv.offsetTop);
       // Ignore small deltas so a browser's collapsing address bar doesn't read
       // as a keyboard.
-      document.documentElement.style.setProperty("--kb", (covered > 80 ? covered : 0) + "px");
+      if (covered <= 80) covered = 0;
+      else if (hasAccessoryBar) covered += IOS_ACCESSORY_BAR_PX;
+      document.documentElement.style.setProperty("--kb", covered + "px");
       pinDocument();     // opening the keyboard is when iOS tries to scroll
       fitMessages();
     };
@@ -894,7 +907,16 @@
   prompt.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); composer.requestSubmit(); }
   });
-  composer.addEventListener("submit", (e) => { e.preventDefault(); sendPrompt(); });
+  composer.addEventListener("submit", (e) => {
+    e.preventDefault();
+    // Let go of the field. On iOS the keyboard — and the accessory bar iOS
+    // draws above it — stay up until something blurs, so sending with the
+    // return key left both sitting there and the only way out was the Done
+    // button on a bar that has nothing to do with this app. Sending is the end
+    // of the thought; the keyboard should go with it.
+    prompt.blur();
+    sendPrompt();
+  });
   $("btn-stop").addEventListener("click", () => { if (currentRun) currentRun.stop(); });
 
   // ---------------------------------------------------------- attachments
