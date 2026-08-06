@@ -159,7 +159,7 @@ def test_settings_reports_the_numbers_that_describe_this_screen(phone):
     phone.page.click("#btn-chat-settings")
     phone.page.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
     text = phone.page.inner_text("#set-diag")
-    for key in ("build", "standalone", "layout h", "inner h", "visual h",
+    for key in ("build", "standalone", "fixed box h", "html h", "inner h", "visual h",
                 "--kb", "--safe-t", "--safe-b", "dock bottom"):
         assert key in text, f"{key!r} missing from the diagnostics:\n{text}"
     assert phone.errors == []
@@ -178,6 +178,39 @@ def test_the_readout_is_live_while_the_keyboard_is_up(phone):
     assert phone.errors == []
 
 
+def test_the_keyboard_up_numbers_survive_the_keyboard_going_down(phone):
+    """The live readout alone answers nothing. Opening Settings takes focus off
+    the composer, so the keyboard drops and every value that describes it is
+    already gone by the time the panel is on screen. The numbers have to be
+    recorded while the keyboard is up and still be there afterwards."""
+    phone.setup()
+    phone.page.evaluate("""() => {
+      const vv = window.visualViewport;
+      const layout = document.documentElement.clientHeight;
+      Object.defineProperty(vv, 'height',
+        { configurable: true, get: () => layout - 300 });
+      vv.dispatchEvent(new Event('resize'));
+    }""")
+    # ...and now the keyboard goes away, exactly as it does when you reach for
+    # Settings.
+    phone.page.evaluate("""() => {
+      delete window.visualViewport.height;
+      window.visualViewport.dispatchEvent(new Event('resize'));
+    }""")
+    assert phone.page.evaluate(
+        "() => getComputedStyle(document.documentElement)"
+        ".getPropertyValue('--kb').trim()") == "0px", "the keyboard did not go down"
+
+    phone.page.click("#btn-chat-settings")
+    phone.page.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
+    text = phone.page.inner_text("#set-diag")
+    assert "while typing" in text, f"no recording section:\n{text}"
+    recorded = text.split("while typing", 1)[1]
+    assert "300px" in recorded, (
+        "the keyboard-up numbers were not kept, so the panel only ever shows "
+        f"the state with the keyboard down:\n{text}")
+
+
 def test_the_build_stamp_is_shown_so_a_stale_cache_is_visible(phone):
     phone.setup()
     phone.page.click("#btn-chat-settings")
@@ -186,3 +219,4 @@ def test_the_build_stamp_is_shown_so_a_stale_cache_is_visible(phone):
             if l.startswith("build:")]
     assert line and line[0].split(":", 1)[1].strip(), "no build identifier shown"
     assert phone.errors == []
+
