@@ -9,7 +9,8 @@
  * to the model API and GitHub (cross-origin, and/or non-GET) bypass the SW
  * entirely and are never stored.
  */
-const CACHE = "mnm-shell-v4";   // bumped: adds vendor/jsQR.js to the shell
+const CACHE = "mnm-shell-v5";   // bumped: forces a fresh shell onto phones that
+                                // are sitting on an HTTP-cached copy of the old one
 const SHELL = [
   "./index.html",
   "./app.js",
@@ -38,7 +39,13 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(req.url);
   if (req.method !== "GET" || url.origin !== self.location.origin) return; // API traffic bypasses the SW
   e.respondWith(
-    fetch(req)
+    // "no-cache" = always ask the server, using If-None-Match. Without it,
+    // fetch() is served straight out of the browser's own HTTP cache while the
+    // response is still fresh -- and GitHub Pages sends a max-age -- so
+    // network-first quietly degrades into HTTP-cache-first and a new deploy is
+    // invisible for the length of that window, restarts included. Revalidating
+    // costs one conditional request that answers 304 when nothing changed.
+    fetch(req, { cache: "no-cache" })
       .then((res) => {
         if (res && res.ok) {
           const copy = res.clone();
