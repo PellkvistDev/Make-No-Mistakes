@@ -117,6 +117,26 @@ def test_run_ci_task_no_changes_comments_and_skips_pr(tmp_path, monkeypatch):
     assert comments and "didn't need to change" in comments[0]
 
 
+# ------------------------------------------------ the workflow runs it all --
+
+def test_every_mobile_test_file_is_actually_run_by_ci():
+    """A suite CI never invokes is indistinguishable from one that passes.
+
+    mobile/agent-core.test.js existed for a while before the workflow ran it,
+    so every green check on every phone change was green without it. The
+    workflow lists the files by name rather than by glob -- a glob that stops
+    matching fails the same silent way -- which only works if adding a file
+    also adds it there.
+    """
+    root = Path(__file__).parent.parent
+    workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    missing = [p.name for p in sorted((root / "mobile").glob("*.test.js"))
+               if f"mobile/{p.name}" not in workflow]
+    assert not missing, (
+        "these test files are never run by CI; add them to the `node --test` "
+        "line in .github/workflows/ci.yml:\n  " + "\n  ".join(missing))
+
+
 # ------------------------------------------------- source files stay text --
 
 def test_no_source_file_contains_a_literal_nul_byte():

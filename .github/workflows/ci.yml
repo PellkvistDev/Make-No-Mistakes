@@ -37,7 +37,11 @@ jobs:
       # The phone's logic layer: crypto, the sync store, context budgeting,
       # the agent loop. It had never run here, so every green check on every
       # phone change was green without it.
-      - run: node --test mobile/agent-core.test.js
+      #
+      # Listed one by one rather than by glob: a glob that stops matching is
+      # indistinguishable from a suite that passes. test_ci.py fails if a
+      # mobile/*.test.js file exists that is not named here.
+      - run: node --test mobile/agent-core.test.js mobile/sw.test.js
 
   # The UI layers, in a separate job because they need a browser. These are what
   # unit tests cannot reach: the phone's wiring (where a chat resume silently
