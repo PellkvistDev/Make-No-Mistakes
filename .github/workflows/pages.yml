@@ -1,9 +1,33 @@
 name: Deploy phone app to GitHub Pages
 
 # Publishes the static mobile/ PWA to GitHub Pages — free HTTPS hosting.
-# Only the mobile/ folder is uploaded, so the site root IS the app and nothing
+# Only the mobile/ folder is published, so the site root IS the app and nothing
 # else in the repo is exposed. Everything sensitive is encrypted client-side
 # with the user's PIN, so the host (GitHub) never sees keys or code.
+#
+# WHY THIS PUSHES A BRANCH INSTEAD OF USING actions/deploy-pages.
+#
+# deploy-pages creates a Pages deployment and then polls for it to finish. Its
+# wait is capped at ten minutes and the cap is not adjustable:
+#
+#   const MAX_TIMEOUT = 600000
+#   this.timeout = Math.min(timeoutInput, MAX_TIMEOUT)
+#
+# so a `timeout:` input larger than that is silently clamped. Worse, when the
+# wait runs out the action does not merely fail the job — it calls
+# cancelPagesDeployment() and kills the deployment on GitHub's side.
+#
+# On 2026-08-06 Pages was taking longer than ten minutes to finalise for this
+# repo. Eight consecutive runs built perfectly, waited, and then cancelled a
+# deployment that was working: one of them reached deployment_in_progress at
+# 9:58 of its 10:00 budget and was cancelled five seconds later. Nothing in a
+# workflow file can widen that window.
+#
+# Publishing from a branch has no client-side canceller. GitHub's own
+# pages-build-deployment runs after this push and takes as long as it takes.
+# The cost is that the Pages source is a repo SETTING, so this file only works
+# while Settings → Pages → Source is "Deploy from a branch" → gh-pages / (root).
+# Switching that back to "GitHub Actions" silently ignores everything here.
 
 on:
   push:
@@ -11,21 +35,18 @@ on:
     paths: ["mobile/**", ".github/workflows/pages.yml"]
   workflow_dispatch:
 
+# contents: write to push the gh-pages branch. No pages/id-token scopes are
+# needed any more — nothing here talks to the Pages deployment API.
 permissions:
-  contents: read
-  pages: write
-  id-token: write
+  contents: write
 
-# Let a running deploy finish; queue at most one more.
+# Let a running publish finish; queue at most one more.
 concurrency:
   group: pages
   cancel-in-progress: false
 
 jobs:
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+  publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -36,40 +57,30 @@ jobs:
         run: |
           sed -i "s|name=\"mnm-build\" content=\"dev\"|name=\"mnm-build\" content=\"${GITHUB_SHA::7}\"|" mobile/index.html
           grep -o 'name="mnm-build" content="[^"]*"' mobile/index.html
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: mobile
-      - id: deployment
-        uses: actions/deploy-pages@v4
-        with:
-          # Asks for 20 minutes instead of the default 10. NOTE: it does not
-          # appear to take effect — two separate runs with this set still
-          # aborted at 602s and 601s, i.e. the 600000 default. The input is
-          # documented on deploy-pages@v4 and the value is a plain number of
-          # milliseconds, so why it is ignored is not understood. It is left
-          # here because it is correct per the docs and costs nothing; it is
-          # not something to rely on.
-          timeout: 1200000
-          # WHAT TO DO WHEN A DEPLOY FAILS ON "Timeout reached, aborting!"
-          #
-          # The build is almost certainly fine — every step before this one
-          # succeeded and the failure is this action giving up on a deployment
-          # that never left deployment_queued. Only one Pages deployment can be
-          # in flight per repo, and that lock can wedge: five attempts over 70
-          # minutes failed identically here, so it is a stall, not a queue.
-          #
-          # 1. Do NOT re-run the run. This job uploads the artifact AND deploys
-          #    it, so a re-run uploads a SECOND artifact named github-pages and
-          #    every further attempt fails with "Multiple artifacts named
-          #    github-pages were unexpectedly found". That run is then
-          #    unrecoverable. Dispatch a fresh run instead — which is what the
-          #    workflow_dispatch trigger above is for.
-          # 2. If fresh runs keep timing out, the lock is wedged and no change
-          #    in this file will help. Settings → Pages → Source: switch away
-          #    from GitHub Actions, save, switch back, save. That clears it in
-          #    most reports.
-          # 3. If it still will not deploy, it is an infrastructure-level lock
-          #    only GitHub can reset. Open a support ticket saying: "Repository
-          #    Pages deployment environment is stuck in a wedged state during
-          #    the finalization phase."
+      - name: Publish mobile/ to the gh-pages branch
+        run: |
+          set -euo pipefail
+          # Copy the site out before rewriting the worktree, so the branch ends
+          # up containing mobile/'s CONTENTS at its root — the site root is the
+          # app, exactly as before.
+          site=$(mktemp -d)
+          cp -R mobile/. "$site"/
+          # Plain static files; Jekyll would otherwise eat anything starting
+          # with an underscore.
+          touch "$site/.nojekyll"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Orphan + rm -rf so the published branch carries the site and
+          # nothing else: no repo history, no source, no workflows.
+          git checkout --orphan gh-pages
+          git rm -rf . > /dev/null
+          cp -R "$site"/. .
+          git add -A
+          git commit -q -m "Publish ${GITHUB_SHA::7}"
+          # Force, because each publish is a fresh single-commit history rather
+          # than a line to fast-forward. Safe: this branch is a build output —
+          # it is written only here and never has anything worth keeping.
+          # Uses the credentials actions/checkout persisted, so no token ends
+          # up on a command line.
+          git push -f origin gh-pages
