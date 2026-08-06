@@ -256,6 +256,81 @@ def test_the_dock_lifts_over_the_keyboard(phone):
     assert phone.errors == []
 
 
+# ------------------------------- what sits behind iOS's translucent bar ----
+# The accessory bar above the keyboard cannot be removed (see index.html), and
+# it is translucent: whatever the app draws underneath shows through it. So the
+# app has to draw something worth seeing there. Everything positioned against
+# the dock has to account for the lift, or it stays at the bottom of the screen
+# and appears through the bar in pieces.
+
+KB = 300
+
+
+def with_keyboard(phone, px=KB):
+    phone.page.evaluate("(px) => document.documentElement.style.setProperty('--kb', px + 'px')", px)
+    phone.page.wait_for_timeout(60)
+
+
+def test_the_scrim_stays_at_the_bottom_of_the_screen_when_the_dock_lifts(phone):
+    """Reported: 'the gradient that's supposed to be at the bottom of the screen
+    gets shoved above that bar'. As a child of the dock the scrim rode up with
+    it, so the gradient ended at the top of the accessory bar and raw chat text
+    showed through the translucent bar below."""
+    phone.setup()
+    simulate_insets(phone)
+    with_keyboard(phone)
+    seen = phone.page.evaluate("""() => {
+      const dock = document.getElementById('composer-dock');
+      const cs = getComputedStyle(dock, '::before');
+      return { position: cs.position, bottom: cs.bottom, height: parseFloat(cs.height),
+               dockH: dock.offsetHeight };
+    }""")
+    assert seen["position"] == "fixed", (
+        "the scrim is positioned against the dock, so it lifts with it and stops "
+        f"at the top of the accessory bar: {seen}")
+    assert seen["bottom"] == "0px", f"the scrim does not reach the screen bottom: {seen}"
+    assert seen["height"] >= KB + seen["dockH"], (
+        f"the scrim is too short to reach behind the keyboard: {seen}")
+    assert phone.errors == []
+
+
+def test_no_chat_is_left_sitting_under_the_lifted_composer(phone):
+    """The other half of the same picture: .messages is fixed;inset:0, so it
+    spans the part of the screen the keyboard covers. Padding only for the dock
+    left a keyboard's worth of chat underneath it, which the translucent bar
+    then showed in slices."""
+    phone.setup()
+    phone.send("first")
+    phone.wait_idle()
+    with_keyboard(phone)
+    seen = phone.page.evaluate("""() => {
+      const msgs = document.getElementById('messages');
+      const dock = document.getElementById('composer-dock');
+      return { pad: parseFloat(getComputedStyle(msgs).paddingBottom),
+               dockH: dock.offsetHeight };
+    }""")
+    assert seen["pad"] >= KB + seen["dockH"], (
+        f"chat can scroll under the composer and the keyboard: {seen}")
+    assert phone.errors == []
+
+
+def test_the_jump_to_latest_pill_rides_up_with_the_composer(phone):
+    """It floats just above the dock. Anchored to the dock height alone it
+    stays at the bottom of the screen, behind the keys."""
+    phone.setup()
+    with_keyboard(phone)
+    bottom = phone.page.evaluate("""() => {
+      const el = document.createElement('button');
+      el.className = 'to-bottom';
+      document.getElementById('screen-chat').appendChild(el);
+      const v = getComputedStyle(el).bottom;
+      el.remove();
+      return parseFloat(v);
+    }""")
+    assert bottom >= KB, f"the pill sits {bottom}px up, inside the keyboard"
+    assert phone.errors == []
+
+
 def test_focusing_a_field_removes_the_slack_before_anything_can_scroll_it(phone):
     """The reported flash: the UI lurched up and snapped back on every tap.
 

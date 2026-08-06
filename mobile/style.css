@@ -307,6 +307,13 @@ button.link.danger { color: var(--danger); }
 #screen-chat .messages {
   position: fixed; inset: 0; overflow-y: auto;
   padding: 16px 14px 8px;
+  /* Clearing the composer means clearing the dock AND the lift: this box is
+     fixed;inset:0, so it spans the part of the screen the keyboard covers.
+     In CSS rather than JS because it was JS, and JS only ran it on some of the
+     events that change --kb -- so a keyboard's worth of chat ended up sitting
+     under the composer, showing through iOS's translucent accessory bar in
+     slices. A calc cannot be out of date. */
+  padding-bottom: calc(var(--dock-h, 84px) + var(--kb, 0px) + 6px);
   display: flex; flex-direction: column; gap: 10px;
   -webkit-overflow-scrolling: touch;
 }
@@ -321,19 +328,32 @@ button.link.danger { color: var(--danger); }
      stops applying — otherwise there's a dead gap above the keys. */
   padding-bottom: max(0px, calc(var(--safe-b) - var(--kb, 0px)));
 }
-/* The scrim runs all the way to the bottom of the dock.
-   It used to stop at the top of the home-indicator inset, on the theory that
-   leaving that band as pure wallpaper avoided "a bar at the very bottom". It
-   did the opposite: the scrim is at its darkest exactly where it was cut off,
-   so it ended in a hard horizontal line with brighter, undimmed wallpaper
-   below it — a band the height of the bottom inset, which is what measuring
-   the reported screenshot showed (a clean jump from rgb(3,2,82) to rgb(4,5,50)
-   about 33 CSS px up from the bottom edge). A gradient that reaches the edge
-   has no line to see. */
+/* The scrim runs to the bottom of the SCREEN, not the bottom of the dock.
+   position:fixed rather than absolute is the whole point: as a child of the
+   dock it rode up with it, so while the keyboard was open the gradient stopped
+   at the top of iOS's accessory bar and simply ended, mid-screen. That bar is
+   translucent — app content shows through it — so what appeared behind it was
+   whatever chat happened to be there, sliced off at a hard horizontal line.
+   Pinning the scrim to the viewport puts the gradient behind the bar instead.
+
+   It used to stop at the top of the home-indicator inset too, on the theory
+   that leaving that band as pure wallpaper avoided "a bar at the very bottom".
+   That did the opposite: the scrim is darkest exactly where it was cut off, so
+   it ended in a hard line with brighter wallpaper below (a clean jump from
+   rgb(3,2,82) to rgb(4,5,50) about 33 CSS px up, when the screenshot was
+   measured). Same lesson, twice: a gradient that reaches the edge has no line.
+
+   The stops are in px from the bottom rather than percentages, so the fade is
+   the same height whatever --kb is. Otherwise opening the keyboard stretches a
+   55% midpoint over 400px and the tint washes out. */
 #composer-dock::before {
-  content: ""; position: absolute; left: 0; right: 0; top: 0;
-  bottom: 0; z-index: -1;
-  background: linear-gradient(to top, rgba(6,8,12,.5), rgba(6,8,12,.28) 55%, transparent);
+  content: ""; position: fixed; left: 0; right: 0; bottom: 0; z-index: -1;
+  height: calc(var(--kb, 0px) + var(--dock-h, 84px) + 56px);
+  background: linear-gradient(to top,
+    rgba(6,8,12,.5) 0,
+    rgba(6,8,12,.5) calc(var(--kb, 0px) + 8px),
+    rgba(6,8,12,.28) calc(var(--kb, 0px) + var(--dock-h, 84px) * .6),
+    transparent 100%);
   pointer-events: none;
 }
 .bubble { border-radius: var(--radius); padding: 11px 14px; max-width: 92%; word-wrap: break-word; animation: rise .18s ease; box-shadow: var(--glass-hi); }
@@ -433,7 +453,10 @@ pre.code, pre.tool-out, .preview {
 /* jump-to-latest pill, shown only when scrolled away from the live end */
 .to-bottom {
   position: absolute; left: 50%; transform: translateX(-50%);
-  bottom: calc(var(--dock-h, 84px) + 10px); z-index: 4;
+  /* --kb as well as the dock height: the pill floats just above the composer,
+     and the composer lifts over the keyboard. Without it the pill stays at the
+     bottom of the screen, behind the keys. */
+  bottom: calc(var(--dock-h, 84px) + var(--kb, 0px) + 10px); z-index: 4;
   width: 38px; height: 38px; border-radius: 999px; font-size: 17px; line-height: 1;
   color: #dbe3f5; background: var(--glass-strong); border: 1px solid var(--glass-brd);
   -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);

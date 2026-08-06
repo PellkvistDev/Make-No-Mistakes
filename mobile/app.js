@@ -44,9 +44,12 @@
     if (!bar || !dock || !msgs || $("screen-chat").hidden) return;
     const near = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
     msgs.style.paddingTop = (bar.offsetHeight + 6) + "px";
-    msgs.style.paddingBottom = (dock.offsetHeight + 6) + "px";
-    // The jump-to-latest pill floats just above the dock, which grows with the
-    // textarea and attachment chips.
+    // The bottom padding is NOT set here. It is a calc in the stylesheet over
+    // --dock-h and --kb, so it cannot fall out of step with the keyboard on an
+    // event this function does not run on — which is how a keyboard's worth of
+    // chat came to sit under the composer.
+    // --dock-h is published for it, and for the jump-to-latest pill: the dock
+    // grows with the textarea and the attachment chips.
     $("screen-chat").style.setProperty("--dock-h", dock.offsetHeight + "px");
     if (near) msgs.scrollTop = msgs.scrollHeight;
   }
