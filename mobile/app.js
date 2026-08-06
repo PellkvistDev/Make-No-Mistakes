@@ -79,20 +79,26 @@
   // keyboard animates in, and html.kb-open drops the spare inset of height that
   // is the only scrollable slack there is. The listener above stays as a
   // backstop for anything that scrolls the document by another route.
-  const TYPES = /^(input|textarea|select)$/i;
+  // "Will focusing this raise the keyboard?" — which a tag name alone no longer
+  // answers, because the composer is a contenteditable div (see below). Testing
+  // only for input/textarea/select would leave the composer out of the one
+  // handler that exists to stop the screen lurching when it is focused.
+  const takesKeyboard = (el) =>
+    !!el && (/^(input|textarea|select)$/i.test(el.tagName) || el.isContentEditable);
   document.addEventListener("focusin", (e) => {
-    if (e.target && TYPES.test(e.target.tagName)) {
+    if (takesKeyboard(e.target)) {
       document.documentElement.classList.add("kb-open");
       pinDocument();
     }
   });
   document.addEventListener("focusout", (e) => {
-    if (!e.target || !TYPES.test(e.target.tagName)) return;
+    if (!takesKeyboard(e.target)) return;
     // Only once nothing else has taken focus, or moving between two fields
     // would put the height back for a frame — the same flash, in miniature.
     setTimeout(() => {
-      const el = document.activeElement;
-      if (!el || !TYPES.test(el.tagName)) document.documentElement.classList.remove("kb-open");
+      if (!takesKeyboard(document.activeElement)) {
+        document.documentElement.classList.remove("kb-open");
+      }
     }, 0);
   });
 
@@ -955,11 +961,83 @@
   // ================================================================ CHAT
   const composer = $("composer");
   const prompt = $("in-prompt");
-  prompt.addEventListener("input", () => {
-    prompt.style.height = "auto";
-    prompt.style.height = Math.min(prompt.scrollHeight, 160) + "px";
-    fitMessages();
+
+  // The composer is a contenteditable div, not a <textarea>. iOS draws its form
+  // accessory bar -- the prev/next chevrons and Done -- above the keyboard for
+  // <input> and <textarea>, and for nothing else. There is no web API to
+  // suppress it, so not being a form control is the only way out. It cost 44px
+  // of screen and put a Done button on the app that the app never asked for.
+  //
+  // Everything that used to talk to a textarea still can: value, placeholder
+  // and disabled are defined here, so the fifteen call sites elsewhere read the
+  // same as they did and there is one place to be wrong instead of fifteen.
+
+  // <br> and block boundaries are how a contenteditable stores a line break.
+  // textContent drops both, which would quietly flatten every multi-line
+  // message into one run-on line at the moment it is sent.
+  function readPrompt() {
+    let out = "";
+    (function walk(node) {
+      for (const n of node.childNodes) {
+        if (n.nodeType === 3) out += n.nodeValue;
+        else if (n.nodeName === "BR") out += "\n";
+        else {
+          if (/^(DIV|P)$/.test(n.nodeName) && out && !out.endsWith("\n")) out += "\n";
+          walk(n);
+        }
+      }
+    })(prompt);
+    return out;
+  }
+  Object.defineProperties(prompt, {
+    value: {
+      get() { return readPrompt(); },
+      // white-space:pre-wrap means a plain text node renders its newlines, so
+      // setting multi-line text needs no markup building.
+      set(v) { this.textContent = v == null ? "" : String(v); markEmpty(); },
+    },
+    placeholder: {
+      get() { return this.dataset.placeholder || ""; },
+      set(v) { this.dataset.placeholder = v == null ? "" : String(v); },
+    },
+    disabled: {
+      get() { return this.getAttribute("contenteditable") === "false"; },
+      set(v) {
+        this.setAttribute("contenteditable", v ? "false" : "true");
+        this.classList.toggle("disabled", !!v);
+      },
+    },
   });
+  function markEmpty() { prompt.classList.toggle("is-empty", !prompt.textContent); }
+  markEmpty();
+
+  // A div grows with its content and the CSS caps it, so there is no height to
+  // measure any more -- only the message list needs telling that the composer
+  // took more room.
+  function autoGrow() { markEmpty(); fitMessages(); }
+  prompt.addEventListener("input", autoGrow);
+
+  // Pasting into a contenteditable brings the source's markup with it. Only the
+  // text was ever wanted -- it is what gets sent either way -- so strip it at
+  // the door rather than leave styled fragments sitting in the box.
+  prompt.addEventListener("paste", (e) => {
+    const text = (e.clipboardData || window.clipboardData || {}).getData?.("text/plain");
+    if (text == null) return;                       // let the browser deal with it
+    e.preventDefault();
+    if (!document.execCommand("insertText", false, text)) {
+      const sel = window.getSelection();
+      if (sel && sel.rangeCount) {
+        const r = sel.getRangeAt(0);
+        r.deleteContents();
+        r.insertNode(document.createTextNode(text));
+        r.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(r);
+      }
+    }
+    autoGrow();
+  });
+
   prompt.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); composer.requestSubmit(); }
   });
@@ -1504,8 +1582,7 @@
   function rollbackOptimisticSend(bubble, text, atts) {
     popOptimisticUser(bubble);
     prompt.value = text;
-    prompt.style.height = "auto";
-    prompt.style.height = Math.min(prompt.scrollHeight, 160) + "px";
+    autoGrow();
     attachments = atts;
     renderChips();
   }
@@ -1522,7 +1599,7 @@
       return;
     }
     steerQueued = text;
-    prompt.value = ""; prompt.style.height = "auto"; fitMessages();
+    prompt.value = ""; autoGrow();
     steerBubble = addBubble("user", text, false);
     steerBubble.classList.add("queued");
     haptic(8);
@@ -1556,13 +1633,13 @@
     if (session && session.readOnly) {
       // No agent to send to; the send button parks a note instead.
       if (!text) return;
-      prompt.value = ""; prompt.style.height = "auto"; fitMessages();
+      prompt.value = ""; autoGrow();
       await parkNoteForDesktop(text);
       return;
     }
     if (!text && !attachments.length) return;
     const savedAttachments = attachments.slice();
-    prompt.value = ""; prompt.style.height = "auto"; fitMessages();
+    prompt.value = ""; autoGrow();
     const bubble = addBubble("user", (text || "(attached files)") + attachmentNote());
     // composeMessage may call the vision model (to describe uploaded images), so
     // guard against a second send and disable the composer while it runs.
@@ -1706,8 +1783,7 @@
     session.compact = null;
     replayTranscript();
     prompt.value = text;
-    prompt.style.height = "auto";
-    prompt.style.height = Math.min(prompt.scrollHeight, 160) + "px";
+    autoGrow();
     prompt.focus();
     persistSession();
     toast("Edit and send again. Any files already committed stay committed.");

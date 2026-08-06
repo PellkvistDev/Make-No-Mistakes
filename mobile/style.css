@@ -112,7 +112,7 @@ body.has-bg { background: transparent; }
 
 /* A reusable glass helper. */
 .glass, .dialog, .toast,
-.field input, .field select, .row input, .composer textarea,
+.field input, .field select, .row input, .composer .prompt,
 .repo-list li, .tool-head, button.ghost, .swatch.upload,
 .bubble.assistant, pre.code, pre.tool-out, .preview {
   -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
@@ -465,12 +465,27 @@ pre.code, pre.tool-out, .preview {
   padding: 8px 12px 12px; background: none;
   width: 100%; max-width: 720px; margin: 0 auto;
 }
-.composer textarea {
-  flex: 1; resize: none; background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi);
-  color: var(--text); border-radius: 20px; padding: 11px 15px; max-height: 160px; line-height: 1.4;
+/* Not a textarea -- see index.html. It therefore needs the parts a textarea
+   came with: growing to fit its text and stopping (max-height + overflow, so no
+   JS has to measure anything), keeping the newlines shift+return puts in
+   (pre-wrap), and breaking a pasted URL rather than widening the whole bar. */
+.composer .prompt {
+  flex: 1; min-width: 0; background: var(--glass); border: 1px solid var(--glass-brd);
+  box-shadow: var(--glass-hi);
+  color: var(--text); border-radius: 20px; padding: 11px 15px; line-height: 1.4;
+  max-height: 160px; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  -webkit-user-select: text; user-select: text;
 }
-.composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122,162,255,.18); }
-.composer textarea:disabled { opacity: .6; }
+.composer .prompt:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122,162,255,.18); }
+.composer .prompt.disabled { opacity: .6; }
+/* A textarea's placeholder, rebuilt. Driven by a class rather than :empty
+   because deleting the last character leaves a stray <br> behind, and :empty
+   would then be false with nothing on screen. */
+.composer .prompt.is-empty::before {
+  content: attr(data-placeholder);
+  color: var(--muted); pointer-events: none;
+}
 .send {
   width: 42px; height: 42px; flex: none; border-radius: 50%;
   background: linear-gradient(180deg, var(--accent), #6690f0); color: #0a0d14;
