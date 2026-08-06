@@ -148,3 +148,41 @@ def test_the_same_holds_where_there_is_no_accessory_bar(phone, app_url):
     got = kb_when_inner_height_also_shrinks(phone, app_url, "Linux x86_64")
     assert got == "300px", f"--kb = {got}"
     assert phone.errors == []
+
+
+# ------------------------------------------------------------ diagnostics --
+# The keyboard took three attempts because every number that would have
+# answered it lives on the device and nowhere else. They are in the app now.
+
+def test_settings_reports_the_numbers_that_describe_this_screen(phone):
+    phone.setup()
+    phone.page.click("#btn-chat-settings")
+    phone.page.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
+    text = phone.page.inner_text("#set-diag")
+    for key in ("build", "standalone", "layout h", "inner h", "visual h",
+                "--kb", "--safe-t", "--safe-b", "dock bottom"):
+        assert key in text, f"{key!r} missing from the diagnostics:\n{text}"
+    assert phone.errors == []
+
+
+def test_the_readout_is_live_while_the_keyboard_is_up(phone):
+    """A snapshot taken before the keyboard opened describes the wrong state,
+    which is exactly the state nobody can observe from a desktop."""
+    phone.setup()
+    phone.page.click("#btn-chat-settings")
+    phone.page.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
+    phone.page.evaluate("() => document.documentElement.style.setProperty('--kb', '311px')")
+    phone.page.wait_for_function(
+        "() => document.getElementById('set-diag').innerText.includes('311px')",
+        timeout=5000)
+    assert phone.errors == []
+
+
+def test_the_build_stamp_is_shown_so_a_stale_cache_is_visible(phone):
+    phone.setup()
+    phone.page.click("#btn-chat-settings")
+    phone.page.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
+    line = [l for l in phone.page.inner_text("#set-diag").splitlines()
+            if l.startswith("build:")]
+    assert line and line[0].split(":", 1)[1].strip(), "no build identifier shown"
+    assert phone.errors == []

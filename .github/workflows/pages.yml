@@ -29,6 +29,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Stamp the build so the phone can say which one it is running. "Is my
+      # phone on the fix or a cached copy?" was guessed at repeatedly; it is
+      # now a thing you can read in Settings.
+      - name: Stamp the build
+        run: |
+          sed -i "s|name=\"mnm-build\" content=\"dev\"|name=\"mnm-build\" content=\"${GITHUB_SHA::7}\"|" mobile/index.html
+          grep -o 'name="mnm-build" content="[^"]*"' mobile/index.html
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
