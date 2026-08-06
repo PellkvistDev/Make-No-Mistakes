@@ -204,14 +204,19 @@
         </div>
         <form id="composer" class="composer">
           <button id="btn-attach" class="attach-btn" type="button" title="Attach repo files">＋</button>
-          <!-- A contenteditable div rather than a <textarea>: iOS draws its form
-               accessory bar (prev/next chevrons and Done) above the keyboard for
-               <input> and <textarea> and for nothing else, and there is no web
-               API to suppress it. app.js gives this element .value, .placeholder
-               and .disabled so the rest of the app cannot tell the difference. -->
-          <div id="in-prompt" class="prompt" contenteditable="true" role="textbox"
-               aria-multiline="true" aria-label="Message the agent"
-               enterkeyhint="send" data-placeholder="Message the agent…"></div>
+          <!-- A textarea, deliberately. iOS draws its form accessory bar (the
+               prev/next chevrons and Done) above the keyboard for form controls,
+               and this was swapped for a contenteditable div to escape it. On
+               the device the bar was still drawn: the diagnostics recorded
+               visual h 449 and --kb 344 both before and after, unchanged, and
+               the chevrons appeared greyed out — iOS knows there is nothing to
+               navigate to and draws the bar regardless. There is no web API for
+               this; every published "fix" is either an inputmode hack that does
+               not apply to contenteditable, or native code overriding
+               inputAccessoryView on the web view, which a PWA cannot reach.
+               So: keep the real form control, which is better at dictation,
+               VoiceOver, undo and autocorrect, and leave the 44px spent. -->
+          <textarea id="in-prompt" rows="1" placeholder="Message the agent…" autocomplete="off"></textarea>
           <button id="btn-send" class="send" type="submit" title="Send">▲</button>
           <button id="btn-stop" class="send stop" type="button" title="Stop" hidden>■</button>
         </form>
