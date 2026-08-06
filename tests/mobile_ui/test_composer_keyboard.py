@@ -6,6 +6,8 @@ return key left the keyboard up, with the only way out being a Done button on a
 bar that has nothing to do with this app.
 """
 
+from .conftest import prompt_value
+
 
 def test_sending_blurs_the_composer(phone):
     """On iOS the keyboard and its accessory bar stay until something blurs.
@@ -38,7 +40,7 @@ def test_the_return_key_sends_rather_than_adding_a_newline(phone):
       document.getElementById('in-prompt').dispatchEvent(ev);
     }""")
     phone.wait_idle()
-    assert p.input_value("#in-prompt") == "", "the composer should empty on send"
+    assert prompt_value(p) == "", "the composer should empty on send"
     bubbles = p.eval_on_selector_all(".bubble.user", "els => els.map(e => e.textContent)")
     assert any("a question" in b for b in bubbles)
     assert phone.errors == []
@@ -55,8 +57,74 @@ def test_shift_return_still_makes_a_newline(phone):
       document.getElementById('in-prompt').dispatchEvent(ev);
     }""")
     p.wait_for_timeout(200)
-    assert p.input_value("#in-prompt") == "line one", "shift+return sent the message"
+    assert prompt_value(p) == "line one", "shift+return sent the message"
     assert p.eval_on_selector_all(".bubble.user", "e => e.length") == 0
+    assert phone.errors == []
+
+
+# ------------------------------------------- the composer is not a form field
+# iOS draws its form accessory bar -- prev/next chevrons and Done -- above the
+# keyboard for <input> and <textarea>, and for nothing else. There is no web API
+# to suppress it. Not being a form control is the only thing that removes it, so
+# the composer is a contenteditable div, and these are the parts of a textarea
+# it therefore has to reimplement.
+
+def test_the_composer_is_not_a_form_control(phone):
+    """The one property the whole swap exists for. A future tidy-up that turns
+    this back into a <textarea> brings iOS's bar back with it, and nothing else
+    in this file would notice."""
+    phone.setup()
+    kind = phone.page.evaluate("""() => {
+      const el = document.getElementById('in-prompt');
+      return { tag: el.tagName, editable: el.isContentEditable };
+    }""")
+    assert kind["tag"] not in ("INPUT", "TEXTAREA", "SELECT"), (
+        f"the composer is a <{kind['tag'].lower()}>, so iOS will draw its form "
+        "accessory bar above the keyboard again")
+    assert kind["editable"], "the composer cannot be typed into"
+    assert phone.errors == []
+
+
+def test_a_line_break_survives_being_read_back(phone):
+    """A contenteditable stores a line break as <br>, and textContent drops it.
+    Reading the composer with textContent would flatten every multi-line message
+    into one run-on line, silently, at the moment it is sent."""
+    phone.setup()
+    phone.page.evaluate("""() => {
+      const el = document.getElementById('in-prompt');
+      el.textContent = '';
+      el.append(document.createTextNode('first'),
+                document.createElement('br'),
+                document.createTextNode('second'));
+    }""")
+    assert prompt_value(phone.page) == "first\nsecond", "the line break was lost"
+    assert phone.errors == []
+
+
+def test_the_composer_still_reports_empty_and_full_like_a_field(phone):
+    """value, placeholder and disabled are what the rest of app.js talks to.
+    A div has none of them natively."""
+    phone.setup()
+    p = phone.page
+    p.fill("#in-prompt", "some text")
+    assert prompt_value(p) == "some text"
+    state = p.evaluate("""() => {
+      const el = document.getElementById('in-prompt');
+      el.value = '';
+      const empty = { value: el.value, placeholderShown: el.classList.contains('is-empty') };
+      el.placeholder = 'Leave a note…';
+      el.disabled = true;
+      return Object.assign(empty, {
+        placeholder: el.dataset.placeholder,
+        disabled: el.disabled,
+        editableWhileDisabled: el.isContentEditable,
+      });
+    }""")
+    assert state["value"] == ""
+    assert state["placeholderShown"], "nothing would be shown in the empty box"
+    assert state["placeholder"] == "Leave a note…", "the placeholder does not follow"
+    assert state["disabled"] and not state["editableWhileDisabled"], \
+        "disabling the composer left it typeable"
     assert phone.errors == []
 
 
