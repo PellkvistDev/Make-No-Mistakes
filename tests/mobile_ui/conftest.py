@@ -23,21 +23,6 @@ import pytest
 
 MOBILE = Path(__file__).resolve().parents[2] / "mobile"
 
-
-def prompt_value(page):
-    """What is in the composer.
-
-    Not page.input_value(): the composer is a contenteditable div, not a
-    <textarea> -- iOS draws its form accessory bar for form controls and for
-    nothing else, and that bar was the reason for the swap. input_value()
-    raises on a non-input rather than returning "", so a test using it fails
-    for the wrong reason and tells you nothing about the composer.
-
-    Goes through the element's own .value shim, which is what every call site
-    in app.js reads, so this checks the same thing the app does.
-    """
-    return page.evaluate("() => document.getElementById('in-prompt').value")
-
 playwright = pytest.importorskip("playwright.sync_api", reason="playwright not installed")
 from playwright.sync_api import sync_playwright  # noqa: E402
 

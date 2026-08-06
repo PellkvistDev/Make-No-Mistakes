@@ -7,8 +7,6 @@ exists outside the DOM. That was checked by hand once and then forgotten; this
 is the same check, kept.
 """
 
-from .conftest import prompt_value
-
 import pytest
 
 
@@ -129,7 +127,7 @@ def test_edit_pulls_the_message_back_into_the_composer(phone):
     phone.wait_idle()
 
     click_tail_action(phone, "Edit")
-    assert prompt_value(phone.page) == "teh parser"
+    assert phone.page.input_value("#in-prompt") == "teh parser"
     assert phone.page.eval_on_selector_all(".bubble.user", "e => e.length") == 0, \
         "the edited message should leave the transcript, not be duplicated"
     assert phone.errors == []
