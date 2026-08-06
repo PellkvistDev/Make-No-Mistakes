@@ -103,6 +103,43 @@
   // correctly and still ended up underneath it, invisible while typing.
   // 44 is that bar's height in points, which is fixed on iPhone. Applied only
   // while the keyboard is actually up, and only where the bar exists.
+  // The box a position:fixed element is actually laid out in. #app is
+  // position:fixed;inset:0, so its rect IS that containing block. Reported in
+  // diagnostics next to the named properties: if they ever disagree on a real
+  // device, that difference is the answer, and no desktop browser will show it.
+  function fixedBoxHeight() {
+    const app = document.getElementById("app");
+    const h = app ? app.getBoundingClientRect().height : 0;
+    return h || window.innerHeight || document.documentElement.clientHeight || 0;
+  }
+
+  // Every number that describes the keyboard, read at this instant.
+  function geometry() {
+    const vv = window.visualViewport;
+    const cs = getComputedStyle(document.documentElement);
+    const dock = document.getElementById("composer-dock");
+    const num = (v) => (v == null ? "?" : String(Math.round(v)));
+    return [
+      ["fixed box h", num(fixedBoxHeight())],
+      ["html h", num(document.documentElement.clientHeight)],
+      ["inner h", num(window.innerHeight)],
+      ["visual h", vv ? num(vv.height) : "no visualViewport"],
+      ["visual top", vv ? num(vv.offsetTop) : "-"],
+      ["--kb", cs.getPropertyValue("--kb").trim() || "0px"],
+      ["--safe-t", cs.getPropertyValue("--safe-t").trim() || "0px"],
+      ["--safe-b", cs.getPropertyValue("--safe-b").trim() || "0px"],
+      ["dock bottom", num(dock && dock.getBoundingClientRect().bottom)],
+      ["dock top", num(dock && dock.getBoundingClientRect().top)],
+    ];
+  }
+
+  // ...and a copy of them from while the keyboard was actually up. A live
+  // readout in Settings cannot answer this: opening Settings takes focus off
+  // the composer, the keyboard drops, and every interesting value reverts
+  // before it can be read. So record at the moment the keyboard covers the
+  // screen and keep the last recording to read afterwards.
+  let kbPeak = null;
+
   const IOS_ACCESSORY_BAR_PX = 44;
   const hasAccessoryBar = /iPad|iPhone|iPod/.test(navigator.platform || "") ||
     (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform || ""));
@@ -135,6 +172,14 @@
       document.documentElement.style.setProperty("--kb", covered + "px");
       pinDocument();     // opening the keyboard is when iOS tries to scroll
       fitMessages();
+      // Read after the layout above, so the dock's rect reflects this --kb.
+      if (covered > 0) {
+        kbPeak = {
+          at: new Date().toLocaleTimeString(),
+          bar: hasAccessoryBar ? IOS_ACCESSORY_BAR_PX + "px added" : "not applied",
+          rows: geometry(),
+        };
+      }
     };
     vv.addEventListener("resize", apply);
     vv.addEventListener("scroll", apply);
@@ -2103,32 +2148,29 @@
   // it on the first try, so they are in the app now rather than in my head.
   let diagTimer = null;
   function buildDiagnostics() {
-    const vv = window.visualViewport;
-    const cs = getComputedStyle(document.documentElement);
     const build = (document.querySelector('meta[name="mnm-build"]') || {}).content || "?";
-    const num = (v) => (v == null ? "?" : Math.round(v));
-    return [
+    const rows = [
       ["build", build],
       ["standalone", String(!!(window.matchMedia("(display-mode: standalone)").matches ||
                                navigator.standalone))],
       ["platform", navigator.platform || "?"],
-      ["layout h", num(document.documentElement.clientHeight)],
-      ["inner h", num(window.innerHeight)],
-      ["visual h", vv ? num(vv.height) : "no visualViewport"],
-      ["visual top", vv ? num(vv.offsetTop) : "-"],
-      ["--kb", cs.getPropertyValue("--kb").trim() || "0px"],
-      ["--safe-t", cs.getPropertyValue("--safe-t").trim() || "0px"],
-      ["--safe-b", cs.getPropertyValue("--safe-b").trim() || "0px"],
-      ["dock bottom", num($("composer-dock") &&
-        $("composer-dock").getBoundingClientRect().bottom)],
-    ];
+    ].concat(geometry());
+    if (kbPeak) {
+      rows.push(["", ""], ["while typing", kbPeak.at], ["accessory bar", kbPeak.bar]);
+      for (const [k, v] of kbPeak.rows) rows.push(["  " + k, v]);
+    } else {
+      rows.push(["", ""],
+                ["while typing", "nothing recorded — type a character, then reopen this"]);
+    }
+    return rows;
   }
+  const diagText = () =>
+    buildDiagnostics().map(([k, v]) => (k ? k + ": " + v : "")).join("\n");
+
   function renderDiagnostics() {
     const el = $("set-diag");
     if (!el) return;
-    const paint = () => {
-      el.textContent = buildDiagnostics().map(([k, v]) => k + ": " + v).join("\n");
-    };
+    const paint = () => { el.textContent = diagText(); };
     paint();
     // Live, because the interesting values only exist while the keyboard is up
     // and you cannot read a static snapshot taken before you opened it.
@@ -2139,8 +2181,7 @@
     if (diagTimer) { clearInterval(diagTimer); diagTimer = null; }
   }
   $("btn-copy-diag").addEventListener("click", async () => {
-    const text = buildDiagnostics().map(([k, v]) => k + ": " + v).join("\n");
-    try { await navigator.clipboard.writeText(text); toast("Diagnostics copied."); }
+    try { await navigator.clipboard.writeText(diagText()); toast("Diagnostics copied."); }
     catch (e) { toast("Couldn't copy — read them off the screen."); }
   });
   $("btn-repo-settings").addEventListener("click", openSettings);
