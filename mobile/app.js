@@ -96,13 +96,6 @@
     }, 0);
   });
 
-  // iOS draws its own bar above the keyboard for form fields — the one with the
-  // prev/next chevrons and Done. It belongs to the system, not to this app,
-  // there is no web API to remove it, and visualViewport does NOT count it: the
-  // viewport shrinks by the keyboard only. So the composer was positioned
-  // correctly and still ended up underneath it, invisible while typing.
-  // 44 is that bar's height in points, which is fixed on iPhone. Applied only
-  // while the keyboard is actually up, and only where the bar exists.
   // The box a position:fixed element is actually laid out in. #app is
   // position:fixed;inset:0, so its rect IS that containing block. Reported in
   // diagnostics next to the named properties: if they ever disagree on a real
@@ -140,10 +133,6 @@
   // screen and keep the last recording to read afterwards.
   let kbPeak = null;
 
-  const IOS_ACCESSORY_BAR_PX = 44;
-  const hasAccessoryBar = /iPad|iPhone|iPod/.test(navigator.platform || "") ||
-    (navigator.maxTouchPoints > 1 && /Mac/.test(navigator.platform || ""));
-
   function trackKeyboard() {
     const vv = window.visualViewport;
     if (!vv) return;                       // --kb stays 0; layout is unchanged
@@ -162,13 +151,21 @@
       //
       // Taking the larger of the two references is right whichever one this
       // engine keeps stable, and needs no per-platform guess.
+      //
+      // This subtraction is the whole answer, and nothing needs adding to it.
+      // A previous version added 44px on iOS for the system form accessory bar
+      // (prev/next chevrons and Done) on the theory that visualViewport shrinks
+      // by the keys alone. The device says otherwise: on an iPhone 15 Pro with
+      // the keyboard up it reported a 852px screen, a 59px top inset and a
+      // 449px visible viewport, leaving 344px hidden -- which is the keys AND
+      // that bar together. Adding 44 counted the bar twice and parked the
+      // composer in mid-air with a strip of chat showing underneath it.
       const layoutH = Math.max(document.documentElement.clientHeight || 0,
                                window.innerHeight || 0);
       let covered = Math.max(0, layoutH - vv.height - vv.offsetTop);
       // Ignore small deltas so a browser's collapsing address bar doesn't read
       // as a keyboard.
       if (covered <= 80) covered = 0;
-      else if (hasAccessoryBar) covered += IOS_ACCESSORY_BAR_PX;
       document.documentElement.style.setProperty("--kb", covered + "px");
       pinDocument();     // opening the keyboard is when iOS tries to scroll
       fitMessages();
@@ -176,7 +173,6 @@
       if (covered > 0) {
         kbPeak = {
           at: new Date().toLocaleTimeString(),
-          bar: hasAccessoryBar ? IOS_ACCESSORY_BAR_PX + "px added" : "not applied",
           rows: geometry(),
         };
       }
@@ -2156,7 +2152,7 @@
       ["platform", navigator.platform || "?"],
     ].concat(geometry());
     if (kbPeak) {
-      rows.push(["", ""], ["while typing", kbPeak.at], ["accessory bar", kbPeak.bar]);
+      rows.push(["", ""], ["while typing", kbPeak.at]);
       for (const [k, v] of kbPeak.rows) rows.push(["  " + k, v]);
     } else {
       rows.push(["", ""],
