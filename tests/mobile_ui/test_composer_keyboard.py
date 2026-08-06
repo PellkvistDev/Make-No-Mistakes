@@ -62,20 +62,20 @@ def test_shift_return_still_makes_a_newline(phone):
 
 # --------------------------------------------- iOS's own bar above the keys
 # iOS draws a form accessory bar (prev/next chevrons and Done) above the
-# keyboard for text fields. It belongs to the system, there is no web API to
-# remove it, and visualViewport does not count it -- the viewport shrinks by
-# the keyboard alone. So the composer was positioned correctly and still sat
-# underneath it, invisible exactly while being typed into.
+# keyboard for text fields. It belongs to the system and there is no web API to
+# remove it, so the question is only whether the app has to leave room for it.
+#
+# It does not. An earlier version added 44px on iOS on the theory that
+# visualViewport shrinks by the keys alone. The device below says that is
+# wrong, and the extra 44 parked the composer in mid-air.
 
 def kb_on(phone, app_url, platform, covered=300):
     """Boot the app as if on `platform`, then pretend the keyboard covers
     `covered` px, and report what --kb ended up as.
 
-    The platform has to be set BEFORE the app loads: whether the accessory bar
-    exists is decided once at startup, which is right -- a phone does not stop
-    being a phone mid-session -- but it does mean an override applied afterwards
-    would be measuring nothing. (First version of this test did exactly that and
-    failed against correct code.)
+    The platform is still set BEFORE the app loads. The measurement no longer
+    branches on it -- that is the point of two of these tests -- and setting it
+    afterwards would silently measure nothing if it ever started to again.
     """
     phone.page.add_init_script(
         "Object.defineProperty(navigator, 'platform', { get: () => %r });" % platform)
@@ -90,23 +90,65 @@ def kb_on(phone, app_url, platform, covered=300):
     }""", covered)
 
 
-def test_the_dock_clears_ios_accessory_bar_as_well_as_the_keyboard(phone, app_url):
-    assert kb_on(phone, app_url, "iPhone") == "344px", \
-        "the dock only cleared the keys, leaving the composer under iOS's own bar"
+def test_the_dock_lifts_by_exactly_what_is_hidden_and_no_more(phone, app_url):
+    """What visualViewport reports as hidden is the whole obstruction, iOS's
+    own bar included. Adding anything to it lifts the composer off the keyboard
+    and leaves a strip of chat showing in the gap."""
+    assert kb_on(phone, app_url, "iPhone") == "300px", \
+        "the dock was lifted further than the keyboard actually covers"
     assert phone.errors == []
 
 
-def test_platforms_without_that_bar_do_not_get_a_dead_gap(phone, app_url):
-    """The clearance is for a bar that only exists on iOS. Anywhere else it
-    would just be 44px of nothing between the composer and the keyboard."""
+def test_the_lift_does_not_depend_on_which_device_this_is(phone, app_url):
+    """One subtraction, no per-platform correction to get wrong."""
     assert kb_on(phone, app_url, "Linux x86_64") == "300px"
     assert phone.errors == []
 
 
 def test_a_collapsing_address_bar_is_still_not_mistaken_for_a_keyboard(phone, app_url):
-    """The small-delta guard has to run before the accessory clearance, or a
-    60px browser chrome change would become a 104px phantom keyboard."""
     assert kb_on(phone, app_url, "iPhone", covered=60) == "0px"
+    assert phone.errors == []
+
+
+# The numbers an iPhone 15 Pro actually reported, read out of the app's own
+# diagnostics with the keyboard up (build ff4cf29):
+#
+#   at rest        while typing
+#   inner h   852  inner h   449     <- 852 is the real screen height
+#   html h    793  html h    793
+#   visual h  852  visual h  449
+#   --safe-t   59  --safe-t   59
+#
+# 852 - 59 - 449 = 344 hidden, and 344 is the keys AND the accessory bar: the
+# composer has to stop at 344, not 388. This is the case no desktop browser can
+# produce on its own, so it is pinned here with the device's own figures.
+IPHONE_15_PRO = {"screen": 852, "layout": 793, "visible": 449, "safe_t": 59}
+
+
+def test_the_iphone_numbers_that_were_actually_measured(phone, app_url):
+    phone.page.add_init_script(
+        "Object.defineProperty(navigator, 'platform', { get: () => 'iPhone' });")
+    phone.open_at(app_url)
+    phone.page.wait_for_selector("#screen-setup:not([hidden])", timeout=15000)
+    got = phone.page.evaluate("""(d) => {
+      // Reproduce the device: the layout viewport stays put while the visual
+      // one and innerHeight both shrink to the visible strip.
+      Object.defineProperty(document.documentElement, 'clientHeight',
+        { configurable: true, get: () => d.layout });
+      Object.defineProperty(window, 'innerHeight',
+        { configurable: true, get: () => d.visible });
+      const vv = window.visualViewport;
+      Object.defineProperty(vv, 'height', { configurable: true, get: () => d.visible });
+      Object.defineProperty(vv, 'offsetTop', { configurable: true, get: () => 0 });
+      vv.dispatchEvent(new Event('resize'));
+      return getComputedStyle(document.documentElement).getPropertyValue('--kb').trim();
+    }""", IPHONE_15_PRO)
+
+    hidden = IPHONE_15_PRO["screen"] - IPHONE_15_PRO["safe_t"] - IPHONE_15_PRO["visible"]
+    assert got == f"{hidden}px", (
+        f"on the phone this was measured from, the keyboard and iOS's bar cover "
+        f"{hidden}px; --kb came out {got}, which puts the composer "
+        f"{int(got[:-2]) - hidden}px off the keyboard")
     assert phone.errors == []
 
 
@@ -138,15 +180,40 @@ def kb_when_inner_height_also_shrinks(phone, app_url, platform, covered=300):
 
 def test_the_dock_still_lifts_when_innerheight_shrinks_with_the_keyboard(phone, app_url):
     got = kb_when_inner_height_also_shrinks(phone, app_url, "iPhone")
-    assert got == "344px", (
+    assert got == "300px", (
         "the dock did not lift: the measurement used a reference that shrinks "
         f"with the keyboard, so it saw nothing covered (--kb = {got})")
     assert phone.errors == []
 
 
-def test_the_same_holds_where_there_is_no_accessory_bar(phone, app_url):
+def test_the_same_holds_on_a_device_reporting_another_platform(phone, app_url):
     got = kb_when_inner_height_also_shrinks(phone, app_url, "Linux x86_64")
     assert got == "300px", f"--kb = {got}"
+    assert phone.errors == []
+
+
+def test_a_scrolled_visual_viewport_is_subtracted_too(phone, app_url):
+    """visualViewport.offsetTop is how far the visible area has been pushed
+    down the layout viewport -- iOS does that when zoomed, or mid-scroll to a
+    focused field. Those pixels are off the bottom as surely as the keyboard's
+    are, so they belong in the subtraction. The measured phone reported 0 for
+    it, which means this branch is the one the device could not confirm.
+    """
+    phone.page.add_init_script(
+        "Object.defineProperty(navigator, 'platform', { get: () => 'iPhone' });")
+    phone.open_at(app_url)
+    phone.page.wait_for_selector("#screen-setup:not([hidden])", timeout=15000)
+    got = phone.page.evaluate("""() => {
+      const vv = window.visualViewport;
+      const layout = document.documentElement.clientHeight;
+      Object.defineProperty(vv, 'height', { configurable: true, get: () => layout - 300 });
+      Object.defineProperty(vv, 'offsetTop', { configurable: true, get: () => 40 });
+      vv.dispatchEvent(new Event('resize'));
+      return getComputedStyle(document.documentElement).getPropertyValue('--kb').trim();
+    }""")
+    assert got == "260px", (
+        "the 40px the visible area was pushed down was not taken off the lift, "
+        f"so the composer rides 40px too high (--kb = {got})")
     assert phone.errors == []
 
 
