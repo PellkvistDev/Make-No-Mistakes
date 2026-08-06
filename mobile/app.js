@@ -2090,9 +2090,59 @@
     $("set-keepsignedin").checked = keepSignedIn();
     $("set-sync").checked = syncOn();
     $("set-sync-pass-row").hidden = !syncOn();
+    renderDiagnostics();
     $("settings-backdrop").hidden = false;
   }
-  function closeSettings() { $("settings-backdrop").hidden = true; }
+  function closeSettings() { $("settings-backdrop").hidden = true; stopDiagnostics(); }
+
+  // ---- diagnostics ----
+  // Everything that has gone wrong on this screen -- the keyboard, the safe
+  // areas, the strip under the layout viewport -- is invisible to any browser
+  // that isn't this phone. Three attempts at the keyboard were guesses shipped
+  // and checked by screenshot. These are the numbers that would have answered
+  // it on the first try, so they are in the app now rather than in my head.
+  let diagTimer = null;
+  function buildDiagnostics() {
+    const vv = window.visualViewport;
+    const cs = getComputedStyle(document.documentElement);
+    const build = (document.querySelector('meta[name="mnm-build"]') || {}).content || "?";
+    const num = (v) => (v == null ? "?" : Math.round(v));
+    return [
+      ["build", build],
+      ["standalone", String(!!(window.matchMedia("(display-mode: standalone)").matches ||
+                               navigator.standalone))],
+      ["platform", navigator.platform || "?"],
+      ["layout h", num(document.documentElement.clientHeight)],
+      ["inner h", num(window.innerHeight)],
+      ["visual h", vv ? num(vv.height) : "no visualViewport"],
+      ["visual top", vv ? num(vv.offsetTop) : "-"],
+      ["--kb", cs.getPropertyValue("--kb").trim() || "0px"],
+      ["--safe-t", cs.getPropertyValue("--safe-t").trim() || "0px"],
+      ["--safe-b", cs.getPropertyValue("--safe-b").trim() || "0px"],
+      ["dock bottom", num($("composer-dock") &&
+        $("composer-dock").getBoundingClientRect().bottom)],
+    ];
+  }
+  function renderDiagnostics() {
+    const el = $("set-diag");
+    if (!el) return;
+    const paint = () => {
+      el.textContent = buildDiagnostics().map(([k, v]) => k + ": " + v).join("\n");
+    };
+    paint();
+    // Live, because the interesting values only exist while the keyboard is up
+    // and you cannot read a static snapshot taken before you opened it.
+    stopDiagnostics();
+    diagTimer = setInterval(paint, 400);
+  }
+  function stopDiagnostics() {
+    if (diagTimer) { clearInterval(diagTimer); diagTimer = null; }
+  }
+  $("btn-copy-diag").addEventListener("click", async () => {
+    const text = buildDiagnostics().map(([k, v]) => k + ": " + v).join("\n");
+    try { await navigator.clipboard.writeText(text); toast("Diagnostics copied."); }
+    catch (e) { toast("Couldn't copy — read them off the screen."); }
+  });
   $("btn-repo-settings").addEventListener("click", openSettings);
   $("btn-chat-settings").addEventListener("click", openSettings);
   $("btn-chats-settings").addEventListener("click", openSettings);

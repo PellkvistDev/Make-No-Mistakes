@@ -34,6 +34,11 @@
     frame-ancestors 'none';
   " />
   <meta name="referrer" content="no-referrer" />
+  <!-- Which build this is. The deploy workflow rewrites the content with the
+       commit it published, so "is my phone running the fix or a cached copy?"
+       is a question you can answer by looking, instead of by guessing. A day
+       was lost to that guess. -->
+  <meta name="mnm-build" content="dev" />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Cpath d='M8 21l4-10 4 7 4-7 4 10' fill='none' stroke='%237aa2ff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
   <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Cpath d='M8 21l4-10 4 7 4-7 4 10' fill='none' stroke='%237aa2ff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
@@ -325,6 +330,16 @@
           </div>
           <div class="setting-block" id="set-sync-pass-row" hidden>
             <button id="btn-change-syncpass" class="ghost" type="button" style="width:100%">Change sync passphrase</button>
+          </div>
+
+          <!-- Which build is running, and what this phone reports about its
+               own screen. Everything about the keyboard and the safe areas is
+               invisible to a desktop browser, so without this the only way to
+               diagnose it is to guess and ship again. -->
+          <div class="setting-block">
+            <label class="setting-label">This build</label>
+            <div id="set-diag" class="diag mono"></div>
+            <button id="btn-copy-diag" class="ghost" type="button" style="width:100%">Copy diagnostics</button>
           </div>
 
           <div class="setting-block">

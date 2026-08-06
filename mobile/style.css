@@ -607,3 +607,13 @@ pre.code, pre.tool-out, .preview {
   content: "queued"; display: block; margin-top: 4px;
   font-size: 11px; letter-spacing: .04em; opacity: .8;
 }
+
+/* Diagnostics: the numbers this phone reports about its own screen. Small,
+   monospaced, and left alone by the theme — it is meant to be read off a
+   screenshot, not to look nice. */
+.diag {
+  white-space: pre; font-size: 11.5px; line-height: 1.45;
+  padding: 9px 11px; margin-bottom: 8px; border-radius: var(--radius-sm);
+  background: rgba(8, 10, 14, 0.55); border: 1px solid var(--glass-brd);
+  color: var(--text); overflow-x: auto;
+}
