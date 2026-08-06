@@ -43,16 +43,33 @@ jobs:
       - id: deployment
         uses: actions/deploy-pages@v4
         with:
-          # 20 minutes rather than the default 10. Only one Pages deployment can
-          # be in flight at a time, so merging twice within a few minutes puts
-          # the second one behind the first, and it can sit in
-          # deployment_queued for longer than the default allows — reported as
-          # a failed deploy on a build that was fine. That happened here.
-          #
-          # Waiting longer is the whole fix. Do NOT re-run a timed-out run to
-          # recover: this job both uploads the artifact and deploys it, so a
-          # re-run uploads a SECOND artifact named github-pages and every
-          # further attempt fails with "Multiple artifacts named github-pages
-          # were unexpectedly found" — that run is then unrecoverable. Dispatch
-          # a fresh run instead, which is what workflow_dispatch above is for.
+          # Asks for 20 minutes instead of the default 10. NOTE: it does not
+          # appear to take effect — two separate runs with this set still
+          # aborted at 602s and 601s, i.e. the 600000 default. The input is
+          # documented on deploy-pages@v4 and the value is a plain number of
+          # milliseconds, so why it is ignored is not understood. It is left
+          # here because it is correct per the docs and costs nothing; it is
+          # not something to rely on.
           timeout: 1200000
+          # WHAT TO DO WHEN A DEPLOY FAILS ON "Timeout reached, aborting!"
+          #
+          # The build is almost certainly fine — every step before this one
+          # succeeded and the failure is this action giving up on a deployment
+          # that never left deployment_queued. Only one Pages deployment can be
+          # in flight per repo, and that lock can wedge: five attempts over 70
+          # minutes failed identically here, so it is a stall, not a queue.
+          #
+          # 1. Do NOT re-run the run. This job uploads the artifact AND deploys
+          #    it, so a re-run uploads a SECOND artifact named github-pages and
+          #    every further attempt fails with "Multiple artifacts named
+          #    github-pages were unexpectedly found". That run is then
+          #    unrecoverable. Dispatch a fresh run instead — which is what the
+          #    workflow_dispatch trigger above is for.
+          # 2. If fresh runs keep timing out, the lock is wedged and no change
+          #    in this file will help. Settings → Pages → Source: switch away
+          #    from GitHub Actions, save, switch back, save. That clears it in
+          #    most reports.
+          # 3. If it still will not deploy, it is an infrastructure-level lock
+          #    only GitHub can reset. Open a support ticket saying: "Repository
+          #    Pages deployment environment is stuck in a wedged state during
+          #    the finalization phase."
