@@ -314,6 +314,47 @@ def test_no_chat_is_left_sitting_under_the_lifted_composer(phone):
     assert phone.errors == []
 
 
+def test_opening_the_keyboard_keeps_you_at_the_bottom_of_the_chat(phone):
+    """Reported: at the bottom of the chat, tap the composer, and the last
+    message is gone -- you have to scroll down again to see what you were
+    replying to.
+
+    Opening the keyboard adds its whole height to this list's bottom padding.
+    The "were you near the bottom?" check ran after that, so someone sitting at
+    the very bottom measured as a keyboard's height away from it and the
+    auto-scroll never fired. The measurement has to be taken first.
+    """
+    phone.setup()
+    for i in range(6):
+        phone.reply({"role": "assistant", "content": f"reply {i} " + "padding " * 60})
+        phone.send(f"message {i}")
+        phone.wait_idle()
+    p = phone.page
+    p.evaluate("() => { const m = document.getElementById('messages');"
+               "        m.scrollTop = m.scrollHeight; }")
+    p.wait_for_timeout(60)
+    assert p.evaluate("""() => {
+      const m = document.getElementById('messages');
+      return m.scrollHeight - m.scrollTop - m.clientHeight;
+    }""") < 80, "test setup failed: not at the bottom before the keyboard"
+
+    p.evaluate("""() => {
+      const vv = window.visualViewport;
+      const layout = document.documentElement.clientHeight;
+      Object.defineProperty(vv, 'height', { configurable: true, get: () => layout - 300 });
+      vv.dispatchEvent(new Event('resize'));
+    }""")
+    p.wait_for_timeout(80)
+    gap = p.evaluate("""() => {
+      const m = document.getElementById('messages');
+      return m.scrollHeight - m.scrollTop - m.clientHeight;
+    }""")
+    assert gap < 80, (
+        f"the keyboard pushed the bottom {round(gap)}px away and the view did not "
+        "follow, so the message you were replying to slid off screen")
+    assert phone.errors == []
+
+
 def test_the_jump_to_latest_pill_rides_up_with_the_composer(phone):
     """It floats just above the dock. Anchored to the dock height alone it
     stays at the bottom of the screen, behind the keys."""

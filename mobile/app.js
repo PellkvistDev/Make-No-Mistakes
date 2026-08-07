@@ -37,12 +37,24 @@
   }
   // Pad the scroll area so content clears the (overlaid) top bar and bottom dock,
   // which vary with the safe areas, the growing textarea, and attachment chips.
-  function fitMessages() {
+  /** How far the message list is from its own bottom, in px. */
+  function distanceFromBottom() {
+    const msgs = $("messages");
+    return msgs ? msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight : 0;
+  }
+
+  // `wasNear` lets the caller decide from a measurement taken EARLIER. The
+  // keyboard needs that: --kb grows this list's bottom padding by the height of
+  // the keyboard, so by the time this runs, someone sitting at the very bottom
+  // measures as ~344px away from it and the check below says "not near". The
+  // result was the last message sliding out of view exactly when you tapped the
+  // composer to reply to it.
+  function fitMessages(wasNear) {
     const bar = document.querySelector("#screen-chat .bar");
     const dock = $("composer-dock");
     const msgs = $("messages");
     if (!bar || !dock || !msgs || $("screen-chat").hidden) return;
-    const near = msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight < 80;
+    const near = wasNear === undefined ? distanceFromBottom() < 80 : wasNear;
     msgs.style.paddingTop = (bar.offsetHeight + 6) + "px";
     // The bottom padding is NOT set here. It is a calc in the stylesheet over
     // --dock-h and --kb, so it cannot fall out of step with the keyboard on an
@@ -151,6 +163,11 @@
     const vv = window.visualViewport;
     if (!vv) return;                       // --kb stays 0; layout is unchanged
     const apply = () => {
+      // Measured BEFORE --kb changes anything. Opening the keyboard adds its
+      // own height to the message list's bottom padding, which moves the
+      // bottom away from you; asking "were you at the bottom?" afterwards
+      // always answers no. See fitMessages.
+      const wasNear = distanceFromBottom() < 80;
       // How much of the screen is hidden = (where the layout viewport ends)
       // minus (where the visible area ends). The dock is position:fixed, so it
       // is laid out against the LAYOUT viewport, and that is the reference this
@@ -182,7 +199,7 @@
       if (covered <= 80) covered = 0;
       document.documentElement.style.setProperty("--kb", covered + "px");
       pinDocument();     // opening the keyboard is when iOS tries to scroll
-      fitMessages();
+      fitMessages(wasNear);
       // Read after the layout above, so the dock's rect reflects this --kb.
       if (covered > 0) {
         kbPeak = {
