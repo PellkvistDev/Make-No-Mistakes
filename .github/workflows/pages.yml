@@ -41,8 +41,19 @@ permissions:
   contents: write
 
 # Let a running publish finish; queue at most one more.
+#
+# NOT named "pages", because concurrency groups are shared repo-wide across
+# workflows and GitHub's own pages-build-deployment — the workflow that
+# publishes the gh-pages branch this job exists to feed — runs here too. If it
+# happens to use that name, it queues behind this one for no reason.
+#
+# Housekeeping only. This was briefly believed to explain a gh-pages build that
+# sat queued 15 minutes and was cancelled, and it did not: both jobs of that run
+# reported runner_id 0 and an empty runner_name, meaning no runner was ever
+# assigned. The same dispatch succeeded in 31 seconds the following day with no
+# change to this file. It was capacity, not contention.
 concurrency:
-  group: pages
+  group: publish-pages
   cancel-in-progress: false
 
 jobs:
