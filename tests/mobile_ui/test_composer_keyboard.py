@@ -217,6 +217,109 @@ def test_a_scrolled_visual_viewport_is_subtracted_too(phone, app_url):
     assert phone.errors == []
 
 
+# ------------------------------- lifting before iOS decides to scroll ------
+# iOS decides whether to scroll a focused field into view at focus time. Until
+# then --kb is 0, so the composer is still sitting where the keyboard is about
+# to be, and the system scrolls its own web view to reveal it -- moving
+# everything, reporting nothing, correctable by nothing. The lift has to happen
+# on focus, from the height this keyboard had last time.
+
+def teach_the_keyboard_height(phone, px=300):
+    """Drive one real measurement, then put the keyboard away.
+
+    Uses the same path the device does -- visualViewport reports, --kb is set,
+    the height is remembered -- rather than writing the remembered value
+    directly, which would only prove localStorage works.
+    """
+    phone.page.evaluate("""(px) => {
+      const vv = window.visualViewport;
+      const layout = document.documentElement.clientHeight;
+      Object.defineProperty(vv, 'height', { configurable: true, get: () => layout - px });
+      vv.dispatchEvent(new Event('resize'));
+    }""", px)
+    phone.page.wait_for_timeout(80)
+    phone.page.evaluate("""() => {
+      delete window.visualViewport.height;
+      // Blur first: a keyboard-down report is deliberately ignored while a
+      // field still has focus, so with one focused this would stay lifted.
+      if (document.activeElement && document.activeElement.blur) {
+        document.activeElement.blur();
+      }
+      window.visualViewport.dispatchEvent(new Event('resize'));
+    }""")
+    phone.page.wait_for_timeout(150)
+
+
+def kb_now(phone):
+    return phone.page.evaluate(
+        "() => getComputedStyle(document.documentElement)"
+        ".getPropertyValue('--kb').trim()")
+
+
+def test_focusing_lifts_the_composer_before_the_keyboard_reports_anything(phone):
+    """No visualViewport event fires between the tap and the check. If the dock
+    only rises once the keyboard has measured itself, it rises after iOS has
+    already decided to shove the view, which is too late to prevent anything."""
+    phone.setup()
+    teach_the_keyboard_height(phone)
+    assert kb_now(phone) == "0px", "test setup failed: still lifted before the tap"
+
+    phone.page.click("#in-prompt")
+    phone.page.wait_for_timeout(120)
+    assert kb_now(phone) == "300px", (
+        f"--kb was {kb_now(phone)} on focus, so the composer was still under the "
+        "keyboard at the moment iOS decides whether to scroll")
+    assert phone.errors == []
+
+
+def test_the_lift_is_dropped_once_the_field_is_blurred(phone):
+    """It is a prediction, not a measurement. Nothing else clears it: a
+    keyboard-down report is deliberately ignored while a field still has
+    focus, so blur is the only thing that can."""
+    phone.setup()
+    teach_the_keyboard_height(phone)
+    phone.page.click("#in-prompt")
+    phone.page.wait_for_timeout(120)
+    assert kb_now(phone) == "300px"
+
+    phone.page.evaluate("() => document.getElementById('in-prompt').blur()")
+    phone.page.wait_for_timeout(150)
+    assert kb_now(phone) == "0px", \
+        f"the composer stayed lifted with no keyboard up: {kb_now(phone)}"
+    assert phone.errors == []
+
+
+def test_a_transient_zero_does_not_drop_the_composer_mid_animation(phone):
+    """The keyboard animating in produces intermediate visualViewport reports,
+    some below the small-delta guard. Letting one through would put the
+    composer back under the keyboard for a frame, which is the whole reason iOS
+    shoves the view in the first place."""
+    phone.setup()
+    teach_the_keyboard_height(phone)
+    phone.page.click("#in-prompt")
+    phone.page.wait_for_timeout(120)
+
+    # A report with nothing covered, arriving while the field still has focus.
+    phone.page.evaluate("() => window.visualViewport.dispatchEvent(new Event('resize'))")
+    phone.page.wait_for_timeout(80)
+    assert kb_now(phone) == "300px", (
+        f"--kb fell to {kb_now(phone)} while the composer still had focus; that "
+        "is the composer dropping onto the keyboard mid-animation")
+    assert phone.errors == []
+
+
+def test_the_measured_height_is_remembered_across_launches(phone):
+    """A cold start has no measurement to predict from unless the last one
+    survived the reload."""
+    phone.setup()
+    phone.page.evaluate("() => localStorage.removeItem('mnm.kb.h')")
+    teach_the_keyboard_height(phone, 300)
+    assert phone.page.evaluate("() => localStorage.getItem('mnm.kb.h')") == "300", (
+        "the measured keyboard height was not remembered, so the first focus "
+        "after a restart has nothing to lift by")
+    assert phone.errors == []
+
+
 # ------------------------------------------------------------ diagnostics --
 # The keyboard took three attempts because every number that would have
 # answered it lives on the device and nowhere else. They are in the app now.
