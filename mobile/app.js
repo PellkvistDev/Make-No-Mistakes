@@ -172,6 +172,9 @@
       ["visual h", vv ? num(vv.height) : "no visualViewport"],
       ["visual top", vv ? num(vv.offsetTop) : "-"],
       ["--kb", cs.getPropertyValue("--kb").trim() || "0px"],
+      // Part of --kb whenever the keyboard is up, and the only part of it that
+      // is a stored choice rather than a measurement.
+      ["accessory allowance", accessoryAllowance() + "px"],
       ["--safe-t", cs.getPropertyValue("--safe-t").trim() || "0px"],
       ["--safe-b", cs.getPropertyValue("--safe-b").trim() || "0px"],
       ["dock bottom", num(dock && dock.getBoundingClientRect().bottom)],
@@ -185,6 +188,46 @@
   // before it can be read. So record at the moment the keyboard covers the
   // screen and keep the last recording to read afterwards.
   let kbPeak = null;
+
+  // How much room to leave for iOS's form accessory bar, on top of what the
+  // keyboard hides.
+  //
+  // No web API reports this bar -- not its height, not even its presence. It has
+  // now been guessed twice and shipped twice: 44px, which was reported as
+  // leaving the composer in mid-air, and 0, which leaves it hidden behind the
+  // bar. Guessing a third number and waiting for a screenshot is the same move
+  // again, so instead the number lives here, the device can change it, and the
+  // only moment it can be judged -- while the keyboard is actually up -- is when
+  // the control to change it is on screen. See the calibration strip.
+  //
+  // 44 is the documented height of the bar and so the default, but nothing here
+  // depends on that being right.
+  const KB_BAR_KEY = "mnm.kb.bar";
+  const KB_BAR_DEFAULT = 44;
+  const KB_BAR_MAX = 120;
+  function accessoryAllowance() {
+    const raw = localStorage.getItem(KB_BAR_KEY);
+    if (raw === null) return KB_BAR_DEFAULT;
+    const n = parseInt(raw, 10);
+    // A stored NaN would propagate into --kb and collapse the dock, so an
+    // unreadable value falls back rather than being trusted.
+    if (!Number.isFinite(n)) return KB_BAR_DEFAULT;
+    return Math.min(KB_BAR_MAX, Math.max(0, n));
+  }
+  function setAccessoryAllowance(px) {
+    const n = Math.min(KB_BAR_MAX, Math.max(0, Math.round(px)));
+    try { localStorage.setItem(KB_BAR_KEY, String(n)); } catch { /* private mode */ }
+    // Re-measure immediately: the keyboard is up while this is being adjusted,
+    // and visualViewport will not fire again on its own, so without this the
+    // composer would not move until the next time the keyboard changed size.
+    applyKeyboard();
+    paintCalibration();
+    return n;
+  }
+
+  // Assigned by trackKeyboard. Hoisted because the calibration control has to
+  // force a re-measure and would otherwise have no way to reach it.
+  let applyKeyboard = () => {};
 
   function trackKeyboard() {
     const vv = window.visualViewport;
@@ -210,20 +253,35 @@
       // Taking the larger of the two references is right whichever one this
       // engine keeps stable, and needs no per-platform guess.
       //
-      // This subtraction is the whole answer, and nothing needs adding to it.
-      // A previous version added 44px on iOS for the system form accessory bar
-      // (prev/next chevrons and Done) on the theory that visualViewport shrinks
-      // by the keys alone. The device says otherwise: on an iPhone 15 Pro with
-      // the keyboard up it reported a 852px screen, a 59px top inset and a
-      // 449px visible viewport, leaving 344px hidden -- which is the keys AND
-      // that bar together. Adding 44 counted the bar twice and parked the
-      // composer in mid-air with a strip of chat showing underneath it.
+      // This subtraction says how much of the LAYOUT viewport is not visible.
+      // It does not say where iOS paints the form accessory bar (the prev/next
+      // chevrons and Done), and that is a separate question with a separate
+      // answer.
+      //
+      // An earlier version added 44px for that bar and it was taken out again,
+      // on this reasoning: the phone reported an 852px screen, a 59px top inset
+      // and a 449px visible viewport, so 852 - 449 - 59 = 344px hidden, "which
+      // is the keys AND that bar together". That inference does not hold. The
+      // accessory bar is a native view drawn OVER the web view; it does not
+      // shrink visualViewport at all. So 344 is what the keyboard hides, and
+      // the bar is painted across the bottom of the 449 that remains.
+      //
+      // Which is why the check used to confirm it -- "dock bottom 449 == visual
+      // h 449, flush" -- was measuring the wrong invariant. Sitting exactly at
+      // the bottom of the visible area is sitting underneath the bar. That is
+      // the reported symptom: the composer hidden behind the row with the
+      // checkmark, with --kb apparently correct.
       const layoutH = Math.max(document.documentElement.clientHeight || 0,
                                window.innerHeight || 0);
       let covered = Math.max(0, layoutH - vv.height - vv.offsetTop);
       // Ignore small deltas so a browser's collapsing address bar doesn't read
       // as a keyboard.
       if (covered <= 80) covered = 0;
+      // The bar's height is not reported by anything, and the two failures so
+      // far were a hardcoded 44 that looked too high and a 0 that is too low.
+      // So it is a stored number the device itself can settle, rather than a
+      // third guess shipped for a screenshot. See accessoryAllowance.
+      if (covered > 0) covered += accessoryAllowance();
       document.documentElement.style.setProperty("--kb", covered + "px");
       pinDocument();     // opening the keyboard is when iOS tries to scroll
       fitMessages(wasNear);
@@ -235,6 +293,7 @@
         };
       }
     };
+    applyKeyboard = apply;
     vv.addEventListener("resize", apply);
     vv.addEventListener("scroll", apply);
     apply();
@@ -2189,6 +2248,7 @@
     $("set-keepsignedin").checked = keepSignedIn();
     $("set-sync").checked = syncOn();
     $("set-sync-pass-row").hidden = !syncOn();
+    $("set-kb-cal").checked = calibrating();
     renderDiagnostics();
     $("settings-backdrop").hidden = false;
   }
@@ -2246,6 +2306,45 @@
     try { await navigator.clipboard.writeText(diagText()); toast("Diagnostics copied."); }
     catch (e) { toast("Couldn't copy — read them off the screen."); }
   });
+
+  // ---- composer height calibration ----
+  // The gap left under the composer for iOS's accessory bar cannot be measured
+  // from the page, and the two values shipped so far were both wrong in
+  // opposite directions. This puts the number under the thumb of the only
+  // observer that can see the bar, at the only time it is drawn.
+  const KB_CAL_KEY = "mnm.kb.cal";
+  function calibrating() { return localStorage.getItem(KB_CAL_KEY) === "1"; }
+  function paintCalibration() {
+    const strip = $("kb-calibrate");
+    if (!strip) return;
+    strip.hidden = !calibrating();
+    const val = $("kb-cal-val");
+    if (val) val.textContent = accessoryAllowance() + "px";
+  }
+  // pointerdown with preventDefault, not click: a tap that moves focus off the
+  // textarea puts the keyboard away and takes the bar with it, so the thing
+  // being adjusted would vanish at the moment of adjusting it.
+  for (const [id, delta] of [["kb-cal-down", -2], ["kb-cal-up", 2]]) {
+    const b = $(id);
+    if (!b) continue;
+    b.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      setAccessoryAllowance(accessoryAllowance() + delta);
+    });
+  }
+  $("kb-cal-done").addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    localStorage.setItem(KB_CAL_KEY, "0");
+    const box = $("set-kb-cal");
+    if (box) box.checked = false;
+    paintCalibration();
+    toast("Composer gap set to " + accessoryAllowance() + "px.");
+  });
+  $("set-kb-cal").addEventListener("change", () => {
+    localStorage.setItem(KB_CAL_KEY, $("set-kb-cal").checked ? "1" : "0");
+    paintCalibration();
+  });
+  paintCalibration();
   $("btn-repo-settings").addEventListener("click", openSettings);
   $("btn-chat-settings").addEventListener("click", openSettings);
   $("btn-chats-settings").addEventListener("click", openSettings);

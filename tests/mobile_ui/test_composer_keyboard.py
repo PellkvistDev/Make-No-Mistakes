@@ -6,6 +6,8 @@ return key left the keyboard up, with the only way out being a Done button on a
 bar that has nothing to do with this app.
 """
 
+import re
+
 
 def test_sending_blurs_the_composer(phone):
     """On iOS the keyboard and its accessory bar stay until something blurs.
@@ -62,14 +64,34 @@ def test_shift_return_still_makes_a_newline(phone):
 
 # --------------------------------------------- iOS's own bar above the keys
 # iOS draws a form accessory bar (prev/next chevrons and Done) above the
-# keyboard for text fields. It belongs to the system and there is no web API to
-# remove it, so the question is only whether the app has to leave room for it.
+# keyboard for text fields. It belongs to the system, there is no web API to
+# remove it, and -- the part that got this wrong twice -- no web API reports it
+# either. It is a native view painted OVER the web view: it does not shrink
+# visualViewport, so nothing measured from the page contains its height.
 #
-# It does not. An earlier version added 44px on iOS on the theory that
-# visualViewport shrinks by the keys alone. The device below says that is
-# wrong, and the extra 44 parked the composer in mid-air.
+# So --kb has two parts, and they are tested separately.
+#
+#   1. What visualViewport says is hidden. Pure arithmetic, tested below with
+#      the allowance pinned to 0 so these keep measuring only the subtraction.
+#   2. The allowance for the bar. Not measurable here at all; it is a stored
+#      number the device settles. Its own tests are further down.
+#
+# The earlier reading -- "852 - 449 - 59 = 344, which is the keys AND the bar
+# together" -- does not follow, and the check used to confirm it (dock bottom ==
+# visual h) was measuring the wrong invariant: flush with the bottom of the
+# visible area IS underneath a bar painted across it.
 
-def kb_on(phone, app_url, platform, covered=300):
+def pin_allowance(phone, px):
+    """Fix the accessory-bar allowance before the app loads.
+
+    Every subtraction test pins it, so that changing the shipped default can
+    never quietly move their expectations.
+    """
+    phone.page.add_init_script(
+        "try { localStorage.setItem('mnm.kb.bar', %r); } catch (e) {}" % str(px))
+
+
+def kb_on(phone, app_url, platform, covered=300, allowance=0):
     """Boot the app as if on `platform`, then pretend the keyboard covers
     `covered` px, and report what --kb ended up as.
 
@@ -77,6 +99,7 @@ def kb_on(phone, app_url, platform, covered=300):
     branches on it -- that is the point of two of these tests -- and setting it
     afterwards would silently measure nothing if it ever started to again.
     """
+    pin_allowance(phone, allowance)
     phone.page.add_init_script(
         "Object.defineProperty(navigator, 'platform', { get: () => %r });" % platform)
     phone.open_at(app_url)
@@ -90,12 +113,10 @@ def kb_on(phone, app_url, platform, covered=300):
     }""", covered)
 
 
-def test_the_dock_lifts_by_exactly_what_is_hidden_and_no_more(phone, app_url):
-    """What visualViewport reports as hidden is the whole obstruction, iOS's
-    own bar included. Adding anything to it lifts the composer off the keyboard
-    and leaves a strip of chat showing in the gap."""
+def test_the_dock_lifts_by_what_visualviewport_says_is_hidden(phone, app_url):
+    """The subtraction on its own, with no allowance in the way."""
     assert kb_on(phone, app_url, "iPhone") == "300px", \
-        "the dock was lifted further than the keyboard actually covers"
+        "the dock was lifted by something other than what the keyboard covers"
     assert phone.errors == []
 
 
@@ -105,8 +126,26 @@ def test_the_lift_does_not_depend_on_which_device_this_is(phone, app_url):
     assert phone.errors == []
 
 
+def test_the_accessory_allowance_is_added_on_top_of_what_is_hidden(phone, app_url):
+    """The bar is painted over the visible area, so its height is never part of
+    what visualViewport reports and has to be added. With it missing the
+    composer sits exactly one bar too low -- behind the row with the checkmark,
+    which is the reported symptom."""
+    assert kb_on(phone, app_url, "iPhone", allowance=44) == "344px", \
+        "the allowance was not added, so the composer stays under iOS's bar"
+    assert phone.errors == []
+
+
 def test_a_collapsing_address_bar_is_still_not_mistaken_for_a_keyboard(phone, app_url):
     assert kb_on(phone, app_url, "iPhone", covered=60) == "0px"
+    assert phone.errors == []
+
+
+def test_no_allowance_is_added_while_the_keyboard_is_down(phone, app_url):
+    """There is no bar without a keyboard. Adding the allowance to a --kb of 0
+    would hold the composer permanently off the bottom of the screen."""
+    assert kb_on(phone, app_url, "iPhone", covered=60, allowance=44) == "0px", \
+        "the composer was lifted by the allowance with no keyboard on screen"
     assert phone.errors == []
 
 
@@ -119,13 +158,16 @@ def test_a_collapsing_address_bar_is_still_not_mistaken_for_a_keyboard(phone, ap
 #   visual h  852  visual h  449
 #   --safe-t   59  --safe-t   59
 #
-# 852 - 59 - 449 = 344 hidden, and 344 is the keys AND the accessory bar: the
-# composer has to stop at 344, not 388. This is the case no desktop browser can
-# produce on its own, so it is pinned here with the device's own figures.
+# 852 - 59 - 449 = 344 hidden. That 344 is what the KEYBOARD covers; the
+# accessory bar is drawn over the 449 that is still visible and is not in this
+# number at all -- reading it as "the keys and the bar together" is what left
+# the composer underneath the bar. The allowance is pinned to 0 here so this
+# case keeps testing the subtraction against the device's own figures.
 IPHONE_15_PRO = {"screen": 852, "layout": 793, "visible": 449, "safe_t": 59}
 
 
 def test_the_iphone_numbers_that_were_actually_measured(phone, app_url):
+    pin_allowance(phone, 0)
     phone.page.add_init_script(
         "Object.defineProperty(navigator, 'platform', { get: () => 'iPhone' });")
     phone.open_at(app_url)
@@ -146,8 +188,8 @@ def test_the_iphone_numbers_that_were_actually_measured(phone, app_url):
 
     hidden = IPHONE_15_PRO["screen"] - IPHONE_15_PRO["safe_t"] - IPHONE_15_PRO["visible"]
     assert got == f"{hidden}px", (
-        f"on the phone this was measured from, the keyboard and iOS's bar cover "
-        f"{hidden}px; --kb came out {got}, which puts the composer "
+        f"on the phone this was measured from, the keyboard covers {hidden}px; "
+        f"--kb came out {got}, which puts the composer "
         f"{int(got[:-2]) - hidden}px off the keyboard")
     assert phone.errors == []
 
@@ -160,6 +202,7 @@ def kb_when_inner_height_also_shrinks(phone, app_url, platform, covered=300):
     document to reveal the focused field was putting the composer on screen by
     accident, and removing that shove is what exposed it.
     """
+    pin_allowance(phone, 0)
     phone.page.add_init_script(
         "Object.defineProperty(navigator, 'platform', { get: () => %r });" % platform)
     phone.open_at(app_url)
@@ -199,6 +242,7 @@ def test_a_scrolled_visual_viewport_is_subtracted_too(phone, app_url):
     are, so they belong in the subtraction. The measured phone reported 0 for
     it, which means this branch is the one the device could not confirm.
     """
+    pin_allowance(phone, 0)
     phone.page.add_init_script(
         "Object.defineProperty(navigator, 'platform', { get: () => 'iPhone' });")
     phone.open_at(app_url)
@@ -214,6 +258,131 @@ def test_a_scrolled_visual_viewport_is_subtracted_too(phone, app_url):
     assert got == "260px", (
         "the 40px the visible area was pushed down was not taken off the lift, "
         f"so the composer rides 40px too high (--kb = {got})")
+    assert phone.errors == []
+
+
+# -------------------------------------------- settling the allowance on-device
+# The bar's height cannot be measured from the page, so the number is stored and
+# adjustable, and the control to adjust it appears on the composer while the
+# keyboard is up -- the only moment the bar is drawn and the gap can be judged.
+# These cover the ways a stored number can go wrong and take the dock with it.
+
+def boot_with_allowance(phone, app_url, raw):
+    """Load with `raw` already written to the allowance key, keyboard down."""
+    phone.page.add_init_script(
+        "try { localStorage.setItem('mnm.kb.bar', %r); } catch (e) {}" % raw)
+    phone.page.add_init_script(
+        "Object.defineProperty(navigator, 'platform', { get: () => 'iPhone' });")
+    phone.open_at(app_url)
+    phone.page.wait_for_selector("#screen-setup:not([hidden])", timeout=15000)
+
+
+def kb_up(phone, covered=300):
+    return phone.page.evaluate("""(covered) => {
+      const vv = window.visualViewport;
+      Object.defineProperty(vv, 'height',
+        { configurable: true, get: () => window.innerHeight - covered });
+      vv.dispatchEvent(new Event('resize'));
+      return getComputedStyle(document.documentElement).getPropertyValue('--kb').trim();
+    }""", covered)
+
+
+def test_an_unreadable_stored_allowance_falls_back_instead_of_poisoning_kb(phone, app_url):
+    """parseInt('') is NaN, and 300 + NaN is NaN. '--kb: NaNpx' is invalid, so
+    the declaration is dropped and the dock falls to the bottom of the screen --
+    the whole bug this is meant to fix, arrived at from a corrupt value."""
+    boot_with_allowance(phone, app_url, "not-a-number")
+    got = kb_up(phone)
+    assert got == "344px", f"a junk stored value reached --kb (= {got})"
+    assert phone.errors == []
+
+
+def test_a_negative_stored_allowance_cannot_pull_the_composer_down(phone, app_url):
+    boot_with_allowance(phone, app_url, "-200")
+    assert kb_up(phone) == "300px", "a negative allowance was applied"
+    assert phone.errors == []
+
+
+def test_an_absurd_stored_allowance_is_clamped(phone, app_url):
+    """Held down on the + button, or a value from a future build."""
+    boot_with_allowance(phone, app_url, "9999")
+    assert kb_up(phone) == "420px", "the allowance was not clamped"
+    assert phone.errors == []
+
+
+def test_adjusting_the_allowance_moves_the_composer_immediately(phone, app_url):
+    """The keyboard is already up while this is being adjusted, and an
+    already-open keyboard never resizes -- so nothing fires on its own. Without
+    an explicit re-measure the +/- buttons would appear to do nothing until the
+    keyboard was next dismissed and raised."""
+    boot_with_allowance(phone, app_url, "44")
+    assert kb_up(phone) == "344px"
+    phone.page.evaluate(
+        "() => document.getElementById('kb-cal-up').dispatchEvent("
+        "new PointerEvent('pointerdown', { bubbles: true, cancelable: true }))")
+    phone.page.wait_for_timeout(80)
+    got = phone.page.evaluate(
+        "() => getComputedStyle(document.documentElement)"
+        ".getPropertyValue('--kb').trim()")
+    assert got == "346px", (
+        f"the composer did not move when the allowance changed (--kb = {got})")
+    assert phone.errors == []
+
+
+def test_the_adjustment_survives_a_reload(phone, app_url):
+    """A value that has to be dialled in again every launch is not a fix.
+
+    Deliberately boots on the shipped default rather than a pinned value: an
+    init script would rewrite the key on the reload and the test would pass
+    without anything having been remembered.
+    """
+    phone.page.add_init_script(
+        "Object.defineProperty(navigator, 'platform', { get: () => 'iPhone' });")
+    phone.open_at(app_url)
+    phone.page.wait_for_selector("#screen-setup:not([hidden])", timeout=15000)
+    before = kb_up(phone)
+    phone.page.evaluate(
+        "() => document.getElementById('kb-cal-up').dispatchEvent("
+        "new PointerEvent('pointerdown', { bubbles: true, cancelable: true }))")
+    phone.page.wait_for_timeout(80)
+    phone.page.reload(wait_until="domcontentloaded")
+    phone.page.wait_for_selector("#screen-setup:not([hidden])", timeout=15000)
+    after = kb_up(phone)
+    assert int(after[:-2]) == int(before[:-2]) + 2, (
+        f"the adjustment was not remembered across a launch "
+        f"(before {before}, nudged +2, after reload {after})")
+    assert phone.errors == []
+
+
+def test_the_nudge_buttons_do_not_take_focus_off_the_composer(phone):
+    """Focus moving off the textarea puts the keyboard away, and the bar with
+    it. The control would dismiss the very thing it is measuring against."""
+    phone.setup()
+    phone.page.click("#in-prompt")
+    assert phone.page.evaluate("() => document.activeElement.id") == "in-prompt"
+    cancelled = phone.page.evaluate("""() => {
+      const ev = new PointerEvent('pointerdown', { bubbles: true, cancelable: true });
+      document.getElementById('kb-cal-up').dispatchEvent(ev);
+      return ev.defaultPrevented;
+    }""")
+    assert cancelled, \
+        "pointerdown was not prevented, so the tap moves focus and drops the keyboard"
+    assert phone.page.evaluate("() => document.activeElement.id") == "in-prompt", \
+        "the nudge stole focus, which on the device puts the keyboard away"
+    assert phone.errors == []
+
+
+def test_the_calibration_strip_is_out_of_the_way_unless_asked_for(phone):
+    """It is a repair tool, not part of the composer."""
+    phone.setup()
+    assert phone.page.is_hidden("#kb-calibrate"), \
+        "the calibration control is on the composer without being asked for"
+    phone.page.click("#btn-chat-settings")
+    phone.page.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
+    phone.page.check("#set-kb-cal")
+    phone.page.click("#btn-settings-done")
+    assert phone.page.is_visible("#kb-calibrate"), \
+        "switching calibration on in Settings did not show the control"
     assert phone.errors == []
 
 
@@ -273,7 +442,13 @@ def test_the_keyboard_up_numbers_survive_the_keyboard_going_down(phone):
     text = phone.page.inner_text("#set-diag")
     assert "while typing" in text, f"no recording section:\n{text}"
     recorded = text.split("while typing", 1)[1]
-    assert "300px" in recorded, (
+    # Against the allowance the recording itself reports, rather than a literal:
+    # this test is about the numbers surviving, and should not fail merely
+    # because the shipped default gap changed.
+    m = re.search(r"accessory allowance: (\d+)px", recorded)
+    assert m, f"no allowance row in the recording:\n{text}"
+    expected = 300 + int(m.group(1))
+    assert f"--kb: {expected}px" in recorded, (
         "the keyboard-up numbers were not kept, so the panel only ever shows "
         f"the state with the keyboard down:\n{text}")
 

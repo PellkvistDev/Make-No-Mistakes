@@ -191,6 +191,18 @@
       <button id="btn-to-bottom" class="to-bottom" type="button" title="Jump to latest" hidden>↓</button>
 
       <div id="composer-dock">
+        <!-- Settling the accessory-bar gap on the device instead of by
+             screenshot. iOS reports nothing about that bar, so the allowance
+             under it has been guessed twice and shipped twice; this is the same
+             number, adjustable, and shown at the one moment it can be judged --
+             while the keyboard is up and the bar is actually drawn. Off unless
+             switched on in Settings. -->
+        <div id="kb-calibrate" class="kb-calibrate" hidden>
+          <button id="kb-cal-down" type="button" title="Move the composer down">−</button>
+          <span id="kb-cal-val" class="mono">44px</span>
+          <button id="kb-cal-up" type="button" title="Move the composer up">+</button>
+          <button id="kb-cal-done" type="button" class="kb-cal-done">Done</button>
+        </div>
         <div id="attach-chips" class="attach-chips" hidden></div>
         <div id="ctx-foot" class="ctx-foot">
           <button id="btn-ctx" class="ctx-usage" type="button" title="Context usage">
@@ -352,6 +364,17 @@
             <label class="setting-label">This build</label>
             <div id="set-diag" class="diag mono"></div>
             <button id="btn-copy-diag" class="ghost" type="button" style="width:100%">Copy diagnostics</button>
+          </div>
+
+          <!-- The gap under the composer, settled on the device. iOS reports
+               nothing about its accessory bar, so this cannot be measured from
+               the page and has twice been guessed and shipped. -->
+          <div class="setting-block row">
+            <div><label class="setting-label" for="set-kb-cal">Adjust composer height</label>
+              <span class="hint">Puts − and + on the composer while the keyboard
+                is up, to set the gap left for iOS's row of chevrons. Only that
+                moment shows whether it is right.</span></div>
+            <input id="set-kb-cal" type="checkbox" class="toggle" />
           </div>
 
           <div class="setting-block">
