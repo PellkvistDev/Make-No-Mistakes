@@ -64,16 +64,21 @@ html {
   overflow: hidden;
   min-height: calc(100% + var(--safe-t));
 }
-/* While a field is focused, give the document no spare height at all.
-   The extra inset above is the ONLY thing iOS can scroll, and it scrolls it to
-   reveal a focused field. Snapping back afterwards (which is what the scroll
-   listener does) works, but you see it: the UI lurches up and returns, once per
-   tap. Taking the height away on focus — before the keyboard is even up — means
-   there is nothing to scroll and nothing to correct.
-   Nothing is lost by dropping it: that height exists to let the canvas paint the
-   strip of screen below the viewport, and while the keyboard is open the
-   keyboard is covering that strip. */
-html.kb-open { min-height: 100%; }
+/* html.kb-open used to live here, dropping that extra inset while a field was
+   focused so iOS had nothing to scroll. It is gone, because the device says it
+   is the only thing that moves on focus and moving is the bug now:
+
+     scrollY moved:     0px
+     visual top moved:  0px
+     html height moved: 59px      <- exactly --safe-t, i.e. this rule
+
+   Nothing scrolls any more, so there is nothing for it to prevent — but the
+   wallpaper is painted into this box (see applyBg), sized `cover`, so taking
+   59px off it re-solves the scale and the whole background jumps. That is the
+   flash. The height stays put now.
+   If the scroll it was guarding against comes back, the diagnostics will say
+   so in that same block, and the fix is to get the composer clear of the
+   keyboard BEFORE iOS decides to scroll — not to resize this box again. */
 /* Nothing in this app should ever scroll the document — the only scroller is
    .messages. Pinning body as well means no amount of overflow can move it. */
 body { position: fixed; inset: 0; width: 100%; overflow: hidden; }

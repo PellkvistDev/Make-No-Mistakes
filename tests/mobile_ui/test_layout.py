@@ -372,54 +372,39 @@ def test_the_jump_to_latest_pill_rides_up_with_the_composer(phone):
     assert phone.errors == []
 
 
-def test_focusing_a_field_removes_the_slack_before_anything_can_scroll_it(phone):
-    """The reported flash: the UI lurched up and snapped back on every tap.
+def test_focusing_a_field_does_not_change_the_document_height(phone):
+    """Reported: 'the background gets shoved up and then snaps back' on every
+    tap into the composer. The device named the culprit, out of the three
+    things that can move a page under iOS:
 
-    The scroll listener fixed the position but a frame too late, so the lurch
-    was visible. The document's only scrollable slack is the extra inset of
-    height on <html>; dropping it on focusin means there is nothing to scroll,
-    so nothing to correct and nothing to see.
+        scrollY moved:     0px
+        visual top moved:  0px
+        html height moved: 59px      <- exactly --safe-t
+
+    That 59px was html.kb-open, which dropped the document's spare inset on
+    focus so iOS had nothing to scroll. Nothing scrolls any more, so it was
+    guarding against nothing -- and the wallpaper is painted into that box and
+    sized `cover`, so shrinking it re-solved the scale and the whole background
+    jumped.
+
+    The box has to hold still. --safe-t is 0 in a headless browser, so simulate
+    it: without one, `calc(100% + 0)` and `100%` are the same number and the
+    old rule would pass this too.
     """
     phone.setup()
-    p = phone.page
     simulate_insets(phone)
-
-    before = p.evaluate("() => document.documentElement.scrollHeight - "
-                        "document.documentElement.clientHeight")
-    assert before > 0, "no slack to begin with — this test would prove nothing"
-
-    p.click("#in-prompt")
-    p.wait_for_function("() => document.documentElement.classList.contains('kb-open')",
-                        timeout=5000)
-    during = p.evaluate("() => document.documentElement.scrollHeight - "
-                        "document.documentElement.clientHeight")
-    assert during <= 1, f"the document can still be scrolled while typing ({during}px)"
-
-    # And it comes back once the field is left, so the strip is painted again.
-    p.evaluate("() => document.getElementById('in-prompt').blur()")
-    p.wait_for_function("() => !document.documentElement.classList.contains('kb-open')",
-                        timeout=5000)
-    after = p.evaluate("() => document.documentElement.scrollHeight - "
-                       "document.documentElement.clientHeight")
-    assert after == before, f"the height didn't come back after blur ({after} vs {before})"
-    assert phone.errors == []
-
-
-def test_moving_between_two_fields_does_not_restore_the_slack_in_between(phone):
-    """focusout fires before focusin on the next field. Restoring immediately
-    would hand the slack back for a frame — the same flash, in miniature."""
-    phone.setup()
     p = phone.page
-    simulate_insets(phone)
+    before = p.evaluate("() => document.documentElement.getBoundingClientRect().height")
     p.click("#in-prompt")
-    p.wait_for_function("() => document.documentElement.classList.contains('kb-open')",
-                        timeout=5000)
-    # Settings has its own text fields; move focus straight to one.
-    p.click("#btn-chat-settings")
-    p.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
-    p.evaluate("() => document.getElementById('set-model').focus()")
     p.wait_for_timeout(120)
-    assert p.evaluate("() => document.documentElement.classList.contains('kb-open')"), \
-        "the slack came back while moving between two fields"
-    assert phone.errors == []
+    after = p.evaluate("() => document.documentElement.getBoundingClientRect().height")
+    assert abs(after - before) <= 1, (
+        f"focusing the composer resized the document from {before} to {after}; "
+        "the wallpaper is painted into that box, so it rescales -- the flash")
 
+    # And blurring must not move it back, which would flash a second time.
+    p.evaluate("() => document.getElementById('in-prompt').blur()")
+    p.wait_for_timeout(120)
+    settled = p.evaluate("() => document.documentElement.getBoundingClientRect().height")
+    assert abs(settled - before) <= 1, f"blurring resized it: {before} -> {settled}"
+    assert phone.errors == []
