@@ -89,18 +89,14 @@
   }
   window.addEventListener("scroll", pinDocument, { passive: true });
 
-  // Correcting the scroll is a frame too late — you see the lurch and the snap
-  // back. So remove the thing being scrolled first: focusin fires before the
-  // keyboard animates in, and html.kb-open drops the spare inset of height that
-  // is the only scrollable slack there is. The listener above stays as a
-  // backstop for anything that scrolls the document by another route.
   // WHAT ACTUALLY MOVES WHEN A FIELD IS FOCUSED.
   //
-  // The flash on focus — the UI shoved up and snapped back — has now been
-  // attributed twice to a mechanism that turned out not to be causing it: the
-  // document scrolling, then the wallpaper's box being rescaled by kb-open.
-  // Removing the second one entirely left the flash exactly as it was. Both
-  // fixes shipped before anything measured which thing had moved.
+  // The flash on focus — the UI shoved up and snapped back — was attributed
+  // twice to a mechanism nothing had measured. So this samples instead, and on
+  // an iPhone 15 Pro it answered: scrollY 0, visual top 0, html height 59 —
+  // exactly --safe-t, i.e. the rule that shrank <html> on focus. That rule is
+  // gone (see style.css) and the sampler stays, because it is the only thing
+  // that can tell whether removing it traded the flash for a scroll.
   //
   // So measure. There are only three candidates, and they need different
   // fixes, so telling them apart is the whole job:
@@ -130,22 +126,16 @@
     requestAnimationFrame(tick);
   }
 
+  // No kb-open class any more, and so no focusout to take it off again: the
+  // document's height is left alone. pinDocument stays, as the backstop it
+  // always was — focusin fires before the keyboard animates in, which is when
+  // iOS would try to scroll if it were going to.
   const TYPES = /^(input|textarea|select)$/i;
   document.addEventListener("focusin", (e) => {
     if (e.target && TYPES.test(e.target.tagName)) {
       watchFocusShove();
-      document.documentElement.classList.add("kb-open");
       pinDocument();
     }
-  });
-  document.addEventListener("focusout", (e) => {
-    if (!e.target || !TYPES.test(e.target.tagName)) return;
-    // Only once nothing else has taken focus, or moving between two fields
-    // would put the height back for a frame — the same flash, in miniature.
-    setTimeout(() => {
-      const el = document.activeElement;
-      if (!el || !TYPES.test(el.tagName)) document.documentElement.classList.remove("kb-open");
-    }, 0);
   });
 
   // The box a position:fixed element is actually laid out in. #app is
