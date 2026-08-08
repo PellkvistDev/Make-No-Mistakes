@@ -519,6 +519,48 @@
     return out;
   }
 
+  const INTERRUPTED_TOOL =
+    "ERROR: interrupted before this finished — the app was suspended by the " +
+    "operating system mid-call. Assume it did not take effect. Do it again if " +
+    "it is still needed.";
+
+  // Make a history that was cut off mid-turn safe to send again.
+  //
+  // The loop records a tool's result immediately after running it, so a turn
+  // killed between those two points leaves an assistant message whose
+  // tool_calls have no matching tool reply. That history is not merely untidy:
+  // OpenAI-compatible APIs require every tool_call to be answered and reject
+  // the request outright, so a resume would fail on its first call and the
+  // conversation would be stuck for good.
+  //
+  // The gaps are filled rather than the assistant message dropped. Dropping it
+  // would lose what the model had decided to do, and the reply that goes in its
+  // place is true -- the call did not complete -- and tells the model the one
+  // thing it cannot otherwise know: whether to repeat the call. It is
+  // deliberately "assume it did not take effect", because a tool that ran
+  // without its result being recorded is indistinguishable from one that never
+  // ran, and every tool here writes whole file contents, so doing it twice
+  // lands the same bytes.
+  function healInterruptedTurn(messages) {
+    const answered = new Set();
+    for (const m of messages) {
+      if (m && m.role === "tool" && m.tool_call_id) answered.add(m.tool_call_id);
+    }
+    const out = [];
+    for (const m of messages) {
+      out.push(m);
+      if (!m || m.role !== "assistant" || !Array.isArray(m.tool_calls)) continue;
+      for (const tc of m.tool_calls) {
+        if (!tc || !tc.id || answered.has(tc.id)) continue;
+        // Straight after the message that made the call, so the pairing the
+        // API checks for is in the order it expects.
+        out.push({ role: "tool", tool_call_id: tc.id, content: INTERRUPTED_TOOL });
+        answered.add(tc.id);
+      }
+    }
+    return out;
+  }
+
   // What the desktop's checkout looks like, published with the chat by
   // syncstore.session_to_chat. This phone reads the repo over the GitHub API,
   // so work that only exists on the desktop's disk is invisible here — editing
@@ -1051,6 +1093,7 @@
     DEVICE_LOCK_TTL_MS, DEVICE_LOCK_HEARTBEAT_S,
     IMAGE_RE, imageMime,
     handoffNote, applyHandoff, HANDOFF_MARKER, repoStateWarning,
+    healInterruptedTurn, INTERRUPTED_TOOL,
     estimateTokens, trimHistory, historyDigest, splitTurns, COMPACT_PROMPT,
     messageChars, calibrateRatio, DEFAULT_CHARS_PER_TOKEN, IMAGE_CHARS,
     _b64: { bytesToB64, b64ToBytes },

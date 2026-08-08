@@ -52,6 +52,38 @@ git revert --no-commit <squashed-sha-on-main>
 Confirm with `git log --oneline origin/main..HEAD` that the branch carries only
 the intended commit before pushing.
 
+## The phone cannot work in the background, and never will
+
+`runAgent` runs in the page and calls the model with `fetch` from the tab, so
+the phone is doing the work. When iOS suspends the app the request in flight is
+killed under it, `model.chat` throws, and the turn ends on its error path.
+
+Nothing inside a PWA changes that. WebKit has never shipped Background Sync or
+Background Fetch, and Web Push (iOS 16.4+, installed PWAs) delivers a
+notification but cannot run anything. Do not go looking for a web API for this;
+there isn't one. The only real answer for work that must continue while the app
+is closed is to run it somewhere else — the desktop, via the handoff in
+`session.pending`.
+
+What *is* done, in `withRun`:
+
+- A screen wake lock is held for the duration of a turn, so the phone does not
+  lock itself while you wait. Covers the common case; does nothing for
+  app-switching. Absent below iOS 16.4 and refused in Low Power Mode, so both
+  must stay non-fatal.
+- A turn cut off while hidden is resumed on the way back. `hiddenDuringRun` must
+  be watched for the whole turn, not sampled at the start — the real shape is
+  starting a turn and *then* leaving. Only a turn that was hidden and did not
+  reach a terminal event counts: resuming a genuine foreground error would call
+  the same endpoint and fail identically, forever.
+- `session.interrupted` is set *before* the turn, not after. If the OS kills the
+  app outright the `finally` never runs, and a flag written at the end would say
+  the turn had never started.
+- Resuming runs the saved history through `healInterruptedTurn`. A turn killed
+  between a tool running and its result being recorded leaves `tool_calls` with
+  no matching reply, which OpenAI-compatible APIs reject outright — so without
+  it the resume fails on its first call and the chat is stuck for good.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by

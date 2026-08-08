@@ -342,12 +342,23 @@
   }, LIVE_POLL_MS);
 
   document.addEventListener("visibilitychange", () => {
-    if (document.hidden) { if (session) persistSession(); return; }
+    if (document.hidden) {
+      // The usual way this happens is starting a turn and THEN leaving, so
+      // sampling document.hidden once at the start would miss almost every
+      // real case.
+      if (currentRun) hiddenDuringRun = true;
+      if (session) persistSession();
+      return;
+    }
     const ms = autolockMs();
     if (session && ms && Date.now() - lastActive > ms) { lock(); return; }
     armIdle();
+    // The screen lock is dropped whenever the page is hidden and does not come
+    // back on its own, so a turn still running needs a fresh one.
+    if (currentRun) keepScreenAwake();
     // Back in the foreground and still unlocked: see if the desktop moved on.
     if (session) refreshOpenChatFromSync();
+    resumeInterruptedTurn();
   });
   ["pointerdown", "keydown"].forEach((ev) => document.addEventListener(ev, armIdle, { passive: true }));
 
@@ -459,6 +470,9 @@
         chatId: session.chatId || null, chatTitle: session.chatTitle || "",
         messages: stripImages(session.messages || []), transcript: session.transcript || [],
         pending: session.pending || [],
+        // Carried so a turn cut off by the app being killed outright -- not
+        // merely backgrounded -- is still picked up on the next launch.
+        interrupted: !!session.interrupted,
       }, session.cryptoKey);
       localStorage.setItem(SESSION_KEY, JSON.stringify(blob));
     } catch (e) { /* quota / crypto — skip silently */ }
@@ -478,11 +492,14 @@
     session.messages = data.messages;
     session.transcript = data.transcript || [];
     session.pending = data.pending || [];
+    session.interrupted = !!data.interrupted;
     $("chat-repo-name").textContent = r.full_name;
     $("messages").innerHTML = "";
     for (const b of session.transcript) addBubble(b.role, b.text, false);
     addBubble("system", "Resumed your session in " + r.full_name + ".", false);
     show("screen-chat");
+    // After the screen is up, so the turn's output has somewhere to land.
+    resumeInterruptedTurn();
     return true;
   }
 
@@ -1427,13 +1444,21 @@
         else if (ev.type === "tool_result") { if (liveTool) finishTool(liveTool, ev.out); }
         else if (ev.type === "answer") {
           setStatus("");
+          turnEnded = "answer";
           if (!endStream(ev.text) && ev.text) addBubble("assistant", ev.text);
           haptic(12);
         }
         else if (ev.type === "steered") { endStream(); steerAccepted(ev.text); setStatus("taking that in…"); }
         else if (ev.type === "usage") noteUsage(ev.sent, ev.usage);
-        else if (ev.type === "error") { setStatus(""); endStream(); addBubble("error", ev.text); }
-        else if (ev.type === "stopped") { setStatus(""); endStream(); addBubble("system", "Stopped."); }
+        else if (ev.type === "error") {
+          setStatus(""); endStream(); turnEnded = "error";
+          // Suppressed while hidden: a request killed by the OS is not a fault
+          // worth reporting, and the resume on the way back says so instead.
+          if (!document.hidden) addBubble("error", ev.text);
+        }
+        else if (ev.type === "stopped") {
+          setStatus(""); endStream(); turnEnded = "stopped"; addBubble("system", "Stopped.");
+        }
       },
     });
     // runAgent appends this turn onto the array it was handed. When that was a
@@ -1583,6 +1608,41 @@
   // cross-device lock. Returns a { locked, lockedBy, lockedSince } object if
   // another live device holds the chat and force wasn't set (fn never runs
   // in that case); otherwise undefined.
+  // --------------------------------------------- surviving the app going away
+  // The agent loop runs in this page: runAgent calls the model with fetch from
+  // the tab. So when iOS suspends the app, the request in flight is killed
+  // under it, model.chat throws, and the turn ends on its error path. Nothing
+  // inside a PWA can prevent that -- WebKit has never shipped Background Sync
+  // or Background Fetch, and Web Push can deliver a notification but cannot run
+  // anything. Two things are possible, and these are both of them.
+  //
+  // One: stop the screen from locking on its own while a turn is running. That
+  // is the common way this happens -- send something, put the phone down, watch
+  // it lock -- and the Screen Wake Lock API (Safari 16.4+) is exactly that. It
+  // does nothing for switching to another app, which is not fixable here.
+  let wakeLock = null;
+  async function keepScreenAwake() {
+    if (!navigator.wakeLock) return;   // older iOS, or a non-secure origin
+    try { wakeLock = await navigator.wakeLock.request("screen"); }
+    catch { wakeLock = null; }         // Low Power Mode refuses it; not fatal
+  }
+  function letScreenSleep() {
+    const held = wakeLock;
+    wakeLock = null;
+    if (held) { try { held.release(); } catch {} }
+  }
+
+  // Two: make being suspended cost the turn instead of the conversation. Every
+  // completed step is already persisted, so what is missing on the way back is
+  // only the one request that was in flight.
+  //
+  // Only a turn that was hidden AND did not reach a terminal event counts as
+  // interrupted. An error raised while the app was on screen is a real error --
+  // a rejected key, a bad request -- and resuming that would fail again on the
+  // same call, forever.
+  let hiddenDuringRun = false;
+  let turnEnded = null;              // "answer" | "stopped" | "error" | null
+
   async function withRun(fn, opts) {
     if (currentRun) return;
     opts = opts || {};
@@ -1592,11 +1652,27 @@
       if (lockResult) return lockResult;
     }
     stopFlag = false;
+    hiddenDuringRun = document.hidden;
+    turnEnded = null;
     currentRun = { stop: () => { stopFlag = true; $("btn-stop").disabled = true; } };
+    // Marked as interrupted BEFORE the turn, not after it. If the OS kills the
+    // app outright rather than merely suspending it, the finally below never
+    // runs, and a flag written only at the end would say the turn had never
+    // started. Every completed step is persisted as it goes, so what is saved
+    // here is a real resume point rather than an optimistic one.
+    if (session) { session.interrupted = true; persistSession(); }
     setRunning(true);
+    await keepScreenAwake();
     try { await fn(() => stopFlag); }
     catch (e) { addBubble("error", e.message || String(e)); }
     finally {
+      letScreenSleep();
+      // Recorded before persistSession, so the flag is part of what gets saved
+      // and survives the app being killed outright rather than just backgrounded.
+      if (session) {
+        session.interrupted =
+          hiddenDuringRun && turnEnded !== "answer" && turnEnded !== "stopped";
+      }
       setRunning(false); currentRun = null; persistSession(); renderContextMeter();
       await syncSave();
       if (chatId) await releaseDeviceLock(chatId);
@@ -1793,6 +1869,22 @@
     for (let i = t.length - 1; i >= 0; i--) {
       if (t[i].role === role) { session.transcript = t.slice(0, i); return; }
     }
+  }
+
+  // Pick a turn back up after the OS suspended the app mid-request.
+  //
+  // Nothing is replayed: the history already holds every completed step, so
+  // continuing from it is an ordinary turn that happens to start in the middle
+  // of one. The only repair needed is for tool calls whose results never got
+  // recorded -- see healInterruptedTurn, without which the first request would
+  // be rejected for having an unanswered tool_call and the chat would be stuck.
+  async function resumeInterruptedTurn() {
+    if (!session || !session.interrupted || currentRun || composing) return;
+    session.interrupted = false;         // cleared first: a resume that fails
+                                         // must not re-arm itself into a loop
+    session.messages = AC.healInterruptedTurn(session.messages || []);
+    addBubble("system", "That turn stopped when the app went into the background. Carrying on from the last completed step.");
+    await withRun((getStopped) => runBuild(getStopped));
   }
 
   async function regenerateLast() {
