@@ -71,10 +71,21 @@ diagnostics panel in Settings is there to report them.
 
 Do not re-litigate these. Each cost a round trip to a real phone.
 
-- `--kb` is the whole occlusion. On an iPhone 15 Pro: 852px screen, 59px top
-  inset, 449px visible viewport, 344px hidden — and that 344 is the keys **and**
-  the accessory bar together. Adding 44px for the bar counts it twice and parks
-  the composer in mid-air.
+- `--kb` has two parts and they are not the same kind of thing. What
+  `visualViewport` reports as hidden is measurable: on an iPhone 15 Pro, an
+  852px screen, a 59px top inset and a 449px visible viewport give 344px hidden.
+  The accessory bar is **not** in that number. It is a native view painted over
+  the web view and does not shrink `visualViewport` at all, so room for it has to
+  be added on top. Reading 344 as "the keys and the bar together" is what left
+  the composer sitting behind the bar.
+- Do not check that with `dock bottom == visual h`. That was used to confirm the
+  reading above and it confirms the broken state: flush with the bottom of the
+  visible area *is* underneath a bar painted across it. The only check that means
+  anything is looking at the phone with the keyboard up.
+- The bar's height is unmeasurable from the page, so it lives in `localStorage`
+  as `mnm.kb.bar` and Settings → "Adjust composer height" puts − and + on the
+  composer while the keyboard is up. Change the number there, on the device,
+  rather than shipping a fourth guess.
 - `window.innerHeight` tracks the *visual* viewport in an installed iOS PWA, so
   it shrinks with the keyboard. Measure against
   `document.documentElement.clientHeight`, or the lift comes out ~0.

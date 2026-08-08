@@ -521,6 +521,26 @@ pre.code, pre.tool-out, .preview {
   display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 14px 0;
   width: 100%; max-width: 720px; margin: 0 auto;
 }
+/* Setting the gap under the composer, from the device. Sits at the top of the
+   dock so it rides up with it and stays visible while the keyboard is up —
+   which is the only time the bar it is measuring against exists. */
+.kb-calibrate {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 6px 14px; width: 100%; max-width: 720px; margin: 0 auto;
+}
+.kb-calibrate[hidden] { display: none; }
+.kb-calibrate button {
+  min-width: 44px; height: 34px; border-radius: 999px;
+  font-size: 17px; line-height: 1; color: #dbe3f5;
+  background: var(--glass-strong); border: 1px solid var(--glass-brd);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  box-shadow: var(--glass-hi);
+}
+.kb-calibrate .kb-cal-done { font-size: 13px; padding: 0 14px; }
+.kb-calibrate #kb-cal-val {
+  min-width: 56px; text-align: center; font-size: 13px; color: var(--text);
+  font-family: var(--mono);
+}
 .chip {
   display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
   background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi);
