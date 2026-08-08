@@ -300,6 +300,58 @@ def test_the_recording_says_which_field_raised_the_keyboard(phone):
     assert phone.errors == []
 
 
+def test_the_recording_says_what_moved_when_a_field_was_focused(phone):
+    """The flash on focus has been blamed on two different mechanisms and both
+    were wrong, because nothing measured which thing actually moved. There are
+    three candidates and they need different fixes: the document scrolling, iOS
+    shifting the visual viewport instead, and <html>'s own box changing size.
+    All three are now sampled across the keyboard animation.
+
+    NOT COVERED: that the scrollY row reports a real scroll. Deleting the line
+    that samples it leaves this test green, because the document cannot be
+    scrolled here -- pinDocument puts it back and there is no slack to move --
+    so the row reads 0px whether it is sampled or not. Driving a scroll inside
+    the sampling window races the scroll listener. Left as a known gap rather
+    than a flaky assertion; the other two rows are what this round is for.
+    """
+    phone.setup()
+    # Give each candidate a distinct, non-zero displacement to find, or the
+    # rows render as a row of zeroes whether they are sampled or not -- which
+    # is what an earlier version of this test asserted, and a mutation that
+    # stopped sampling the visual viewport entirely sailed through it.
+    phone.page.evaluate("""() => {
+      Object.defineProperty(window.visualViewport, 'offsetTop',
+        { configurable: true, get: () => 40 });
+    }""")
+    phone.page.click("#in-prompt")
+    # The height has to change DURING the sampling window: the sampler records
+    # a delta from where it started, so anything done before focus is simply
+    # part of the baseline. (--safe-t is 0 here, so kb-open moves nothing by
+    # itself and this stands in for the movement a real inset would produce.)
+    phone.page.evaluate("""() => {
+      document.documentElement.style.minHeight =
+        (document.documentElement.getBoundingClientRect().height + 25) + 'px';
+    }""")
+    phone.page.wait_for_timeout(900)          # the sampler runs for 700ms
+    phone.page.click("#btn-chat-settings")
+    phone.page.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
+    text = phone.page.inner_text("#set-diag")
+    assert "on focus" in text, f"no focus recording at all:\n{text}"
+    recorded = text.split("on focus", 1)[1]
+    assert "nothing recorded yet" not in recorded, \
+        f"focusing the composer recorded nothing:\n{recorded}"
+    for key in ("scrollY moved", "visual top moved", "html height moved"):
+        assert key in recorded, (
+            f"{key!r} missing, so that candidate cannot be ruled in or out:\n{recorded}")
+    assert "visual top moved: 40px" in recorded, (
+        "the visual viewport moved 40px and the recording did not see it -- that "
+        f"is the one candidate no scroll handler can correct:\n{recorded}")
+    moved = [l for l in recorded.splitlines() if "html height moved" in l]
+    assert moved and moved[0].strip() != "html height moved: 0px", (
+        f"<html>'s box changed size and the recording missed it:\n{recorded}")
+    assert phone.errors == []
+
+
 def test_the_build_stamp_is_shown_so_a_stale_cache_is_visible(phone):
     phone.setup()
     phone.page.click("#btn-chat-settings")

@@ -89,20 +89,63 @@
   }
   window.addEventListener("scroll", pinDocument, { passive: true });
 
-  // There used to be a matching focusout, and an html.kb-open class that took
-  // the document's spare height away while a field was focused, because that
-  // height was the only thing iOS could scroll to reveal one. It is gone:
-  // <html> is exactly the viewport now and has no spare height at any point,
-  // so there is nothing to take away and nothing to give back. Taking it away
-  // was itself a bug — the wallpaper was painted into that box (see applyBg),
-  // so shrinking it rescaled the wallpaper on every tap.
+  // Correcting the scroll is a frame too late — you see the lurch and the snap
+  // back. So remove the thing being scrolled first: focusin fires before the
+  // keyboard animates in, and html.kb-open drops the spare inset of height that
+  // is the only scrollable slack there is. The listener above stays as a
+  // backstop for anything that scrolls the document by another route.
+  // WHAT ACTUALLY MOVES WHEN A FIELD IS FOCUSED.
   //
-  // Focusing still pins, as a belt-and-braces partner to the scroll listener
-  // above: focusin fires before the keyboard animates in, which is the moment
-  // iOS would try to scroll if anything ever were scrollable again.
+  // The flash on focus — the UI shoved up and snapped back — has now been
+  // attributed twice to a mechanism that turned out not to be causing it: the
+  // document scrolling, then the wallpaper's box being rescaled by kb-open.
+  // Removing the second one entirely left the flash exactly as it was. Both
+  // fixes shipped before anything measured which thing had moved.
+  //
+  // So measure. There are only three candidates, and they need different
+  // fixes, so telling them apart is the whole job:
+  //   scrollY — the document scrolled. A scroll listener can undo this.
+  //   vv top  — iOS shifted the VISUAL viewport instead, which it does to
+  //             reveal a focused field when the document cannot scroll. No
+  //             scroll handler touches this one.
+  //   html Δh — <html>'s own box changed size, which rescales anything painted
+  //             into it.
+  // Sample from focusin across the keyboard animation and keep the largest of
+  // each. Reported in Settings next to the keyboard numbers.
+  let focusShove = null;
+  function watchFocusShove() {
+    const vv = window.visualViewport;
+    const t0 = performance.now();
+    const startH = document.documentElement.getBoundingClientRect().height;
+    const seen = { at: new Date().toLocaleTimeString(), scrollY: 0, vvTop: 0, htmlD: 0 };
+    const tick = () => {
+      seen.scrollY = Math.max(seen.scrollY,
+        window.scrollY || document.documentElement.scrollTop || 0);
+      if (vv) seen.vvTop = Math.max(seen.vvTop, vv.offsetTop || 0);
+      seen.htmlD = Math.max(seen.htmlD,
+        Math.abs(document.documentElement.getBoundingClientRect().height - startH));
+      if (performance.now() - t0 < 700) requestAnimationFrame(tick);
+      else focusShove = seen;
+    };
+    requestAnimationFrame(tick);
+  }
+
   const TYPES = /^(input|textarea|select)$/i;
   document.addEventListener("focusin", (e) => {
-    if (e.target && TYPES.test(e.target.tagName)) pinDocument();
+    if (e.target && TYPES.test(e.target.tagName)) {
+      watchFocusShove();
+      document.documentElement.classList.add("kb-open");
+      pinDocument();
+    }
+  });
+  document.addEventListener("focusout", (e) => {
+    if (!e.target || !TYPES.test(e.target.tagName)) return;
+    // Only once nothing else has taken focus, or moving between two fields
+    // would put the height back for a frame — the same flash, in miniature.
+    setTimeout(() => {
+      const el = document.activeElement;
+      if (!el || !TYPES.test(el.tagName)) document.documentElement.classList.remove("kb-open");
+    }, 0);
   });
 
   // The box a position:fixed element is actually laid out in. #app is
@@ -1996,18 +2039,15 @@
     if (bg.type === "color") { const L = hexLuminance(bg.value); return L != null && L > 0.6; } // gradients (not hex) are dark presets
     return false;
   }
-  // The wallpaper goes on #bg-layer ONLY, never on <html> as well.
+  // The wallpaper goes on <html> ONLY, never on #bg-layer as well.
   //
-  // Still one painter: two surfaces scaling `cover` to different boxes is what
-  // made the seam — a visible line just above the bottom of the screen, the
-  // reported "gradient offset". What changed is which surface.
-  //
-  // It used to be <html>, whose background propagates to the root canvas, then
-  // the only thing that reached the strip below the layout viewport. But that
-  // box is one this app resizes: dropping the document's scrollable slack on
-  // focus shrank it by --safe-t, `cover` re-solved, and the whole wallpaper
-  // rescaled every time the composer was tapped. #bg-layer is fixed with an
-  // explicit height instead, so its box depends on nothing that moves.
+  // <html>'s background propagates to the root canvas, which is the one
+  // surface that reaches the strip of screen below the layout viewport in an
+  // installed iOS PWA — a position:fixed layer cannot, which was tried. If
+  // #bg-layer painted the same image too, it would scale `cover` to its own
+  // (viewport-sized) box while the canvas scaled to <html>'s taller box, and
+  // the two would meet in a visible line just above the bottom of the screen.
+  // That line was the reported "gradient offset". One painter, no seam.
   function applyBg(bg) {
     const layer = $("bg-layer");
     const root = document.documentElement;
@@ -2021,22 +2061,22 @@
       el.style.background = css;
       if (img) el.style.backgroundImage = img;
     };
-    set(root, "");                        // never paints while a wallpaper is up
+    set(layer, "");                       // never paints while a wallpaper is up
     if (!bg || bg.type === "default") {
       document.body.classList.remove("has-bg");
-      set(layer, "");
+      set(root, "");
       return;
     }
-    // body.has-bg turns body transparent so the layer shows through it: body is
-    // pinned to the viewport, and an opaque background on it would hide the
-    // layer everywhere except the strip below — which is the two-surface split
-    // that produced the seam, arrived at from the other direction.
+    // body.has-bg turns body transparent so the canvas shows through it; while
+    // body still had an opaque background it covered the canvas over the whole
+    // viewport, leaving the canvas visible only in the strip. That split is
+    // exactly what produced two differently-scaled copies of the image.
     document.body.classList.add("has-bg");
     if (bg.type === "image") {
       layer.classList.add("image");
-      set(layer, "#0b0d10 center/cover no-repeat", 'url("' + bg.value + '")');
+      set(root, "#0b0d10 center/cover no-repeat", 'url("' + bg.value + '")');
     } else {
-      set(layer, bg.value);
+      set(root, bg.value);
     }
   }
   function sameBg(a, b) {
@@ -2185,6 +2225,14 @@
     } else {
       rows.push(["", ""],
                 ["while typing", "nothing recorded — type a character, then reopen this"]);
+    }
+    if (focusShove) {
+      rows.push(["", ""], ["on focus", focusShove.at],
+                ["  scrollY moved", focusShove.scrollY + "px"],
+                ["  visual top moved", focusShove.vvTop + "px"],
+                ["  html height moved", Math.round(focusShove.htmlD) + "px"]);
+    } else {
+      rows.push(["", ""], ["on focus", "nothing recorded yet"]);
     }
     return rows;
   }
