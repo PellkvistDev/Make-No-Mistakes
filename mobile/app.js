@@ -126,16 +126,64 @@
     requestAnimationFrame(tick);
   }
 
-  // No kb-open class any more, and so no focusout to take it off again: the
-  // document's height is left alone. pinDocument stays, as the backstop it
-  // always was — focusin fires before the keyboard animates in, which is when
-  // iOS would try to scroll if it were going to.
+  // LIFT THE COMPOSER BEFORE iOS DECIDES TO SCROLL, NOT AFTER.
+  //
+  // Four mechanisms have been blamed for the flash and the first three were
+  // measured to zero on the device: the document did not scroll, the visual
+  // viewport did not move, and removing the rule that resized <html> changed
+  // nothing. The UI still visibly translates and returns.
+  //
+  // What is left is the one thing no web API reports. In an installed iOS PWA
+  // the system can scroll the web view's own enclosing scroll view to bring a
+  // focused field into sight. That moves everything, wallpaper included, and
+  // no page-level number changes — which is exactly the shape of what the
+  // sampler recorded. It also explains the part that would not reconcile:
+  // while the document was scrollable iOS scrolled the document (visible to
+  // us, corrected a frame late — the old lurch), and pinning the document
+  // simply moved the same behaviour somewhere unreachable.
+  //
+  // Nothing can undo that shove, so remove the reason for it. iOS decides at
+  // focus time, and at focus time the composer is still sitting where the
+  // keyboard is about to be: --kb does not change until visualViewport fires,
+  // which is after the animation has begun. So lift on focus, using the height
+  // this keyboard had last time, and let the real measurement correct it a
+  // moment later. Remembered across launches because the first focus after a
+  // cold start would otherwise have nothing to go on.
+  const KB_MEMO = "mnm.kb.h";
+  let lastKbHeight = parseInt(localStorage.getItem(KB_MEMO) || "0", 10) || 0;
+  function rememberKbHeight(px) {
+    if (px <= 0 || px === lastKbHeight) return;
+    lastKbHeight = px;
+    try { localStorage.setItem(KB_MEMO, String(px)); } catch { /* private mode */ }
+  }
+  function liftForKeyboard(px) {
+    document.documentElement.style.setProperty("--kb", px + "px");
+  }
+
   const TYPES = /^(input|textarea|select)$/i;
   document.addEventListener("focusin", (e) => {
-    if (e.target && TYPES.test(e.target.tagName)) {
-      watchFocusShove();
-      pinDocument();
+    if (!e.target || !TYPES.test(e.target.tagName)) return;
+    watchFocusShove();
+    // Predicted, not measured. Wrong by however much the keyboard has changed
+    // size since last time, for the ~200ms until visualViewport says
+    // otherwise, which is a far smaller error than the whole screen jumping.
+    if (lastKbHeight > 0) {
+      const wasNear = distanceFromBottom() < 80;
+      liftForKeyboard(lastKbHeight);
+      fitMessages(wasNear);
     }
+    pinDocument();
+  });
+  document.addEventListener("focusout", (e) => {
+    if (!e.target || !TYPES.test(e.target.tagName)) return;
+    // Only once nothing else has taken focus, or moving between two fields
+    // would drop the composer onto the keyboard for a frame.
+    setTimeout(() => {
+      const el = document.activeElement;
+      if (el && TYPES.test(el.tagName)) return;
+      liftForKeyboard(0);
+      fitMessages();
+    }, 0);
   });
 
   // The box a position:fixed element is actually laid out in. #app is
@@ -224,7 +272,16 @@
       // Ignore small deltas so a browser's collapsing address bar doesn't read
       // as a keyboard.
       if (covered <= 80) covered = 0;
-      document.documentElement.style.setProperty("--kb", covered + "px");
+      // While a field is focused, do not drop the lift back to 0 on a
+      // transient report. The keyboard animating in produces intermediate
+      // frames, and letting those through would put the composer back under
+      // the keyboard for a frame — reintroducing exactly the reason iOS
+      // shoves the view. focusout is what clears it.
+      const focusedField = document.activeElement;
+      if (covered === 0 && focusedField && TYPES.test(focusedField.tagName)
+          && lastKbHeight > 0) return;
+      liftForKeyboard(covered);
+      rememberKbHeight(covered);   // what the next focus will lift by
       pinDocument();     // opening the keyboard is when iOS tries to scroll
       fitMessages(wasNear);
       // Read after the layout above, so the dock's rect reflects this --kb.
