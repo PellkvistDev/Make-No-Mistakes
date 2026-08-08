@@ -47,23 +47,33 @@ html, body {
    In this mode iOS keeps the layout viewport its normal height (screen minus
    status bar) but positions it at the very top of the screen. The bottom
    safe-area-inset-top pixels of the glass are therefore OUTSIDE the layout
-   viewport, and a flat strip of --bg used to show there because nothing lays
-   out that far down.
-   <html> is NOT the answer, though it was twice. Making it taller than the
-   viewport gives the root canvas a box that reaches the strip, but that same
-   extra height is the only thing iOS can scroll, and it scrolls it to reveal a
-   focused field — sliding the whole UI up on every tap. Taking the height away
-   on focus fixed the sliding and broke something else: the wallpaper is
-   painted into that box, so shrinking it rescaled the wallpaper, which is the
-   flash. Two fixes, each correct, pulling on the same number.
-   So <html> gets no extra height and no wallpaper. It is exactly the viewport,
-   never scrollable, and nothing about it moves. The strip is covered by
-   #bg-layer, which is fixed with an explicit height rather than inset:0 — see
-   that rule for why that reaches where inset:0 could not. */
+   viewport. Consequences:
+     1. A flat strip of --bg shows there, because nothing lays out that far
+        down. Only the canvas background reaches it, and only when <html> is
+        tall enough to have one — hence the min-height below.
+     2. position:fixed;inset:0 does NOT cover it. Fixed positioning resolves
+        against the layout viewport, which stops short. So the wallpaper ends
+        above the screen bottom even once the strip is no longer grey — that
+        is the separate #bg-layer rule further down.
+   The min-height is the old fix and it is correct; what was wrong with it was
+   that it also made the document SCROLLABLE by exactly that many pixels, and
+   iOS used them — sliding the page up (the band came back, same height, which
+   was the tell) and shoving the whole UI up whenever the composer was focused.
+   overflow:hidden keeps the height and takes away the scroll. */
 html {
   overflow: hidden;
-  min-height: 100%;
+  min-height: calc(100% + var(--safe-t));
 }
+/* While a field is focused, give the document no spare height at all.
+   The extra inset above is the ONLY thing iOS can scroll, and it scrolls it to
+   reveal a focused field. Snapping back afterwards (which is what the scroll
+   listener does) works, but you see it: the UI lurches up and returns, once per
+   tap. Taking the height away on focus — before the keyboard is even up — means
+   there is nothing to scroll and nothing to correct.
+   Nothing is lost by dropping it: that height exists to let the canvas paint the
+   strip of screen below the viewport, and while the keyboard is open the
+   keyboard is covering that strip. */
+html.kb-open { min-height: 100%; }
 /* Nothing in this app should ever scroll the document — the only scroller is
    .messages. Pinning body as well means no amount of overflow can move it. */
 body { position: fixed; inset: 0; width: 100%; overflow: hidden; }
@@ -79,30 +89,25 @@ button { cursor: pointer; border: none; background: none; }
    so make hidden win explicitly — otherwise send + stop both show. */
 [hidden] { display: none !important; }
 
-/* The wallpaper is painted by exactly ONE thing: THIS layer.
-   Still one painter — two boxes scaling `cover` differently is what produced
-   the "gradient ends above the bottom of the screen" seam, and that stays
-   impossible. What changed is WHICH one.
-   It used to be the root canvas, i.e. <html>'s background, because the layout
-   viewport in an installed iOS PWA is shorter than the screen and a fixed
-   layer with inset:0 stops where the viewport stops. But painting into <html>
-   means painting into a box whose height this app deliberately changes:
-   focusing a field used to drop that slack so iOS could not scroll it, the
-   box shrank by exactly --safe-t, `cover` re-solved against it, and the whole
-   wallpaper visibly rescaled on every tap into the composer. Measured at
-   903 -> 844 in the harness.
-   inset:0 was the problem, not position:fixed. An explicit height reaches past
-   the viewport: the containing block for a fixed element is the viewport, so
-   100% is the layout viewport and the extra --safe-t covers the strip below
-   it. The box no longer depends on anything that moves. */
+/* The wallpaper is painted by exactly ONE thing: the root canvas.
+   This layer stays for the plain-colour default and as a positioned slot, but
+   applyBg() deliberately leaves it empty whenever there is a wallpaper.
+   Why one painter: in an installed iOS PWA with a black-translucent status bar
+   the layout viewport is shorter than the screen, and a position:fixed element
+   cannot paint the strip of glass below it — pushing this layer's bottom past
+   the viewport was tried and did nothing. Only the canvas reaches down there.
+   So the canvas has to paint the strip, and if anything else painted the same
+   image over the viewport as well, the two boxes would scale `cover`
+   differently and meet in a visible line. That line was the "gradient ends
+   above the bottom of the screen" seam. One painter, one box, no seam that
+   two numbers have to be kept in agreement to avoid. */
 #bg-layer {
-  position: fixed; top: 0; left: 0; right: 0; z-index: 0; pointer-events: none;
-  height: calc(100% + var(--safe-t));
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
   background-size: cover; background-position: center;
 }
-/* With a wallpaper up, body must not paint over #bg-layer. body is pinned to
-   the viewport, so an opaque --bg on it would hide the wallpaper everywhere
-   except the strip below — the two-painter split above, arrived at backwards. */
+/* With a wallpaper up, body must not paint over the canvas — it is pinned to
+   the viewport, so its opaque --bg would hide the canvas everywhere except the
+   strip, which is precisely the two-painter split described above. */
 body.has-bg { background: transparent; }
 
 /* A reusable glass helper. */

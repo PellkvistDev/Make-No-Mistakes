@@ -105,89 +105,39 @@ def test_the_document_cannot_be_scrolled_even_if_something_overflows(phone):
     assert phone.errors == []
 
 
-def test_the_surface_that_paints_the_strip_reaches_past_the_viewport(phone):
-    """The bottom of an iOS PWA, and the reason this moved off <html>.
+def test_the_document_is_tall_enough_to_paint_the_strip_but_still_cannot_scroll(phone):
+    """The whole fix for the bottom of an iOS PWA rests on this combination.
 
-    The layout viewport is shorter than the screen there, so a fixed layer with
-    inset:0 stops above the bottom and a strip of bare --bg shows. That is what
-    "the gradient ends above the screen bottom" was. <html> used to carry the
-    extra height instead -- and that height was the only thing iOS could
-    scroll, which is what made focusing a field shove the UI.
+    <html> is deliberately taller than the viewport (min-height: 100% + the top
+    inset) so its canvas background paints the strip of glass that sits below
+    the shifted layout viewport -- nothing else reaches down there. That extra
+    height is exactly what iOS previously turned into scroll, sliding the whole
+    UI up. Keeping the height and removing the scroll is the point, so assert
+    both halves together: if a later edit drops overflow:hidden, the height
+    silently becomes a scroll again and the shove comes back.
 
-    #bg-layer now takes it as an explicit height rather than inset:0. Same
-    reach, no scrollable slack anywhere. The inset is 0 in a headless browser,
-    so simulate one and check the layer grows with it.
+    The inset is 0 in a headless browser, so simulate it at the same magnitude
+    rather than asserting on a value that is always zero here.
     """
     phone.setup()
     p = phone.page
-    grew = p.evaluate("""() => {
-      const layer = document.getElementById('bg-layer');
-      const before = layer.getBoundingClientRect().height;
-      document.documentElement.style.setProperty('--safe-t', '60px');
-      const after = layer.getBoundingClientRect().height;
-      document.documentElement.style.removeProperty('--safe-t');
-      return { before, after, viewport: document.documentElement.clientHeight };
-    }""")
-    assert grew["after"] - grew["before"] >= 59, (
-        "#bg-layer does not extend past the layout viewport, so the strip below "
-        f"it stays unpainted: {grew}")
-    assert phone.errors == []
-
-
-def test_the_document_has_no_slack_left_to_scroll(phone):
-    """The other half of moving the wallpaper off <html>: with nothing to
-    paint, <html> has no reason to be taller than the viewport, so it is not.
-    No slack means iOS has nothing to scroll to reveal a focused field, and
-    nothing has to be taken away on focus -- which is what rescaled the
-    wallpaper and made the flash."""
-    phone.setup()
-    p = phone.page
-    # With --safe-t at its headless value of 0, `calc(100% + var(--safe-t))`
-    # and `100%` are the same number and this test cannot fail. Simulate the
-    # inset first, or it proves nothing -- which it did, until a mutation that
-    # put the old taller rule back left it green.
-    simulate_insets(phone)
-    box = p.evaluate("""() => {
+    taller = p.evaluate("""() => {
+      const css = document.createElement('style');
+      css.id = 'inset-sim';
+      css.textContent = 'html { min-height: calc(100% + 60px) !important; }';
+      document.head.appendChild(css);
       const h = document.documentElement;
-      return { scrollH: h.scrollHeight, clientH: h.clientHeight,
-               minH: getComputedStyle(h).minHeight };
+      return h.scrollHeight > h.clientHeight;
     }""")
-    assert box["scrollH"] <= box["clientH"] + 1, (
-        f"the document is taller than the viewport, so it can be scrolled: {box}")
+    assert taller, "the document is no longer tall enough to cover the strip"
 
-    # The backstop stays regardless: anything that does overflow gets pinned.
+    # overflow:hidden on the root does NOT hold this on its own -- Chromium
+    # honours the scroll anyway, and iOS scrolls to reveal a focused field. The
+    # guard is a scroll listener, so it settles a frame later, not instantly.
     p.evaluate("() => window.scrollTo(0, 60)")
     p.wait_for_function("() => (window.scrollY || document.documentElement.scrollTop || 0) === 0",
                         timeout=3000)
-    assert phone.errors == []
-
-
-def test_focusing_a_field_does_not_resize_the_box_the_wallpaper_paints_into(phone):
-    """Reported: 'the background gets shoved up and then snaps back' -- a flash
-    on every tap into the composer.
-
-    Not a scroll. The wallpaper was painted into <html>'s box and sized `cover`
-    against it, and html.kb-open dropped --safe-t of min-height on focus to
-    take away the only thing iOS could scroll. `cover` re-solved against the
-    shorter box, so the image jumped scale on focus and back on blur. Measured
-    at 903 -> 844 before this changed.
-
-    Two fixes, each right on its own, pulling on the same number. Whatever else
-    focus changes, the painted box must not move.
-    """
-    phone.setup()
-    p = phone.page
-    p.evaluate("() => document.documentElement.style.setProperty('--safe-t', '59px')")
-    before = p.evaluate("() => document.getElementById('bg-layer')"
-                        ".getBoundingClientRect().height")
-    p.click("#in-prompt")
-    p.wait_for_timeout(80)
-    after = p.evaluate("() => document.getElementById('bg-layer')"
-                       ".getBoundingClientRect().height")
-    p.evaluate("() => document.documentElement.style.removeProperty('--safe-t')")
-    assert abs(after - before) <= 1, (
-        f"focusing the composer changed the wallpaper's box from {before} to "
-        f"{after}; sized `cover`, that rescales the image -- the flash")
+    p.evaluate("() => document.getElementById('inset-sim').remove()")
     assert phone.errors == []
 
 
@@ -205,10 +155,11 @@ def with_wallpaper(phone, app_url, bg):
 def test_exactly_one_surface_paints_the_wallpaper(phone, app_url):
     """The seam was two of them painting the same image at different scales.
 
-    Which surface does the painting has changed -- it is #bg-layer now, not the
-    root canvas, because <html>'s box is one this app resizes on focus and the
-    wallpaper visibly rescaled with it. The invariant did not change: exactly
-    one surface paints, so there are never two boxes to keep in agreement.
+    Only the root canvas can reach the strip of screen below the layout
+    viewport in an installed iOS PWA -- a position:fixed layer cannot, which
+    was tried and did nothing. So the canvas has to paint it, and anything else
+    painting the same image over the viewport re-creates the mismatch. This is
+    the invariant that makes the seam impossible rather than merely tuned away.
     """
     with_wallpaper(phone, app_url, {"type": "color", "value": GRADIENT})
     who = phone.page.evaluate("""() => {
@@ -217,12 +168,12 @@ def test_exactly_one_surface_paints_the_wallpaper(phone, app_url):
                layer: cs(document.getElementById('bg-layer')).backgroundImage,
                body: cs(document.body).backgroundColor };
     }""")
-    assert who["layer"].startswith("linear-gradient"), f"#bg-layer is not painting it: {who}"
-    assert who["root"] == "none", f"the canvas paints it too -- that is the seam: {who}"
-    # An opaque body would hide the layer, leaving the wallpaper showing only
-    # where body does not reach: the same two-surface split, upside down.
+    assert who["root"].startswith("linear-gradient"), f"the canvas is not painting it: {who}"
+    assert who["layer"] == "none", f"#bg-layer paints it too -- that is the seam: {who}"
+    # An opaque body would hide the canvas over the viewport and leave it
+    # showing only in the strip, which is the same two-surface split again.
     assert who["body"] in ("rgba(0, 0, 0, 0)", "transparent"), \
-        f"body hides the wallpaper: {who}"
+        f"body hides the canvas over the viewport: {who}"
     assert phone.errors == []
 
 
@@ -233,7 +184,7 @@ def test_a_gradient_preset_actually_applies(phone, app_url):
     out blank."""
     with_wallpaper(phone, app_url, {"type": "color", "value": GRADIENT})
     painted = phone.page.evaluate(
-        "() => getComputedStyle(document.getElementById('bg-layer')).backgroundImage")
+        "() => getComputedStyle(document.documentElement).backgroundImage")
     assert "gradient" in painted, f"the gradient preset did not apply: {painted!r}"
     assert phone.errors == []
 
@@ -419,3 +370,56 @@ def test_the_jump_to_latest_pill_rides_up_with_the_composer(phone):
     }""")
     assert bottom >= KB, f"the pill sits {bottom}px up, inside the keyboard"
     assert phone.errors == []
+
+
+def test_focusing_a_field_removes_the_slack_before_anything_can_scroll_it(phone):
+    """The reported flash: the UI lurched up and snapped back on every tap.
+
+    The scroll listener fixed the position but a frame too late, so the lurch
+    was visible. The document's only scrollable slack is the extra inset of
+    height on <html>; dropping it on focusin means there is nothing to scroll,
+    so nothing to correct and nothing to see.
+    """
+    phone.setup()
+    p = phone.page
+    simulate_insets(phone)
+
+    before = p.evaluate("() => document.documentElement.scrollHeight - "
+                        "document.documentElement.clientHeight")
+    assert before > 0, "no slack to begin with — this test would prove nothing"
+
+    p.click("#in-prompt")
+    p.wait_for_function("() => document.documentElement.classList.contains('kb-open')",
+                        timeout=5000)
+    during = p.evaluate("() => document.documentElement.scrollHeight - "
+                        "document.documentElement.clientHeight")
+    assert during <= 1, f"the document can still be scrolled while typing ({during}px)"
+
+    # And it comes back once the field is left, so the strip is painted again.
+    p.evaluate("() => document.getElementById('in-prompt').blur()")
+    p.wait_for_function("() => !document.documentElement.classList.contains('kb-open')",
+                        timeout=5000)
+    after = p.evaluate("() => document.documentElement.scrollHeight - "
+                       "document.documentElement.clientHeight")
+    assert after == before, f"the height didn't come back after blur ({after} vs {before})"
+    assert phone.errors == []
+
+
+def test_moving_between_two_fields_does_not_restore_the_slack_in_between(phone):
+    """focusout fires before focusin on the next field. Restoring immediately
+    would hand the slack back for a frame — the same flash, in miniature."""
+    phone.setup()
+    p = phone.page
+    simulate_insets(phone)
+    p.click("#in-prompt")
+    p.wait_for_function("() => document.documentElement.classList.contains('kb-open')",
+                        timeout=5000)
+    # Settings has its own text fields; move focus straight to one.
+    p.click("#btn-chat-settings")
+    p.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
+    p.evaluate("() => document.getElementById('set-model').focus()")
+    p.wait_for_timeout(120)
+    assert p.evaluate("() => document.documentElement.classList.contains('kb-open')"), \
+        "the slack came back while moving between two fields"
+    assert phone.errors == []
+
