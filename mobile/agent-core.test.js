@@ -226,6 +226,92 @@ test("handoff: the other direction says the machine can run things", () => {
   assert.match(C.handoffNote("phone", "desktop"), /run commands, tests, servers/);
 });
 
+// ---- resuming a turn the OS cut off -------------------------------------
+// iOS suspends the app and kills the request in flight. The history saved at
+// that point can end with tool_calls that were never answered, which an
+// OpenAI-compatible API rejects outright -- so without this repair the resume
+// fails on its first call and the conversation is stuck for good.
+
+test("interrupted: an unanswered tool_call gets a reply so the history is sendable", () => {
+  const msgs = [
+    { role: "user", content: "edit the file" },
+    { role: "assistant", tool_calls: [{ id: "call_1", function: { name: "write_file", arguments: "{}" } }] },
+  ];
+  const out = C.healInterruptedTurn(msgs);
+  assert.equal(out.length, 3);
+  assert.equal(out[2].role, "tool");
+  assert.equal(out[2].tool_call_id, "call_1");
+  assert.equal(out[2].content, C.INTERRUPTED_TOOL);
+});
+
+test("interrupted: the filler sits directly after the call that made it", () => {
+  // The pairing an API checks for is positional, so a reply appended at the
+  // end of the array would still be rejected.
+  const msgs = [
+    { role: "assistant", tool_calls: [{ id: "a", function: { name: "read_file", arguments: "{}" } }] },
+    { role: "user", content: "actually, wait" },
+  ];
+  const out = C.healInterruptedTurn(msgs);
+  assert.equal(out[1].role, "tool");
+  assert.equal(out[1].tool_call_id, "a");
+  assert.deepEqual(out[2], { role: "user", content: "actually, wait" });
+});
+
+test("interrupted: results that did arrive are left alone", () => {
+  const msgs = [
+    { role: "assistant", tool_calls: [{ id: "a", function: { name: "read_file", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "a", content: "the real result" },
+  ];
+  assert.deepEqual(C.healInterruptedTurn(msgs), msgs);
+});
+
+test("interrupted: a half-answered batch only gets fillers for the gaps", () => {
+  // Tools run in sequence, so being cut off part-way through a batch is the
+  // ordinary shape of this, not an edge case.
+  const msgs = [
+    { role: "assistant", tool_calls: [
+      { id: "a", function: { name: "read_file", arguments: "{}" } },
+      { id: "b", function: { name: "write_file", arguments: "{}" } },
+    ] },
+    { role: "tool", tool_call_id: "a", content: "the real result" },
+  ];
+  const out = C.healInterruptedTurn(msgs);
+  const fillers = out.filter((m) => m.content === C.INTERRUPTED_TOOL);
+  assert.equal(fillers.length, 1);
+  assert.equal(fillers[0].tool_call_id, "b");
+  assert.ok(out.some((m) => m.tool_call_id === "a" && m.content === "the real result"));
+});
+
+test("interrupted: a clean history is unchanged, so resuming is not a rewrite", () => {
+  const msgs = [
+    { role: "system", content: "prompt" },
+    { role: "user", content: "hi" },
+    { role: "assistant", content: "hello" },
+  ];
+  assert.deepEqual(C.healInterruptedTurn(msgs), msgs);
+});
+
+test("interrupted: healing twice adds nothing the second time", () => {
+  // Two suspensions in a row is entirely possible, and stacked fillers would
+  // grow the history without bound.
+  const msgs = [
+    { role: "assistant", tool_calls: [{ id: "a", function: { name: "read_file", arguments: "{}" } }] },
+  ];
+  const once = C.healInterruptedTurn(msgs);
+  assert.deepEqual(C.healInterruptedTurn(once), once);
+});
+
+test("interrupted: a malformed history does not throw", () => {
+  // This runs against whatever was on disk when the OS pulled the rug.
+  assert.doesNotThrow(() => C.healInterruptedTurn([
+    null,
+    { role: "assistant", tool_calls: null },
+    { role: "assistant", tool_calls: [null, { function: { name: "x" } }] },
+    { role: "tool" },
+  ]));
+});
+
+
 test("handoff: a cross-device open appends a marker and leaves history intact", () => {
   const msgs = [{ role: "system", content: "live prompt" }, { role: "user", content: "hi" }];
   const out = C.applyHandoff(msgs, "desktop", "phone");

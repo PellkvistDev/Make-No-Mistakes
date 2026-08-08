@@ -67,6 +67,13 @@ FAKE_GITHUB = r"""() => {
         await new Promise((res) => { window.__release = res; });
         window.__inFlight = false;
       }
+      // A request killed under the app, which is what iOS does when it
+      // suspends the tab: fetch REJECTS, it does not return a status. An error
+      // response would take a different path through the model client.
+      if (window.__failNext) {
+        window.__failNext = false;
+        throw new TypeError("Load failed");
+      }
       const q = window.__modelQueue;
       const reply = q.length > 1 ? q.shift() : (q[0] || { role: "assistant", content: "ok" });
       return j({ choices: [{ message: reply }] });
