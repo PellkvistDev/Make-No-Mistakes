@@ -14,7 +14,7 @@ CHOICES = {
          "key_url": "https://z.ai/manage-apikey/apikey-list",
          "blurb": "GLM coding models. A free tier with no card required.",
          "free": "glm-4.7-flash is free to use.", "caveat": "",
-         "model_options": [{"name": "glm-4.7-flash", "free": True}],
+         "model_options": [{"name": "glm-4.7-flash", "tier": "free"}],
          "steps": ["Open z.ai and sign in.", "Create a key.", "Paste it below."]},
         {"key": "google", "label": "Google AI Studio",
          "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -22,8 +22,8 @@ CHOICES = {
          "key_url": "https://aistudio.google.com/apikey",
          "blurb": "Gemini models. A free tier with no card required.",
          "free": "Flash is free. Your exact quota is shown in AI Studio.",
-         "model_options": [{"name": "gemini-2.5-flash", "free": True},
-                           {"name": "gemini-2.5-pro", "free": False}],
+         "model_options": [{"name": "gemini-2.5-flash", "tier": "free"},
+                           {"name": "gemini-2.5-pro", "tier": "unsure"}],
          "caveat": "On the free tier Google may use your prompts to improve "
                    "their models.",
          "steps": ["Open Google AI Studio.", "Click Get API key.", "Paste it below."]},
@@ -167,14 +167,18 @@ def test_the_chooser_is_reachable_from_the_keyboard(desktop):
     assert desktop.errors == []
 
 
-def test_a_paid_model_is_not_presented_as_part_of_the_free_tier(desktop):
-    """Google's Flash is free and its Pro is not. Listing both under a heading
-    that says "free tier" is how someone picks the paid one by accident."""
+def test_a_model_of_uncertain_price_is_not_labelled_free(desktop):
+    """Whether the free tier covers Pro has changed more than once and this app
+    cannot be right about it for long. Saying "check AI Studio" is the only
+    claim that stays true -- and it must not quietly read as "free"."""
     onboard(desktop)
     desktop.page.click('.prov-card[data-key="google"]')
     tags = desktop.page.eval_on_selector_all(
         ".prov-model", "els => els.map(e => e.textContent)")
-    assert any("gemini-2.5-pro" in t and "needs billing" in t for t in tags), tags
+    pro = [t for t in tags if "gemini-2.5-pro" in t]
+    assert pro, tags
+    assert "check AI Studio" in pro[0], pro
+    assert "free" not in pro[0].replace("check AI Studio", ""), pro
     assert any("gemini-2.5-flash" in t and "free" in t for t in tags), tags
     assert desktop.errors == []
 

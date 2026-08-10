@@ -235,3 +235,19 @@ def test_setup_completes_even_when_the_environment_cannot_be_written(monkeypatch
     assert "error" not in res
     assert res["persisted"] is False
     assert api._cfg.api_key == "g-key", "no fallback source for the key"
+
+
+def test_a_model_whose_price_is_unknown_is_not_claimed_to_be_free():
+    """Whether Google's free tier covers Pro has changed more than once: 5 RPM
+    and 100 RPD in early 2026, reported behind billing since. A file in this
+    repo cannot stay right about that, and a confident wrong label is worse
+    than no label -- so the third state exists and Pro is in it."""
+    g = next(c for c in providers.choices() if c["key"] == "google")
+    by_name = {m["name"]: m["tier"] for m in g["model_options"]}
+    assert by_name["gemini-2.5-flash"] == "free"
+    assert by_name["gemini-2.5-pro"] == "unsure"
+
+
+def test_pro_is_still_offered_as_a_model():
+    """Uncertain about the price is not a reason to hide the better model."""
+    assert "gemini-2.5-pro" in providers.preset("google")["models"]

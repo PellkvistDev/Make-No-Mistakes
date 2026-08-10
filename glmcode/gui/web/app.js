@@ -4489,13 +4489,16 @@ function provPick(key) {
       + `${esc(c.key_url)}</a></p>`);
   }
   if (c.free) parts.push(`<p class="prov-free">${esc(c.free)}</p>`);
-  // Which of this provider's models the free tier actually covers. Google's
-  // Flash is free and its Pro is not, and a bare list under a "free tier"
-  // heading is how someone picks the paid one without meaning to.
+  // Which of this provider's models the free tier covers, where that is known.
+  // "check AI Studio" is not a hedge for its own sake: whether the free tier
+  // includes a given model has changed more than once, only the key itself
+  // knows, and a confident wrong label is worse than an honest pointer.
   if (c.model_options && c.model_options.length > 1) {
+    const tag = { free: "free", unsure: "check AI Studio" };
     parts.push('<p class="prov-models">' + c.model_options.map((m) =>
-      `<span class="prov-model${m.free ? " free" : " paid"}">${esc(m.name)}`
-      + `<em>${m.free ? "free" : "needs billing"}</em></span>`).join("") + "</p>");
+      `<span class="prov-model ${esc(m.tier || "")}">${esc(m.name)}`
+      + (tag[m.tier] ? `<em>${tag[m.tier]}</em>` : "")
+      + "</span>").join("") + "</p>");
   }
   // Next to the free line, not tucked away: it is the one thing about an
   // option someone might mind, and this app sends source code.

@@ -1770,7 +1770,7 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 }
 .prov-model em { font-style: normal; font-family: inherit; opacity: .8; }
 .prov-model.free em { color: var(--green, #6bd39a); }
-.prov-model.paid em { color: var(--amber, #e0a34a); }
+.prov-model.unsure em { color: var(--amber, #e0a34a); }
 /* Stated, not hidden: the free tier's cost is that your prompts may train
    someone's model, and this app sends source code. */
 .onboard .prov-caveat {

@@ -66,6 +66,12 @@ PRESETS = [
         # the free-tier line above cover something it does not.
         "models": ["gemini-2.5-flash", "gemini-2.5-pro"],
         "free_models": ["gemini-2.5-flash"],
+        # Pro is deliberately neither "free" nor "paid" here. Whether the free
+        # tier covers it has changed more than once -- it was 5 RPM / 100 RPD
+        # in early 2026, and there are reports of it moving behind billing
+        # since -- and this file cannot be right about it for long. Only the
+        # key itself knows, so the app says where to look instead of claiming.
+        "unsure_models": ["gemini-2.5-pro"],
         "env_var": "GOOGLE_API_KEY",
         "key_url": "https://aistudio.google.com/apikey",
         "blurb": "Gemini models. A free tier with no card required.",
@@ -158,12 +164,17 @@ def choices() -> list:
         c = {k: p[k] for k in
              ("key", "label", "base_url", "model", "models", "key_url",
               "blurb", "free", "caveat", "steps")}
-        # Per model, not just per provider. A provider is not simply "free" or
-        # not: Google's Flash is free and its Pro is not, and a list that shows
-        # them side by side under a heading saying "free tier" is how someone
-        # picks the paid one by accident.
+        # Per model, not just per provider: a provider is not simply free or
+        # paid. Three states rather than two, because "I do not know" is the
+        # honest answer for some of them and pretending otherwise is how a
+        # confident label in a config file turns into a wrong one six weeks
+        # later. Anything unmarked is left unlabelled rather than assumed free.
         free = set(p.get("free_models") or [])
-        c["model_options"] = [{"name": m, "free": m in free} for m in p["models"]]
+        unsure = set(p.get("unsure_models") or [])
+        c["model_options"] = [
+            {"name": m,
+             "tier": "free" if m in free else ("unsure" if m in unsure else "")}
+            for m in p["models"]]
         out.append(c)
     out.append({
         "key": CUSTOM_KEY,
