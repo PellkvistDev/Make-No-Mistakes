@@ -41,6 +41,11 @@ BRIDGE = r"""() => {
     window.__calls.push({ name, args });
     let r = window.__replies[name];
     if (Array.isArray(r) && r.__queue) r = r.length > 1 ? r.shift() : r[0];
+    // A bridge call that REJECTS, which is what a dead or wedged pywebview
+    // gives you. The UI has to survive it -- several screens disable a button
+    // before calling and would be left stuck on the failure path otherwise --
+    // and a resolved error object exercises a completely different branch.
+    if (r && r.__throw) return Promise.reject(new Error(String(r.__throw)));
     return Promise.resolve(r === undefined ? {} : r);
   };
   window.pywebview = {
@@ -98,6 +103,25 @@ def browser():
         b.close()
 
 
+# What the backend actually hands the UI at boot. Values are unremarkable on
+# purpose -- this exists so the page finishes initialising, not to describe any
+# particular configuration. A test that cares about one of these overrides it.
+DEFAULT_SETTINGS = {
+    "mode": "ask", "thinking_mode": "medium", "reduce_effects": True,
+    "cwd": "", "notifications": True, "read_aloud": False,
+    "show_reasoning": False, "verify_edits": True, "auto_fix_tests": False,
+    "parallel_attempts": False, "codebase_memory_neural": False,
+    "path_rules": [], "vision_route": "auto",
+    "github_auto_pull": False, "github_auto_push": False,
+    "github_clone_root": "",
+    "browser_headless": False, "browser_keep_logins": False,
+    "browser_model": "", "browser_provider": "",
+    "tts_engine": "", "tts_voice": "", "tts_speed": 1.0, "piper_voice": "",
+    "stt_model": "", "stt_language": "", "voice_earcons": False,
+    "voice_ptt_key": "", "voice_reply_language": "", "voice_sensitivity": 0.5,
+}
+
+
 class Desktop:
     """The GUI, driven the way a person drives it."""
 
@@ -117,6 +141,19 @@ class Desktop:
         return [c for c in got if name is None or c["name"] == name]
 
     def boot(self, **replies):
+        """Bring the UI up, with a boot payload complete enough to survive it.
+
+        Without a settings object the boot handler throws partway through
+        ("Cannot read properties of undefined"), and everything after that point
+        -- including anything shown on first run -- never happens. Every test
+        here was quietly driving a half-built page: a console error is not a
+        page error, so `errors == []` stayed true and nothing complained.
+        """
+        payload = dict(replies.pop("boot", None) or {})
+        payload.setdefault("settings", dict(DEFAULT_SETTINGS))
+        payload.setdefault("sessions", [])
+        payload.setdefault("version", "test")
+        self.reply("boot", payload)
         for name, value in replies.items():
             self.reply(name, value)
         self.page.evaluate("() => window.dispatchEvent(new Event('pywebviewready'))")

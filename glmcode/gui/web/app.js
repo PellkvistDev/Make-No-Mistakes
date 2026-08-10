@@ -4456,10 +4456,99 @@ document.addEventListener("keydown", (e) => {
 
 /* ------------------------------------------------ onboarding */
 
+/* The provider chooser. The options, their wording and their order all come
+   from the catalogue over the bridge -- nothing about a specific provider is
+   written here, because the phone shows the same list and the two would drift
+   apart the moment either was edited on its own. */
+
+let provChoices = [];
+let provChosen = "";
+
+function provPick(key) {
+  provChosen = key;
+  for (const card of $("prov-choices").querySelectorAll(".prov-card")) {
+    const on = card.dataset.key === key;
+    card.classList.toggle("on", on);
+    card.setAttribute("aria-checked", on ? "true" : "false");
+    card.tabIndex = on ? 0 : -1;
+  }
+  const c = provChoices.find((x) => x.key === key);
+  if (!c) return;
+  const custom = c.key === "custom";
+  $("prov-custom").hidden = !custom;
+  $("key-input").placeholder = custom
+    ? "API key — leave empty for a local model" : `Paste your ${c.label} API key`;
+
+  const parts = [];
+  if (c.steps && c.steps.length) {
+    parts.push('<ol class="prov-steps">' +
+      c.steps.map((t) => `<li>${esc(t)}</li>`).join("") + "</ol>");
+  }
+  if (c.key_url) {
+    parts.push(`<p class="prov-link"><a href="#" data-open="${esc(c.key_url)}">`
+      + `${esc(c.key_url)}</a></p>`);
+  }
+  if (c.free) parts.push(`<p class="prov-free">${esc(c.free)}</p>`);
+  // Which of this provider's models the free tier actually covers. Google's
+  // Flash is free and its Pro is not, and a bare list under a "free tier"
+  // heading is how someone picks the paid one without meaning to.
+  if (c.model_options && c.model_options.length > 1) {
+    parts.push('<p class="prov-models">' + c.model_options.map((m) =>
+      `<span class="prov-model${m.free ? " free" : " paid"}">${esc(m.name)}`
+      + `<em>${m.free ? "free" : "needs billing"}</em></span>`).join("") + "</p>");
+  }
+  // Next to the free line, not tucked away: it is the one thing about an
+  // option someone might mind, and this app sends source code.
+  if (c.caveat) parts.push(`<p class="prov-caveat">${esc(c.caveat)}</p>`);
+  $("prov-detail").innerHTML = parts.join("");
+  $("key-store-note").textContent = custom
+    ? "Stored as the MNM_API_KEY user environment variable on this PC."
+    : `Stored as a user environment variable on this PC.`;
+  $("key-error").hidden = true;
+}
+
+function renderProvChoices() {
+  const box = $("prov-choices");
+  box.innerHTML = provChoices.map((c) => `
+    <button type="button" class="prov-card" role="radio" aria-checked="false"
+            data-key="${esc(c.key)}" tabindex="-1">
+      <span class="prov-name">${esc(c.label)}</span>
+      <span class="prov-blurb">${esc(c.blurb)}</span>
+    </button>`).join("");
+  box.addEventListener("click", (e) => {
+    const card = e.target.closest(".prov-card");
+    if (card) provPick(card.dataset.key);
+  });
+  // Arrow keys, because this is a radiogroup and a keyboard user expects them.
+  box.addEventListener("keydown", (e) => {
+    if (e.key !== "ArrowRight" && e.key !== "ArrowLeft") return;
+    const i = provChoices.findIndex((c) => c.key === provChosen);
+    const next = (i + (e.key === "ArrowRight" ? 1 : -1) + provChoices.length)
+      % provChoices.length;
+    provPick(provChoices[next].key);
+    box.querySelector(".prov-card.on").focus();
+  });
+  $("prov-detail").addEventListener("click", (e) => {
+    const a = e.target.closest("a[data-open]");
+    if (!a) return;
+    e.preventDefault();
+    api().open_external(a.dataset.open);
+  });
+}
+
+async function loadProvChoices() {
+  let res = null;
+  try { res = await api().provider_choices(); } catch (e) { res = null; }
+  if (!res || !res.choices || !res.choices.length) return;
+  provChoices = res.choices;
+  renderProvChoices();
+  provPick(res.chosen || provChoices[0].key);
+}
+
 $("key-save").addEventListener("click", async () => {
   const btn = $("key-save");
+  if (btn.disabled) return;
   const key = $("key-input").value.trim();
-  if (!key || btn.disabled) return;
   // Persisting the key can take a moment (or a locked-down machine can stall
   // the env-var write), so show progress and NEVER leave the button looking
   // dead. A bridge failure surfaces as an error instead of silently nothing.
@@ -4468,7 +4557,9 @@ $("key-save").addEventListener("click", async () => {
   btn.textContent = "Starting…";
   let res = null;
   try {
-    res = await api().save_api_key(key);
+    res = await api().save_setup(provChosen || "zai", key,
+                                 $("prov-base-url").value.trim(),
+                                 $("prov-model").value.trim());
   } catch (e) {
     res = null;
   }
@@ -4476,23 +4567,26 @@ $("key-save").addEventListener("click", async () => {
   btn.textContent = label;
   if (res && res.ok) {
     $("key-backdrop").hidden = true;
-    toast(res.persisted ? "API key saved to your user environment" :
-      "Key active for this session", "info", 4000);
+    toast(res.persisted ? `${res.provider} connected` :
+      "Connected for this session", "info", 4000);
     if (res.sessions) sessions = res.sessions;
     if (res.session) applySession(res.session);
     else showNoSession();
+  } else if (res && res.error) {
+    // Inline, next to the field it is about, rather than a toast that slides
+    // away while you are still reading the instructions.
+    $("key-error").textContent = res.error;
+    $("key-error").hidden = false;
   } else {
-    toast((res && res.error) ||
-      "Couldn't start — the key is set for now, try pressing Start again.", "error", 6000);
+    toast("Couldn't start — the key is set for now, try pressing Start again.",
+          "error", 6000);
   }
 });
-$("key-input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter") $("key-save").click();
-});
-$("zai-link").addEventListener("click", (e) => {
-  e.preventDefault();
-  api().open_external("https://z.ai");
-});
+for (const id of ["key-input", "prov-base-url", "prov-model"]) {
+  $(id).addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("key-save").click();
+  });
+}
 
 /* ------------------------------------------------ command palette (Ctrl+K) */
 
@@ -4628,6 +4722,9 @@ async function boot() {
   if (b.needsKey) {
     showNoSession();
     $("key-backdrop").hidden = false;
+    // Awaited nowhere: the sheet is already up, and the options filling in a
+    // moment later is better than a blank screen while the bridge answers.
+    loadProvChoices();
   } else if (b.session) {
     applySession(b.session);
     input.focus();

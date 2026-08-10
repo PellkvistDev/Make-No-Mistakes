@@ -1729,6 +1729,63 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 .onboard .sheet-actions { justify-content: center; }
 .onboard .row-sub { margin-top: 12px; display: block; }
 
+/* Provider chooser. Cards rather than a <select>: the choice is made once, and
+   what distinguishes the options is the sentence under each name, which a
+   dropdown cannot show until after you have already picked. */
+.prov-choices {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+  margin-bottom: 12px;
+}
+.prov-card {
+  display: flex; flex-direction: column; gap: 4px; text-align: left;
+  padding: 10px 12px; border-radius: var(--radius-md, 10px);
+  border: 1px solid var(--stroke-soft); background: transparent;
+  color: var(--text); cursor: pointer;
+  transition: border-color .15s ease, background .15s ease;
+}
+.prov-card:hover { background: var(--surface-hover, rgba(255,255,255,.04)); }
+.prov-card.on {
+  border-color: var(--blue-link);
+  background: var(--surface-hover, rgba(255,255,255,.06));
+}
+.prov-card:focus-visible { outline: 2px solid var(--blue-link); outline-offset: 2px; }
+.prov-name { font-size: 13.5px; font-weight: 600; }
+.prov-blurb { font-size: 11.5px; color: var(--text-dim); line-height: 1.35; }
+
+.prov-detail { text-align: left; margin-bottom: 12px; }
+.prov-steps {
+  margin: 0 0 8px; padding-left: 20px;
+  color: var(--text-dim); font-size: 12.5px; line-height: 1.6;
+}
+.onboard .prov-link { margin: 0 0 8px; font-size: 12.5px; word-break: break-all; }
+.onboard .prov-free { margin: 0 0 4px; font-size: 12.5px; color: var(--text); }
+/* Each model with its own price tag. A provider is not simply free or paid. */
+.onboard .prov-models {
+  margin: 0 0 6px; display: flex; flex-wrap: wrap; gap: 6px; font-size: 11.5px;
+}
+.prov-model {
+  display: inline-flex; align-items: baseline; gap: 5px;
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--stroke-soft); font-family: var(--mono, monospace);
+}
+.prov-model em { font-style: normal; font-family: inherit; opacity: .8; }
+.prov-model.free em { color: var(--green, #6bd39a); }
+.prov-model.paid em { color: var(--amber, #e0a34a); }
+/* Stated, not hidden: the free tier's cost is that your prompts may train
+   someone's model, and this app sends source code. */
+.onboard .prov-caveat {
+  margin: 0; font-size: 12.5px; line-height: 1.5;
+  color: var(--amber, #e0a34a);
+}
+.prov-custom { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.prov-error {
+  margin: 8px 0 0; font-size: 12.5px; color: var(--red, #ff6b6b); text-align: left;
+}
+.prov-error[hidden] { display: none; }
+@media (max-width: 560px) {
+  .prov-choices { grid-template-columns: 1fr; }
+}
+
 /* ------------------------------------------------ chat history sidebar */
 #sidebar {
   position: fixed; top: 52px; bottom: 0; left: 0; width: var(--sidebar-w);

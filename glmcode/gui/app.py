@@ -831,6 +831,72 @@ class Api:
             data.get("todos", []), data.get("title", ""),
         )
 
+    def provider_choices(self):
+        """Everything the setup screen needs to draw itself.
+
+        Served from the catalogue rather than written into the HTML, so the
+        desktop and the phone offer the same options in the same words. They
+        are separate programs and this is the only thing keeping them in step.
+        """
+        return {"choices": providers_mod.choices(),
+                "chosen": self._cfg.provider_preset or ""}
+
+    def save_setup(self, preset: str, api_key: str, base_url: str = "",
+                   model: str = ""):
+        """First run: record which provider was picked, and store its key.
+
+        Replaces the old save_api_key, which could only ever mean z.ai. That one
+        stays for the moment because an older window may still call it.
+        """
+        preset = (preset or "").strip()
+        api_key = (api_key or "").strip()
+        known = providers_mod.preset(preset)
+        if known:
+            base_url, model = known["base_url"], known["model"]
+            vision = known["vision_model"]
+        else:
+            # "Other": the endpoint and model are the whole point, so they are
+            # required here in a way a preset's never are.
+            preset = providers_mod.CUSTOM_KEY
+            base_url = (base_url or "").strip().rstrip("/")
+            model = (model or "").strip()
+            if not base_url:
+                return {"error": "paste the API's base URL"}
+            if not model:
+                return {"error": "type the model name"}
+            vision = model
+        # A local server (Ollama, LM Studio) genuinely has no key, so an empty
+        # one is only refused where it cannot work.
+        if known and not api_key:
+            return {"error": f"paste your {known['label']} API key"}
+        self._cfg.provider_preset = preset
+        self._cfg.base_url = base_url
+        self._cfg.model = model
+        self._cfg.vision_model = vision
+        persisted = False
+        if api_key:
+            try:
+                persisted = persist_env_var(self._cfg.provider_env_var(), api_key)
+            except Exception:
+                persisted = False
+            self._cfg.api_key = api_key   # fallback if the env write failed
+        try:
+            save_config(self._cfg)
+        except Exception:
+            pass
+        self._client = None
+        # Everything below is best-effort, for the same reason save_api_key is:
+        # setup must complete once a key is entered, even where writing the
+        # environment or reading old sessions fails.
+        session, sessions = None, []
+        try:
+            session = self._resume_last()
+            sessions = self.list_sessions()
+        except Exception:
+            pass
+        return {"ok": True, "persisted": persisted, "session": session,
+                "sessions": sessions, "provider": builtin_provider_name(self._cfg)}
+
     def save_api_key(self, key: str):
         key = (key or "").strip()
         if not key:

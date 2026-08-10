@@ -139,3 +139,99 @@ def test_the_primary_provider_carries_its_preset(monkeypatch):
     assert prov["preset"] == "google"
     assert prov["api_key"] == "g"
     assert prov["builtin"] is True
+
+
+# ---- first-run setup -------------------------------------------------------
+
+def _api(monkeypatch, **cfg_kw):
+    import sys
+    sys.modules.setdefault("webview", types.SimpleNamespace(
+        Window=object, FOLDER_DIALOG=object(), OPEN_DIALOG=object(),
+        SAVE_DIALOG=object()))
+    from glmcode.gui import app as gui_app
+    api = gui_app.Api.__new__(gui_app.Api)
+    api._cfg = _cfg(**cfg_kw)
+    api._client = "sentinel"
+    monkeypatch.setattr(gui_app, "save_config", lambda c: None)
+    monkeypatch.setattr(gui_app.Api, "_resume_last", lambda self: None)
+    monkeypatch.setattr(gui_app.Api, "list_sessions", lambda self: [])
+    return api, gui_app
+
+
+def test_setup_offers_the_catalogue_rather_than_a_hardcoded_screen(monkeypatch):
+    api, _ = _api(monkeypatch)
+    keys = [c["key"] for c in api.provider_choices()["choices"]]
+    assert "zai" in keys and "google" in keys and keys[-1] == providers.CUSTOM_KEY
+
+
+def test_choosing_google_configures_it_and_stores_the_key_in_its_own_var(monkeypatch):
+    api, gui_app = _api(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(gui_app, "persist_env_var",
+                        lambda n, v: seen.setdefault(n, v) or True)
+    res = api.save_setup("google", "g-key")
+    assert "error" not in res
+    assert api._cfg.provider_preset == "google"
+    assert api._cfg.base_url == providers.preset("google")["base_url"]
+    assert api._cfg.model == providers.preset("google")["model"]
+    assert seen == {"GOOGLE_API_KEY": "g-key"}
+    assert res["provider"] == "Google AI Studio"
+
+
+def test_choosing_zai_does_not_reach_for_googles_variable(monkeypatch):
+    api, gui_app = _api(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(gui_app, "persist_env_var",
+                        lambda n, v: seen.setdefault(n, v) or True)
+    api.save_setup("zai", "z-key")
+    assert seen == {"ZAI_API_KEY": "z-key"}
+    assert api._cfg.provider_preset == "zai"
+
+
+def test_other_needs_a_url_and_a_model_because_nothing_can_guess_them(monkeypatch):
+    api, gui_app = _api(monkeypatch)
+    monkeypatch.setattr(gui_app, "persist_env_var", lambda n, v: True)
+    assert "error" in api.save_setup("custom", "k", "", "m")
+    assert "error" in api.save_setup("custom", "k", "https://x/v1", "")
+
+
+def test_other_works_with_no_key_at_all(monkeypatch):
+    """Ollama and LM Studio have no key. Demanding one makes the app unusable
+    with the very setups "Other" exists for."""
+    api, gui_app = _api(monkeypatch)
+    monkeypatch.setattr(gui_app, "persist_env_var", lambda n, v: True)
+    res = api.save_setup("custom", "", "http://localhost:11434/v1/", "llama3")
+    assert "error" not in res
+    assert api._cfg.base_url == "http://localhost:11434/v1"   # trailing / trimmed
+    assert api._cfg.model == "llama3"
+    assert api._cfg.provider_preset == "custom"
+
+
+def test_a_preset_still_insists_on_a_key(monkeypatch):
+    api, gui_app = _api(monkeypatch)
+    monkeypatch.setattr(gui_app, "persist_env_var", lambda n, v: True)
+    assert "error" in api.save_setup("google", "")
+
+
+def test_a_hand_typed_endpoint_does_not_store_its_key_as_a_zai_key(monkeypatch):
+    api, gui_app = _api(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(gui_app, "persist_env_var",
+                        lambda n, v: seen.setdefault(n, v) or True)
+    api.save_setup("custom", "sk-abc", "https://openrouter.ai/api/v1", "some/model")
+    assert list(seen) == ["MNM_API_KEY"], seen
+
+
+def test_setup_completes_even_when_the_environment_cannot_be_written(monkeypatch):
+    """The long-standing rule for this screen: a locked-down machine must still
+    end up with a working app, because the key is live in os.environ anyway."""
+    api, gui_app = _api(monkeypatch)
+
+    def blows_up(name, value):
+        raise OSError("setx is blocked")
+
+    monkeypatch.setattr(gui_app, "persist_env_var", blows_up)
+    res = api.save_setup("google", "g-key")
+    assert "error" not in res
+    assert res["persisted"] is False
+    assert api._cfg.api_key == "g-key", "no fallback source for the key"

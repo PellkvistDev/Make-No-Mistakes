@@ -20,6 +20,10 @@ they would be annoyed to discover afterwards.
 _ENV_VARS = {
     "zai": "ZAI_API_KEY",
     "google": "GOOGLE_API_KEY",
+    # Typed in by hand, so there is no vendor to name it after. Deliberately
+    # not ZAI_API_KEY: an endpoint someone pasted is not z.ai, and reusing that
+    # name is how the config ended up believing everything was.
+    "custom": "MNM_API_KEY",
 }
 
 PRESETS = [
@@ -30,6 +34,7 @@ PRESETS = [
         "model": "glm-4.7-flash",
         "vision_model": "glm-4.6v-flash",
         "models": ["glm-4.7-flash", "glm-4.6v-flash"],
+        "free_models": ["glm-4.7-flash", "glm-4.6v-flash"],
         "env_var": "ZAI_API_KEY",
         "key_url": "https://z.ai/manage-apikey/apikey-list",
         "blurb": "GLM coding models. A free tier with no card required.",
@@ -55,11 +60,20 @@ PRESETS = [
         # turn here is tool calls.
         "model": "gemini-2.5-flash",
         "vision_model": "gemini-2.5-flash",
+        # Pro is offered because it is a real option on this key and a better
+        # model -- but it is NOT free, and has not been since Google moved the
+        # Pro models behind billing. Listing it without saying so would make
+        # the free-tier line above cover something it does not.
         "models": ["gemini-2.5-flash", "gemini-2.5-pro"],
+        "free_models": ["gemini-2.5-flash"],
         "env_var": "GOOGLE_API_KEY",
         "key_url": "https://aistudio.google.com/apikey",
         "blurb": "Gemini models. A free tier with no card required.",
-        "free": "Around 15 requests a minute and 1,500 a day on Flash, free.",
+        # No specific quota numbers. Google cut the free allowances sharply at
+        # the end of 2025 and no longer publishes one table that applies to
+        # everyone -- a figure hardcoded here would quietly become a lie, and
+        # the console is the only place that knows the truth for this key.
+        "free": "Flash is free. Your exact quota is shown in AI Studio.",
         # Said plainly and shown next to the word "free", because it is the one
         # thing about this option that someone might mind and would otherwise
         # only find out later. This app sends source code.
@@ -141,9 +155,16 @@ def choices() -> list:
     """
     out = []
     for p in PRESETS:
-        out.append({k: p[k] for k in
-                    ("key", "label", "base_url", "model", "models", "key_url",
-                     "blurb", "free", "caveat", "steps")})
+        c = {k: p[k] for k in
+             ("key", "label", "base_url", "model", "models", "key_url",
+              "blurb", "free", "caveat", "steps")}
+        # Per model, not just per provider. A provider is not simply "free" or
+        # not: Google's Flash is free and its Pro is not, and a list that shows
+        # them side by side under a heading saying "free tier" is how someone
+        # picks the paid one by accident.
+        free = set(p.get("free_models") or [])
+        c["model_options"] = [{"name": m, "free": m in free} for m in p["models"]]
+        out.append(c)
     out.append({
         "key": CUSTOM_KEY,
         "label": "Other",
@@ -154,6 +175,7 @@ def choices() -> list:
         "blurb": "Any OpenAI-compatible API, or a model running on this machine.",
         "free": "",
         "caveat": "",
+        "model_options": [],
         "steps": [
             "Paste the API's base URL (the part ending in /v1 or similar).",
             "Paste a key if it needs one — local servers usually do not.",
