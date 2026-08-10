@@ -7,6 +7,7 @@ import types
 
 import glmcode.config as config
 from glmcode.config import (BUILTIN_PROVIDER_NAME, Config, all_providers,
+                            builtin_provider_name,
                             builtin_provider, find_provider, load_config,
                             save_config)
 from glmcode.sessions import SessionStore
@@ -68,6 +69,8 @@ def test_saving_builtin_row_sets_env_key(monkeypatch):
         return True
 
     monkeypatch.setattr(gui_app, "persist_env_var", fake_persist)
+    # Addressed by its old hardcoded label, which is what a config written
+    # before presets still shows in the row the form was opened from.
     res = api.save_provider(BUILTIN_PROVIDER_NAME, BUILTIN_PROVIDER_NAME,
                             "", "zk-123", "")
     assert "error" not in res
@@ -76,15 +79,31 @@ def test_saving_builtin_row_sets_env_key(monkeypatch):
     assert res["persisted_env"] is True
     # no custom provider row was created for the builtin
     assert api._cfg.providers == []
-    # and an empty key is refused with a pointer at where to get one
-    assert "z.ai" in api.save_provider(BUILTIN_PROVIDER_NAME,
-                                       BUILTIN_PROVIDER_NAME, "", "", "")["error"]
+    # and an empty key is refused
+    assert "error" in api.save_provider(BUILTIN_PROVIDER_NAME,
+                                        BUILTIN_PROVIDER_NAME, "", "", "")
+
+
+def test_saving_the_primary_row_uses_that_providers_own_env_var(monkeypatch):
+    """Configuring Google must not overwrite a z.ai key, and vice versa."""
+    api = make_api(monkeypatch)
+    api._cfg.provider_preset = "google"
+    api._cfg.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+    persisted = {}
+    monkeypatch.setattr(gui_app, "persist_env_var",
+                        lambda n, v: persisted.setdefault(n, v) or True)
+    res = api.save_provider("Google AI Studio", "Google AI Studio", "", "g-key", "")
+    assert "error" not in res
+    assert persisted == {"GOOGLE_API_KEY": "g-key"}
+    assert api._cfg.providers == [], "the primary provider is not a custom row"
 
 
 def test_builtin_provider_always_first():
     cfg = Config()
     provs = all_providers(cfg)
-    assert provs[0]["name"] == BUILTIN_PROVIDER_NAME
+    # Named after what it actually is, rather than a vendor label that used to
+    # be printed whatever the base URL pointed at.
+    assert provs[0]["name"] == builtin_provider_name(cfg)
     assert provs[0]["builtin"] is True
     assert cfg.model in provs[0]["models"]
 
@@ -93,6 +112,9 @@ def test_find_provider():
     cfg = Config(providers=[{"name": "OpenRouter", "base_url": "https://x/v1",
                              "api_key": "k", "models": ["m1"]}])
     assert find_provider(cfg, "OpenRouter")["base_url"] == "https://x/v1"
+    assert find_provider(cfg, builtin_provider_name(cfg))["builtin"] is True
+    # Chats saved before presets name the primary provider the old way; they
+    # must keep resolving, or they would quietly switch model on next open.
     assert find_provider(cfg, BUILTIN_PROVIDER_NAME)["builtin"] is True
     assert find_provider(cfg, "nope") is None
 

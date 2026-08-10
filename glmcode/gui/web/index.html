@@ -942,15 +942,28 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
     </div>
     <h2 id="key-title">Welcome to Make No Mistakes</h2>
-    <p>Connect your free z.ai account. Sign up at
-       <a href="https://z.ai" id="zai-link">z.ai</a> (no credit card), open
-       <strong>API&nbsp;Keys</strong> in your profile, and paste your key:</p>
-    <input id="key-input" class="text-input" type="password" placeholder="Paste your z.ai API key"
-           aria-label="z.ai API key">
+    <p>Choose where the model runs. Both of the first two have a free tier and
+       need no card. You can add more, or change this, at any time.</p>
+    <!-- Drawn from the provider catalogue rather than written out here, so the
+         desktop and the phone offer the same options in the same words. -->
+    <div id="prov-choices" class="prov-choices" role="radiogroup"
+         aria-label="Model provider"></div>
+    <div id="prov-detail" class="prov-detail" aria-live="polite"></div>
+    <div id="prov-custom" class="prov-custom" hidden>
+      <input id="prov-base-url" class="text-input" type="text"
+             placeholder="Base URL, e.g. http://localhost:11434/v1"
+             aria-label="API base URL">
+      <input id="prov-model" class="text-input" type="text"
+             placeholder="Model name, exactly as the provider spells it"
+             aria-label="Model name">
+    </div>
+    <input id="key-input" class="text-input" type="password"
+           placeholder="Paste your API key" aria-label="API key">
+    <p id="key-error" class="prov-error" role="alert" hidden></p>
     <div class="sheet-actions">
       <button id="key-save" class="btn btn-primary">Start coding</button>
     </div>
-    <p class="row-sub">Stored as the ZAI_API_KEY user environment variable on this PC.</p>
+    <p class="row-sub" id="key-store-note"></p>
   </div>
 </div>
 
