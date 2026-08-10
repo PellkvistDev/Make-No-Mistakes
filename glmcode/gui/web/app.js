@@ -2542,8 +2542,7 @@ function updateUsage(pt, ct, context) {
   $("usage-chip").textContent = fmtTokens(ct || 0) + " tok";
   $("usage-chip").title =
     `Model output this chat: ${fmtTokens(ct || 0)} tokens` +
-    `\nSent to the model (incl. re-sent context): ${fmtTokens(pt || 0)} tokens` +
-    `\nAlways $0.00`;
+    `\nSent to the model (incl. re-sent context): ${fmtTokens(pt || 0)} tokens`;
   if (context !== undefined && context !== null) updateContextDonut(context);
 }
 
@@ -2805,12 +2804,20 @@ $("voice-wake-word").addEventListener("change", async () => {
 let providersCache = null;
 let provFormEditing = null; // original name of the API being edited; null = adding
 
+// What can be said truthfully about a model's price, and nothing more. The
+// backend works the tier out from the provider catalogue; anything it does not
+// know about comes back as "" and gets no claim at all.
+const TIER_NOTE = {
+  local: "runs on this machine",
+  free: "free",
+  unsure: "check your provider's quota",
+};
+
 function refreshModelFoot(res) {
   if (!res) return;
-  const builtin = res.chat_provider === (providersCache?.providers?.[0]?.name || "z.ai (free)");
-  $("model-foot").textContent = builtin
-    ? `${res.chat_model} via z.ai — always $0.00`
-    : `${res.chat_model} via ${res.chat_provider}`;
+  const note = TIER_NOTE[res.chat_tier] || "";
+  $("model-foot").textContent =
+    `${res.chat_model} via ${res.chat_provider}` + (note ? ` — ${note}` : "");
 }
 
 const PENCIL_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
@@ -2818,11 +2825,14 @@ const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
 const CROSS_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
 
 function apiRowSub(p) {
-  if (p.builtin) {
-    return p.has_key ? "free default — always $0.00"
-      : "no API key yet — edit this row and paste yours";
+  if (p.builtin && !p.has_key) return "no API key yet — edit this row and paste yours";
+  const bits = [p.base_url];
+  if (p.models.length) {
+    bits.push(`${p.models.length} model${p.models.length === 1 ? "" : "s"}`);
   }
-  return `${p.base_url} · ${p.models.length} model${p.models.length === 1 ? "" : "s"}`;
+  const note = TIER_NOTE[p.tier];
+  if (note) bits.push(note);
+  return bits.join(" · ");
 }
 
 function renderApiList(res) {
@@ -2883,7 +2893,7 @@ async function populateModelPicker(data) {
 
 /* ---- top-of-chat model selector: one flat list of every model ---------- */
 // Each configured model is its own equal entry -- no grouping by provider.
-// The built-in z.ai row contributes only its chat model (its vision model
+// The setup provider's row contributes only its chat model (its vision model
 // routes automatically and isn't a chat choice); custom APIs contribute
 // every model they list.
 function modelEntries(res) {
@@ -2992,10 +3002,10 @@ function openApiForm(prefill, editingName) {
   $("prov-url").value = prefill.base_url || "";
   $("prov-models").value = (prefill.models || []).join(", ");
   $("prov-key").value = "";
-  // The built-in z.ai API is fixed except for the key.
+  // The provider chosen at setup is fixed except for the key.
   for (const id of ["prov-name", "prov-url", "prov-models"]) $(id).disabled = isBuiltin;
   $("prov-key").placeholder = isBuiltin
-    ? "Paste your free z.ai API key (z.ai → profile → API Keys)"
+    ? `Paste your ${prefill.name || "API"} key`
     : editingName ? "New API key (empty = keep the current one)"
       : "API key (leave empty for local servers)";
   $("prov-key").focus();
@@ -3013,8 +3023,8 @@ function closeApiForm() {
 $("api-add").addEventListener("click", () => {
   const ps = providersCache?.providers || [];
   const builtin = ps.find((p) => p.builtin);
-  // First time here with nothing configured at all: pre-fill the z.ai
-  // template so the only thing left to type is the key.
+  // First time here with nothing configured at all: pre-fill the provider
+  // chosen at setup, so the only thing left to type is the key.
   if (builtin && !builtin.has_key && ps.length <= 1) openApiForm(builtin, builtin.name);
   else openApiForm({}, null);
 });
@@ -3321,6 +3331,21 @@ $("backup-revert-last").addEventListener("click", async () => {
 
 /* ------------------------------------------------ settings sheet */
 
+// Several options appear on two screens at once -- the Settings sheet and the
+// composer's options popover -- and each screen decided for itself what an
+// absent value meant. They disagreed: Settings read verify_edits as
+// `!== false`, the composer as `=== true`, so a settings object without the
+// key showed the same switch ON in one place and OFF in the other, and the
+// Settings one contradicted the backend (Config.verify_edits is False).
+//
+// Nobody can hit that today, because _settings() happens to send every key.
+// But it is a hand-written dict -- the same "list someone forgets to extend"
+// that has bitten this project before -- so the day a setting is added to
+// Config and missed there, the default silently becomes whichever of these two
+// spellings you happened to read. One reader, matching the backend's own
+// default of "off unless it says otherwise", so they cannot drift apart.
+const optOn = (key) => settings[key] === true;
+
 function syncSettingsUI() {
   document.querySelectorAll("#seg-mode button").forEach((b) => {
     b.classList.toggle("on", b.dataset.v === settings.mode);
@@ -3337,7 +3362,7 @@ function syncSettingsUI() {
   });
   applyThinkChip();
   $("opt-reasoning").setAttribute("aria-checked", !!settings.show_reasoning);
-  $("opt-verify").setAttribute("aria-checked", settings.verify_edits !== false);
+  $("opt-verify").setAttribute("aria-checked", optOn("verify_edits"));
   $("opt-green").setAttribute("aria-checked", !!settings.auto_fix_tests);
   $("opt-neural").setAttribute("aria-checked", !!settings.codebase_memory_neural);
   $("opt-notify").setAttribute("aria-checked", !!settings.notifications);
@@ -3376,8 +3401,13 @@ function syncSettingsUI() {
   renderComposerOpts();
 }
 function shortPath(p) {
-  const parts = p.split(/[\\/]/).filter(Boolean);
-  return parts.length > 2 ? "…\\" + parts.slice(-2).join("\\") : p;
+  const parts = (p || "").split(/[\\/]/).filter(Boolean);
+  if (parts.length <= 2) return p;
+  // Rejoin with whatever the path came in as. This always wrote backslashes,
+  // so a POSIX path came back as "…\home\jo" -- a path that does not exist on
+  // the machine it was read from.
+  const sep = p.includes("\\") ? "\\" : "/";
+  return "…" + sep + parts.slice(-2).join(sep);
 }
 
 let settingsTab = "general";
@@ -3392,11 +3422,85 @@ function showSettingsTab(name) {
   // Re-apply toggle/segment state now the tab's controls are visible -- some
   // WebView2 builds don't "stick" styling applied while a subtree was hidden.
   syncSettingsUI();
-  const sheet = document.querySelector("#settings-backdrop .sheet");
-  if (sheet) sheet.scrollTop = 0;
+  // The panes scroll now, not the sheet -- the sheet stopped scrolling when the
+  // tabs moved into a rail beside it, so resetting the old element did nothing
+  // and every tab opened at the previous one's scroll position.
+  const panes = document.querySelector("#settings-backdrop .settings-panes");
+  if (panes) panes.scrollTop = 0;
 }
 document.querySelectorAll(".settings-tab-btn").forEach((b) => {
   b.addEventListener("click", () => showSettingsTab(b.dataset.tab));
+});
+
+/* ---- searching the settings ------------------------------------------ *
+ * Eight groups and around forty controls: knowing a setting exists is not the
+ * same as knowing which drawer it was filed under, and "Make it green" lived
+ * under Models & tools while its twin lived in the composer. Typing here shows
+ * every match from every group at once, each labelled with where it lives, so
+ * you learn the filing system by using it instead of before using it. */
+
+// The rail is the authority on what each group is called -- one place to
+// rename a tab, and the search labels follow.
+document.querySelectorAll(".settings-tab-btn").forEach((b) => {
+  document.querySelectorAll(`#settings-backdrop section[data-tab="${b.dataset.tab}"]`)
+    .forEach((s) => { s.dataset.tabLabel = b.textContent.trim(); });
+});
+
+function runSettingsSearch(raw) {
+  const q = (raw || "").trim().toLowerCase();
+  const sheet = document.querySelector("#settings-backdrop .sheet");
+  const sections = [...document.querySelectorAll("#settings-backdrop section[data-tab]")];
+  sheet.classList.toggle("searching", !!q);
+  if (!q) {
+    for (const s of sections) {
+      s.classList.remove("s-nomatch");
+      for (const el of s.children) el.classList.remove("s-nomatch");
+    }
+    $("settings-noresults").hidden = true;
+    showSettingsTab(settingsTab);   // back to whichever tab was open
+    return 0;
+  }
+  let hits = 0;
+  for (const s of sections) {
+    // Sections are the tab switcher's to hide and nobody else's, so this can
+    // reach for `hidden` directly -- and has to, because the global
+    // `[hidden] { display: none !important }` rule wins against any class.
+    // showSettingsTab(), called on clear, puts them back where they belong.
+    s.hidden = false;
+    const kids = [...s.children];
+    const head = kids.find((e) => e.tagName === "H3");
+    // A group whose heading matches comes back whole: searching "voice" should
+    // hand you the Voice settings, not the two rows with the word in them.
+    const headHit = !!head && head.textContent.toLowerCase().includes(q);
+    let any = false;
+    for (const el of kids) {
+      if (el === head) continue;
+      // Elements that hide themselves (#api-form, #gh-connected, the sync
+      // panels) are hidden for a reason and stay out of it entirely -- both
+      // out of the results and out of the count, or a group could claim a
+      // match nobody can see.
+      if (el.hidden) continue;
+      const hit = headHit || el.textContent.toLowerCase().includes(q);
+      el.classList.toggle("s-nomatch", !hit);
+      if (hit) any = true;
+    }
+    if (head) head.classList.toggle("s-nomatch", !any);
+    s.classList.toggle("s-nomatch", !any);
+    if (any) hits++;
+  }
+  $("settings-noresults").hidden = hits > 0;
+  return hits;
+}
+
+$("settings-search").addEventListener("input", (e) => runSettingsSearch(e.target.value));
+$("settings-search").addEventListener("keydown", (e) => {
+  // Escape clears the filter before it closes the sheet: losing the search and
+  // the sheet on one keypress means retyping to correct a typo.
+  if (e.key === "Escape" && $("settings-search").value) {
+    e.stopPropagation();
+    $("settings-search").value = "";
+    runSettingsSearch("");
+  }
 });
 
 async function openSettings() {
@@ -3407,7 +3511,10 @@ async function openSettings() {
   // which left the first open showing nothing selected until a change re-ran it.
   syncSettingsUI();
   $("settings-backdrop").hidden = false;
-  showSettingsTab(settingsTab);
+  // A filter left over from last time would open the sheet already hiding most
+  // of itself, with the box scrolled out of sight in the header.
+  $("settings-search").value = "";
+  runSettingsSearch("");
   populateVoiceSelect();
   populateSttSelect();
   populateBackups();
@@ -3423,7 +3530,7 @@ async function openSettings() {
   try {
     const u = await api().usage();
     $("session-usage").textContent =
-      `${fmtTokens(u.completion_tokens)} output · ${fmtTokens(u.prompt_tokens)} sent · context ~${fmtTokens(u.context)} · $0.00`;
+      `${fmtTokens(u.completion_tokens)} output · ${fmtTokens(u.prompt_tokens)} sent · context ~${fmtTokens(u.context)}`;
   } catch (e) { /* usage line is non-critical */ }
 }
 $("settings-btn").addEventListener("click", openSettings);
@@ -3499,8 +3606,8 @@ bindSwitch("opt-neural", "codebase_memory_neural");
 
 /* ---- composer message-options popover (per-message behavior) ---------- */
 function renderComposerOpts() {
-  const green = !!settings.auto_fix_tests;
-  const verify = settings.verify_edits === true;
+  const green = optOn("auto_fix_tests");
+  const verify = optOn("verify_edits");
   const attempts = settings.parallel_attempts || 1;
   $("opt-green2").setAttribute("aria-checked", String(green));
   $("opt-verify2").setAttribute("aria-checked", String(verify));
@@ -4345,12 +4452,62 @@ async function openWhiteboard() {
   applySession(res);
   input.focus();
 }
+/* The folders this person actually works in, newest first.
+ *
+ * Built from the session list rather than a list of its own: every chat
+ * already records its project folder, so a separate "recent projects" store
+ * would be a second copy of the same fact, free to disagree with the first. */
+const RECENT_LIMIT = 5;
+function recentProjects() {
+  const seen = new Map();
+  for (const s of [...sessions].sort((a, b) => (b.updated || 0) - (a.updated || 0))) {
+    if (!s.cwd || seen.has(s.cwd)) continue;
+    seen.set(s.cwd, { cwd: s.cwd, name: basename(s.cwd), updated: s.updated });
+    if (seen.size >= RECENT_LIMIT) break;
+  }
+  return [...seen.values()];
+}
+
+function renderRecentProjects() {
+  const list = $("newchat-recent");
+  const recent = recentProjects();
+  $("newchat-recent-wrap").hidden = recent.length === 0;
+  list.innerHTML = "";
+  for (const r of recent) {
+    const row = document.createElement("button");
+    row.className = "newchat-recent-row";
+    row.title = r.cwd;
+    row.innerHTML =
+      `<span class="ncr-name"></span><span class="ncr-path mono"></span>`;
+    row.querySelector(".ncr-name").textContent = r.name;
+    row.querySelector(".ncr-path").textContent = shortPath(r.cwd);
+    row.addEventListener("click", () => openRecentProject(r.cwd));
+    list.appendChild(row);
+  }
+}
+
+async function openRecentProject(cwd) {
+  $("newchat-backdrop").hidden = true;
+  const res = await api().new_session_in(cwd, newChatBackupOn());
+  if (!res || res.error) {
+    // Folders move and get deleted between one chat and the next -- say which
+    // one, and leave the sheet open so the picker is one click away.
+    toast((res && res.error) || "could not open that folder", "error", 5000);
+    $("newchat-backdrop").hidden = false;
+    return;
+  }
+  applySession(res);
+  input.focus();
+}
+
 function showNewChatChooser() {
   $("newchat-backup").setAttribute("aria-checked", "true"); // default on for every new chat
   // Collapse the GitHub sub-panels so the sheet opens small every time.
   $("newchat-repo-list").hidden = true;
   $("newchat-new-repo").hidden = true;
   $("newchat-new-name").value = "";
+  $("newchat-gh-more").open = false;
+  renderRecentProjects();
   $("newchat-backdrop").hidden = false;
 }
 
@@ -4539,13 +4696,44 @@ function renderProvChoices() {
   });
 }
 
+/* The one option that needs no catalogue to describe it, kept here as the
+   floor under the first screen the app ever shows. See loadProvChoices. */
+const PROV_FALLBACK = {
+  key: "custom", label: "Set it up by hand",
+  blurb: "Any OpenAI-compatible API, or a model running on this machine.",
+  base_url: "", model: "", models: [], model_options: [],
+  key_url: "", free: "", caveat: "",
+  steps: [
+    "Paste the API's base URL (the part ending in /v1 or similar).",
+    "Paste a key if it needs one — local servers usually do not.",
+    "Type the model name exactly as the provider spells it.",
+  ],
+};
+
 async function loadProvChoices() {
   let res = null;
   try { res = await api().provider_choices(); } catch (e) { res = null; }
-  if (!res || !res.choices || !res.choices.length) return;
-  provChoices = res.choices;
+  const ok = !!(res && res.choices && res.choices.length);
+  // Returning early here left the sheet as a bare "Paste your API key" box:
+  // no chooser, no instructions, and nothing naming the service the key was
+  // for -- while `key-save` went on to file whatever was pasted under "zai",
+  // the old hardwired default. Wrong provider, wrong environment variable, and
+  // a first run that fails on its first request with no clue why. So the
+  // manual fields stand in instead: still usable, and honest that the list
+  // is what's missing rather than pretending a default was chosen.
+  provChoices = ok ? res.choices : [PROV_FALLBACK];
   renderProvChoices();
-  provPick(res.chosen || provChoices[0].key);
+  provPick(ok ? (res.chosen || provChoices[0].key) : PROV_FALLBACK.key);
+  if (!ok) {
+    // The standing lede counts the options ("both of the first two have a free
+    // tier"), which is nonsense above a single card.
+    $("key-lede").textContent = "Point it at any OpenAI-compatible API, or at a "
+      + "model running on this machine. You can change this at any time.";
+    // After provPick, which clears this field on its way out.
+    $("key-error").textContent = "Couldn't load the list of providers — "
+      + "you can still set one up by hand below.";
+    $("key-error").hidden = false;
+  }
 }
 
 $("key-save").addEventListener("click", async () => {
@@ -4560,7 +4748,9 @@ $("key-save").addEventListener("click", async () => {
   btn.textContent = "Starting…";
   let res = null;
   try {
-    res = await api().save_setup(provChosen || "zai", key,
+    // The fallback key, not "zai": nothing has chosen z.ai at this point, and
+    // defaulting to it is how a Google key ended up in ZAI_API_KEY.
+    res = await api().save_setup(provChosen || PROV_FALLBACK.key, key,
                                  $("prov-base-url").value.trim(),
                                  $("prov-model").value.trim());
   } catch (e) {

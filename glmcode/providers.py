@@ -133,6 +133,51 @@ def preset_from_base_url(base_url: str) -> dict | None:
     return None
 
 
+def is_local(base_url: str) -> bool:
+    """Is this endpoint a server on the user's own machine?
+
+    Worth knowing separately from the presets: a model running locally is free
+    in a way no hosted free tier is -- there is no quota, no account, and no
+    policy that can change next month.
+    """
+    host = (base_url or "").split("//")[-1].split("/")[0].lower()
+    # Strip the port -- but an IPv6 literal is full of colons and is bracketed
+    # for exactly that reason, so splitting on ":" first would leave "[".
+    if host.startswith("["):
+        host = host[1:].split("]")[0]
+    else:
+        host = host.split(":")[0]
+    return host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+
+
+def model_tier(base_url: str, model: str) -> str:
+    """What can honestly be said about this model's price: one of
+
+    "local"  -- runs on this machine, so it costs nothing and cannot change.
+    "free"   -- the catalogue says this provider's free tier covers it.
+    "unsure" -- known model, but whether the free tier covers it is not
+                something this file can be right about (see gemini-2.5-pro).
+    ""       -- no idea. A hand-typed endpoint could be anything, and the app
+                has no way to find out.
+
+    The empty string is the default on purpose. Every price this app displays
+    used to be the literal text "$0.00", written when z.ai was the only
+    provider it could talk to; the moment a second one existed that text was a
+    claim about someone else's billing that nobody had checked. Silence is the
+    honest answer when the answer is not known.
+    """
+    if is_local(base_url):
+        return "local"
+    p = preset_from_base_url(base_url)
+    if not p:
+        return ""
+    if model in (p.get("free_models") or []):
+        return "free"
+    if model in (p.get("unsure_models") or []):
+        return "unsure"
+    return ""
+
+
 def to_provider(key: str, api_key: str = "") -> dict | None:
     """A preset -> the provider dict the rest of the app already understands.
 

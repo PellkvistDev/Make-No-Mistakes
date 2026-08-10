@@ -192,3 +192,60 @@ def test_no_quota_numbers_are_promised_on_screen(desktop):
     free_line = desktop.page.inner_text(".prov-free")
     assert "AI Studio" in free_line
     assert not any(ch.isdigit() for ch in free_line), free_line
+
+
+def test_a_missing_catalogue_still_leaves_a_usable_first_screen(desktop):
+    """The bridge failing must not strand the user on the very first screen.
+
+    It used to `return` on an empty reply, which left the sheet showing its
+    title, its blurb and a lone "Paste your API key" box -- no chooser, no
+    instructions, nothing naming the service the key belonged to. Worse, Start
+    then filed the key under "zai" regardless, so a pasted Google key became a
+    z.ai key in the wrong environment variable and the first request failed
+    with nothing on screen explaining why.
+    """
+    desktop.boot(boot={"needsKey": True}, provider_choices={})
+    desktop.page.wait_for_selector("#prov-choices .prov-card", timeout=8000)
+
+    # Still a real choice on screen, and the manual fields are open.
+    assert cards(desktop) == ["custom"]
+    assert desktop.page.is_visible("#prov-custom")
+    assert desktop.page.is_visible("#prov-base-url")
+
+    # And it says what went wrong rather than looking merely empty.
+    assert desktop.page.is_visible("#key-error")
+    assert "providers" in desktop.page.inner_text("#key-error").lower()
+    assert desktop.errors == []
+
+
+def test_a_key_saved_without_a_catalogue_is_not_filed_under_zai(desktop):
+    """The specific harm above: the wrong provider recorded, silently."""
+    desktop.boot(boot={"needsKey": True}, provider_choices={})
+    desktop.page.wait_for_selector("#prov-choices .prov-card", timeout=8000)
+    desktop.page.fill("#prov-base-url", "http://localhost:11434/v1")
+    desktop.page.fill("#prov-model", "qwen2.5-coder")
+    desktop.page.fill("#key-input", "sk-whatever")
+    desktop.page.click("#key-save")
+    desktop.page.wait_for_timeout(300)
+
+    saved = desktop.calls("save_setup")
+    assert saved, "Start did not reach the backend"
+    assert saved[0]["args"][0] == "custom"
+    assert saved[0]["args"][2] == "http://localhost:11434/v1"
+    assert desktop.errors == []
+
+
+def test_the_lede_stops_counting_options_it_is_no_longer_showing(desktop):
+    """"Both of the first two have a free tier" over a single card."""
+    desktop.boot(boot={"needsKey": True}, provider_choices={})
+    desktop.page.wait_for_selector("#prov-choices .prov-card", timeout=8000)
+    lede = desktop.page.inner_text("#key-lede").lower()
+    assert "first two" not in lede
+    assert "openai-compatible" in lede
+    assert desktop.errors == []
+
+
+def test_the_lede_is_left_alone_when_the_catalogue_loads(desktop):
+    onboard(desktop)
+    assert "first two" in desktop.page.inner_text("#key-lede").lower()
+    assert desktop.errors == []

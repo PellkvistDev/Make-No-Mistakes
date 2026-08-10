@@ -1231,17 +1231,35 @@ class Api:
 
     def providers(self):
         """All providers (built-in + custom) with keys masked, plus the
-        current chat's choice."""
+        current chat's choice.
+
+        `tier` travels with each row, and `chat_tier` with the current choice,
+        so the UI never has to work out what a model costs. It used to print
+        "$0.00" and "via z.ai" from constants in the markup, which was true
+        only while z.ai was the only thing this app could talk to.
+        """
         out = []
         for p in all_providers(self._cfg):
+            models = p.get("models") or []
+            # Where this provider's keys come from, so the key field can point
+            # at the right console instead of naming z.ai whatever it is.
+            known = providers_mod.preset_from_base_url(p["base_url"])
             out.append({"name": p["name"], "base_url": p["base_url"],
-                        "models": p.get("models") or [],
+                        "models": models,
                         "builtin": bool(p.get("builtin")),
+                        "local": providers_mod.is_local(p["base_url"]),
+                        "tier": providers_mod.model_tier(
+                            p["base_url"], models[0] if models else ""),
+                        "key_url": (known or {}).get("key_url", ""),
                         "has_key": bool(p.get("api_key"))})
+        chat_provider = self.session_provider or builtin_provider_name(self._cfg)
+        chat_model = self.session_model or self._cfg.model
+        chosen = find_provider(self._cfg, chat_provider)
         return {"providers": out,
-                "chat_provider": (self.session_provider
-                                  or builtin_provider_name(self._cfg)),
-                "chat_model": self.session_model or self._cfg.model}
+                "chat_provider": chat_provider,
+                "chat_model": chat_model,
+                "chat_tier": providers_mod.model_tier(
+                    (chosen or {}).get("base_url", ""), chat_model)}
 
     def add_provider(self, name: str, base_url: str, api_key: str, models: str):
         return self.save_provider("", name, base_url, api_key, models)
@@ -1596,6 +1614,29 @@ class Api:
         if not path.is_dir():
             return {"error": "not a folder"}
         res = self._activate_session(new_id(), [], str(path), 0, 0, [], auto_backup=auto_backup)
+        res["sessions"] = self.list_sessions()
+        return res
+
+    def new_session_in(self, folder: str, auto_backup: bool = True):
+        """Start a chat in a folder the user has worked in before.
+
+        Same as new_session without the folder dialog. Reopening a project you
+        already have chats in was a trip through the OS picker every time, even
+        though the path was sitting in the session list -- so the app knew the
+        answer and asked anyway.
+
+        The path is checked rather than trusted: it comes from a stored session
+        and the folder may since have been moved, renamed or deleted, and the
+        agent's whole idea of a workspace is its working directory.
+        """
+        folder = (folder or "").strip()
+        if not folder:
+            return {"error": "no folder"}
+        path = Path(folder).expanduser()
+        if not path.is_dir():
+            return {"error": f"folder not found: {folder}"}
+        res = self._activate_session(new_id(), [], str(path), 0, 0, [],
+                                     auto_backup=auto_backup)
         res["sessions"] = self.list_sessions()
         return res
 
