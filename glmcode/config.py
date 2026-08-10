@@ -88,16 +88,32 @@ DEFAULT_VISION_MODEL = "glm-4.6v-flash"  # free vision model
 
 PERMISSION_MODES = ("ask", "autoedit", "yolo")
 
-# The always-available built-in provider (the free default). Custom providers
-# (any OpenAI-compatible endpoint: OpenRouter, Ollama, LM Studio, paid APIs)
-# are stored in Config.providers with the same shape.
-BUILTIN_PROVIDER_NAME = "z.ai (free)"
+# The provider chosen during setup. Kept separate from Config.providers because
+# it is the one whose key lives in an environment variable rather than the
+# config file -- not because it is a better or more official provider. It used
+# to be named "z.ai (free)" whatever it actually pointed at, which was wrong the
+# moment anyone changed the base URL, and wronger once a second free option
+# existed.
+BUILTIN_PROVIDER_NAME = "z.ai (free)"   # legacy label; only for old configs
+
+
+def builtin_provider_name(cfg: "Config") -> str:
+    """What to call the primary provider, based on what it actually is."""
+    from . import providers as _providers
+    found = (_providers.preset(cfg.provider_preset)
+             or _providers.preset_from_base_url(cfg.base_url))
+    if found:
+        return found["label"]
+    # Typed in by hand: name it after the host rather than a vendor it is not.
+    host = (cfg.base_url or "").split("//")[-1].split("/")[0]
+    return host or "Your API"
 
 
 def builtin_provider(cfg: "Config") -> dict:
-    return {"name": BUILTIN_PROVIDER_NAME, "base_url": cfg.base_url,
+    return {"name": builtin_provider_name(cfg), "base_url": cfg.base_url,
             "api_key": cfg.resolve_api_key(),
-            "models": [cfg.model, cfg.vision_model], "builtin": True}
+            "models": [cfg.model, cfg.vision_model], "builtin": True,
+            "preset": cfg.provider_preset or ""}
 
 
 def all_providers(cfg: "Config") -> list:
@@ -108,15 +124,25 @@ def find_provider(cfg: "Config", name: str) -> dict | None:
     for p in all_providers(cfg):
         if p.get("name") == name:
             return p
+    # Chats saved before the primary provider was named after what it actually
+    # is still refer to it as "z.ai (free)". Resolve that to the primary rather
+    # than reporting a provider that no longer exists -- those chats would
+    # otherwise silently fall back and change model mid-conversation.
+    if name == BUILTIN_PROVIDER_NAME:
+        return builtin_provider(cfg)
     return None
 
 
 @dataclass
 class Config:
-    api_key: str = ""  # legacy only; the real source is the ZAI_API_KEY env var
+    api_key: str = ""  # legacy only; the real source is the provider's env var
     base_url: str = DEFAULT_BASE_URL
     model: str = DEFAULT_MODEL
     vision_model: str = DEFAULT_VISION_MODEL
+    # Which known provider the primary one is ("zai", "google", "" = typed in
+    # by hand). Only ever a label and a set of instructions: the client treats
+    # every provider the same, and this changes nothing about how it is called.
+    provider_preset: str = ""
     mode: str = "ask"                # ask | autoedit | yolo
     temperature: float = 0.6
     max_tokens: int = 16384
@@ -200,8 +226,28 @@ class Config:
 
     extra: dict = field(default_factory=dict)
 
+    def provider_env_var(self) -> str:
+        """Which environment variable holds the primary provider's key.
+
+        Per-preset, so configuring Google does not overwrite a z.ai key and
+        vice versa. Falls back to ZAI_API_KEY for installs that predate presets,
+        whose key is already sitting in that variable.
+        """
+        from . import providers as _providers
+        key = self.provider_preset or ""
+        if not key:
+            found = _providers.preset_from_base_url(self.base_url)
+            key = found["key"] if found else ""
+        return _providers.env_var_for(key) or "ZAI_API_KEY"
+
     def resolve_api_key(self) -> str:
-        return os.environ.get("ZAI_API_KEY", "").strip() or self.api_key
+        # The preset's own variable first, then ZAI_API_KEY. The fallback is
+        # what stops an existing install losing its key the moment presets
+        # arrive: it was stored under the old name and there is no migration
+        # that could reach an environment variable.
+        return (os.environ.get(self.provider_env_var(), "").strip()
+                or os.environ.get("ZAI_API_KEY", "").strip()
+                or self.api_key)
 
     def resolve_tavily_key(self) -> str:
         return os.environ.get("TAVILY_API_KEY", "").strip() or self.tavily_api_key

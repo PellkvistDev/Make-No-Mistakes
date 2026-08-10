@@ -27,7 +27,9 @@ from ..agent import Agent
 from ..api import IMAGE_EXTENSIONS, ZaiClient
 from ..backup import BackupRepo
 from .. import backup as backup_module
+from .. import providers as providers_mod
 from ..config import (BUILTIN_PROVIDER_NAME, CONFIG_DIR, PERMISSION_MODES, Config,
+                      builtin_provider_name,
                       all_providers, find_provider, load_config, save_config)
 from ..events import AgentEvents
 from .. import githubsync
@@ -1171,7 +1173,8 @@ class Api:
                         "builtin": bool(p.get("builtin")),
                         "has_key": bool(p.get("api_key"))})
         return {"providers": out,
-                "chat_provider": self.session_provider or BUILTIN_PROVIDER_NAME,
+                "chat_provider": (self.session_provider
+                                  or builtin_provider_name(self._cfg)),
                 "chat_model": self.session_model or self._cfg.model}
 
     def add_provider(self, name: str, base_url: str, api_key: str, models: str):
@@ -1182,18 +1185,24 @@ class Api:
         """Add a new API or save edits to an existing one. `original_name`
         is the row the form was opened from ("" = adding a new one).
 
-        Editing the built-in z.ai row only ever means one thing -- setting
-        or replacing the API key -- and that key is persisted to the
-        ZAI_API_KEY env var (like first-run onboarding), not to the custom
-        provider list."""
+        Editing the provider chosen at setup only ever means one thing --
+        setting or replacing the API key -- and that key is persisted to that
+        provider's own environment variable (like first-run onboarding), not to
+        the custom provider list."""
         original_name = (original_name or "").strip()
         name = (name or "").strip()
         api_key = (api_key or "").strip()
-        if BUILTIN_PROVIDER_NAME in (original_name, name):
+        primary = builtin_provider_name(self._cfg)
+        # BUILTIN_PROVIDER_NAME as well as the current label: a config written
+        # before presets is still showing the old hardcoded name in the UI the
+        # form was opened from.
+        if primary in (original_name, name) \
+                or BUILTIN_PROVIDER_NAME in (original_name, name):
             if not api_key:
-                return {"error": "paste your z.ai API key "
-                                 "(free at z.ai → profile → API Keys)"}
-            persisted = persist_env_var("ZAI_API_KEY", api_key)
+                where = providers_mod.preset(self._cfg.provider_preset)
+                return {"error": "paste your API key"
+                                 + (f" ({where['key_url']})" if where else "")}
+            persisted = persist_env_var(self._cfg.provider_env_var(), api_key)
             self._cfg.api_key = api_key  # fallback source if setx failed
             save_config(self._cfg)
             self._client = None  # rebuild with the new key on next use
@@ -1378,7 +1387,8 @@ class Api:
             return {"error": "no active chat"}
         if self._agent.busy:
             return {"error": "can't switch models while the agent is working"}
-        if provider_name != BUILTIN_PROVIDER_NAME \
+        if provider_name != builtin_provider_name(self._cfg) \
+                and provider_name != BUILTIN_PROVIDER_NAME \
                 and not find_provider(self._cfg, provider_name):
             return {"error": f'unknown provider "{provider_name}"'}
         self._apply_chat_model(self._agent, provider_name, model)
