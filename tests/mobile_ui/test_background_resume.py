@@ -249,12 +249,14 @@ def test_an_app_killed_mid_tool_comes_back_with_a_sendable_history(phone):
     phone.page.wait_for_timeout(400)
     phone.relaunch()
     phone.page.wait_for_selector("#screen-chat:not([hidden])", timeout=15000)
+    # Waiting for the request, not for idle: straight after a relaunch no turn
+    # has started yet, so "not busy" is true before the resume has done
+    # anything and wait_idle() would return on the wrong side of it.
+    phone.page.wait_for_function("() => window.__sent.length > 0", timeout=15000)
     phone.wait_idle()
 
     assert resumed(phone), "a turn killed mid-tool was not picked up on relaunch"
-    sent = phone.page.evaluate(
-        "() => window.__sent.length ? window.__sent[0].messages : null")
-    assert sent, "the resumed turn never reached the model"
+    sent = phone.page.evaluate("() => window.__sent[0].messages")
 
     # The invariant the API enforces: every call answered, or it 400s.
     calls = [c["id"] for m in sent if m.get("tool_calls") for c in m["tool_calls"]]
@@ -265,6 +267,84 @@ def test_an_app_killed_mid_tool_comes_back_with_a_sendable_history(phone):
         "which the model API rejects outright")
     filler = [m for m in sent if m.get("role") == "tool" and "interrupted" in (m.get("content") or "")]
     assert filler, "the gap was filled with something other than the interrupted note"
+    assert phone.errors == []
+
+
+# ------------------------- handing the turn to a machine that can finish it
+
+def strand_a_turn(phone):
+    """Leave a turn owed: the app goes away and the request dies with it."""
+    phone.reply({"role": "assistant", "content": "phone finished it"})
+    hide(phone)
+    phone.page.evaluate("() => { window.__failNext = true; }")
+    phone.send("do the work")
+    phone.wait_idle()
+
+
+def test_the_phone_publishes_that_a_turn_is_still_owed(phone):
+    """Kept only in localStorage it is useless: the desktop is a different
+    program on a different machine, and the sync store is the only thing the
+    two of them share."""
+    phone.setup()
+    strand_a_turn(phone)
+    stored = phone.stored_chats()
+    assert stored, "nothing reached the sync store"
+    assert any(c.get("interrupted") for c in stored), (
+        "the desktop has no way to know this turn was left unfinished")
+    assert phone.errors == []
+
+
+def test_the_phone_does_not_redo_a_turn_the_desktop_already_finished(phone):
+    """The failure this whole design exists to prevent.
+
+    Both devices running the same turn is worse than the turn not finishing:
+    two sets of tool calls, two commits, and each device left holding a history
+    the other has never seen. So coming back has to mean "find out what
+    happened while I was away" BEFORE it means "carry on".
+    """
+    phone.setup()
+    strand_a_turn(phone)
+    stored = [c for c in phone.stored_chats() if c.get("interrupted")]
+    assert stored, "test setup failed: nothing was marked interrupted"
+
+    # The desktop picks it up, finishes it, and puts it back -- which is what
+    # clears the flag, since the store merges and absent means "nothing to say".
+    chat = dict(stored[0])
+    chat["device"] = "desktop"
+    chat["interrupted"] = False
+    chat["messages"] = list(chat.get("messages") or []) + [
+        {"role": "assistant", "content": "the desktop finished it"}]
+    chat["transcript"] = list(chat.get("transcript") or []) + [
+        {"role": "assistant", "text": "the desktop finished it"}]
+    phone.write_stored_chat(chat)
+
+    before = requests_made(phone)
+    unhide(phone)
+    phone.wait_idle()
+    phone.page.wait_for_timeout(400)
+
+    assert requests_made(phone) == before, (
+        "the phone ran the turn again after the desktop had already finished it")
+    assert not resumed(phone), "the phone announced a resume of finished work"
+    bubbles = phone.page.eval_on_selector_all(
+        ".bubble.assistant", "els => els.map(e => e.textContent)")
+    assert any("the desktop finished it" in b for b in bubbles), \
+        "the phone did not show the answer the desktop produced"
+    assert phone.errors == []
+
+
+def test_a_turn_still_owed_after_catching_up_is_finished_here(phone):
+    """The other half: catching up must not swallow a turn nobody has done.
+    If the desktop was asleep, the phone is still the one that has to finish."""
+    phone.setup()
+    strand_a_turn(phone)
+    phone.reply({"role": "assistant", "content": "the phone finished it"})
+    unhide(phone)
+    phone.wait_idle()
+    assert resumed(phone), "nobody finished the turn"
+    bubbles = phone.page.eval_on_selector_all(
+        ".bubble.assistant", "els => els.map(e => e.textContent)")
+    assert any("the phone finished it" in b for b in bubbles)
     assert phone.errors == []
 
 

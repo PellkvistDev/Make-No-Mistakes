@@ -395,7 +395,13 @@ class SyncStore:
                       # lets the phone say so in the list instead of only
                       # finding out once you've tapped it.
                       "repo": ((chat.get("repo") or {}).get("full_name") or ""),
-                      "device": chat.get("device") or ""})
+                      "device": chat.get("device") or "",
+                      # So a machine can find turns left unfinished without
+                      # decrypting every chat in the store. The index is a
+                      # cache -- an older client that saves without this field
+                      # drops it from the row while the chat body keeps it --
+                      # so it is a shortlist to load from, never the decision.
+                      "interrupted": bool(chat.get("interrupted"))})
         self._write_index(chats, sha, _tombstones(data))
         return chat["updated"]
 
@@ -711,8 +717,125 @@ def apply_handoff(messages: list, from_device: str, to_device: str) -> list:
     return out
 
 
+# How long a chat marked interrupted is left alone before this machine offers to
+# finish it.
+#
+# The phone resumes its own turn the moment it comes back to the foreground, and
+# two devices running the same turn is the one outcome worse than the turn not
+# finishing: they would both call the model, both commit, and each would write a
+# history the other has never seen. The grace period is what makes "the phone
+# came back" the normal case and "the desktop stepped in" the exception.
+#
+# Measured from the chat's `updated` stamp, which the phone refreshes when it
+# saves on being backgrounded -- so the clock starts when the phone went away,
+# not when the turn began.
+PICKUP_GRACE_MS = 120_000
+
+
+def pickup_candidates(rows: list, now_ms: int | None = None,
+                      grace_ms: int = PICKUP_GRACE_MS) -> list:
+    """Chats a phone abandoned mid-turn that this machine could finish.
+
+    Takes index rows (cheap: one file) and returns the ones worth loading in
+    full. The index is a cache rebuilt on every save, so a row is a shortlist
+    entry and never the last word -- the caller re-reads the chat body and
+    checks the flag again before acting on it.
+
+    Deliberately excludes chats this machine last wrote. A desktop turn that
+    died is the desktop's own business and it has the session on disk; picking
+    it up from here would race the local copy instead of a remote one.
+    """
+    now = _now_ms() if now_ms is None else now_ms
+    out = []
+    for row in rows or []:
+        if not row.get("interrupted"):
+            continue
+        if (row.get("device") or "").lower() == "desktop":
+            continue
+        updated = row.get("updated") or 0
+        # A chat saved seconds ago is a phone that is probably still holding
+        # it. Also skips rows with no stamp at all rather than treating a
+        # missing one as infinitely old.
+        if not updated or now - updated < grace_ms:
+            continue
+        out.append(row)
+    # Oldest first: the one that has been waiting longest is the one whose
+    # owner has most obviously stopped waiting for it.
+    return sorted(out, key=lambda r: r.get("updated") or 0)
+
+
+INTERRUPTED_TOOL = (
+    "ERROR: interrupted before this finished — the app was suspended by the "
+    "operating system mid-call. Assume it did not take effect. Do it again if "
+    "it is still needed."
+)
+
+
+def heal_interrupted_turn(messages: list) -> list:
+    """Make a history that was cut off mid-turn safe to send again.
+
+    The phone records a tool's result immediately after running it, so a turn
+    killed between those two points leaves an assistant message whose
+    tool_calls have no matching reply. That is not untidy, it is unsendable:
+    OpenAI-compatible APIs require every tool_call to be answered and reject
+    the whole request otherwise. Adopting such a chat here without repair means
+    the first turn on this machine fails, which looks like the desktop being
+    broken rather than the phone having been suspended.
+
+    The twin of healInterruptedTurn in mobile/agent-core.js, and it has to stay
+    one: both ends adopt the other's histories.
+
+    Gaps are filled rather than the assistant message dropped -- dropping it
+    would lose what the model had decided to do -- and the reply says to assume
+    the call did not take effect, because a tool that ran without its result
+    being recorded is indistinguishable from one that never ran.
+    """
+    answered = {m.get("tool_call_id") for m in (messages or [])
+                if isinstance(m, dict) and m.get("role") == "tool"}
+    out: list = []
+    for m in messages or []:
+        out.append(m)
+        if not isinstance(m, dict) or m.get("role") != "assistant":
+            continue
+        for call in (m.get("tool_calls") or []):
+            if not isinstance(call, dict):
+                continue
+            cid = call.get("id")
+            if not cid or cid in answered:
+                continue
+            # Directly after the message that made the call: the pairing the
+            # API checks is positional, so a reply appended at the end of the
+            # list is still a rejected request.
+            out.append({"role": "tool", "tool_call_id": cid,
+                        "content": INTERRUPTED_TOOL})
+            answered.add(cid)
+    return out
+
+
+def pickup_note() -> str:
+    """The message this machine sends to finish a turn the phone could not.
+
+    A real message rather than a silent continuation, and deliberately so: the
+    desktop is about to run tools and possibly commit, without anyone having
+    asked it to just now. Something has to say why, in the transcript, where
+    both devices will see it.
+
+    It also says what the phone cannot know: that the interruption was the
+    operating system, not the model, so there is nothing to diagnose and no
+    reason to start over.
+    """
+    return (
+        "Your phone was suspended by its operating system part-way through "
+        "this turn, so the request never came back and the turn stopped. "
+        "Nothing is wrong with the work itself. Carry on from the last "
+        "completed step above -- do not start again from the beginning, and "
+        "do not repeat anything that already succeeded."
+    )
+
+
 def session_to_chat(sess: dict, repo_state: dict | None = None,
-                    pending: list | None = None, repo: dict | None = None) -> dict:
+                    pending: list | None = None, repo: dict | None = None,
+                    interrupted: bool = False) -> dict:
     """A desktop SessionStore record -> a sync chat object the phone can read.
 
     A leading system slot is included at index 0 because the phone overwrites
@@ -751,6 +874,12 @@ def session_to_chat(sess: dict, repo_state: dict | None = None,
         # Work the phone couldn't run. Defaults to empty, so the desktop
         # pushing after a turn clears whatever it was handed.
         "pending": list(pending or []),
+        # Whether a turn is still owed on this chat. Sent explicitly rather
+        # than omitted, because absent means "nothing to say" to the merge in
+        # save() -- so leaving it out would let a phone's stale True survive
+        # the very turn that answered it, and the desktop would pick the chat
+        # up again on its next scan, forever.
+        "interrupted": bool(interrupted),
         # Desktop-only extras, namespaced so the phone simply ignores them.
         "desktop": {
             "cwd": sess.get("cwd", ""),
@@ -766,6 +895,11 @@ def chat_to_session(chat: dict) -> dict:
     session. Drops the leading system slot; the desktop rebuilds its own system
     prompt when the session is opened."""
     messages = [m for m in (chat.get("messages") or []) if m.get("role") != "system"]
+    # Repaired on the way in, so every route that adopts someone else's chat is
+    # covered by one call -- the pickup scan, and the manual pull button, which
+    # has always been able to land a phone history killed mid-tool and then
+    # fail on its first request.
+    messages = heal_interrupted_turn(messages)
     extra = chat.get("desktop") or {}
     return {
         "id": chat.get("id", ""),
@@ -780,4 +914,6 @@ def chat_to_session(chat: dict) -> dict:
         "device": chat.get("device", ""),
         # Work the phone left for a machine with a shell.
         "pending": list(chat.get("pending") or []),
+        # A turn the writing device started and never finished.
+        "interrupted": bool(chat.get("interrupted")),
     }
