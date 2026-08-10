@@ -32,12 +32,15 @@
   <div class="tb-right">
     <div id="model-select-wrap" class="model-select-wrap">
       <button id="model-chip" class="chip chip-btn model-chip" aria-haspopup="listbox" aria-expanded="false" title="Model for this chat — click to switch">
-        <span id="model-chip-label">glm-4.7-flash</span>
+        <!-- Filled from the current chat's provider at boot. Empty rather than
+             a model name: hardcoding one meant every start-up briefly showed
+             "glm-4.7-flash" to people who had never chosen z.ai. -->
+        <span id="model-chip-label"></span>
         <svg class="model-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
       </button>
       <div id="model-menu" class="model-menu" role="listbox" hidden></div>
     </div>
-    <span id="usage-chip" class="chip" title="Model output tokens this chat (always free)">0 tok</span>
+    <span id="usage-chip" class="chip" title="Model output tokens this chat">0 tok</span>
     <button id="think-chip" class="chip chip-btn" title="Thinking effort — click to cycle (low / medium / high / max)">Medium</button>
     <button id="mode-chip" class="chip chip-btn" title="Permission mode — click to cycle">Ask</button>
     <span class="tb-sep" aria-hidden="true"></span>
@@ -79,9 +82,9 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
     </div>
     <h1>Make No Mistakes</h1>
-    <p>Your free coding agent. It reads and edits files, runs PowerShell,
-       searches the web, and understands screenshots. Each chat is tied to a
-       project folder you choose, so your work and context are kept separate.</p>
+    <p>A coding agent that reads and edits your files, runs commands, searches
+       the web, and understands screenshots. Each chat is tied to a project
+       folder you choose, so your work and context are kept separate.</p>
     <button id="welcome-new-chat" class="btn btn-primary welcome-cta">Start a new chat →</button>
     <p class="welcome-foot">You can start as many chats as you like, one per project.</p>
   </div>
@@ -208,7 +211,7 @@
       </svg>
       Compact
     </button>
-    <span id="model-foot" class="composer-foot-text">glm-4.7-flash via z.ai — always $0.00</span>
+    <span id="model-foot" class="composer-foot-text"></span>
     <div id="gh-foot" class="gh-foot" hidden>
       <svg class="gh-foot-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M6 21V9a9 9 0 0 0 9 9"/></svg>
       <span id="gh-foot-name" class="gh-foot-name mono"></span>
@@ -328,20 +331,29 @@
     <div class="sheet-head">
       <h2 id="newchat-title">New chat</h2>
     </div>
-    <p class="row-sub">Pick a project folder, clone a GitHub repository, or use the whiteboard for quick, throwaway work.</p>
-    <div class="row newchat-backup-row">
-      <div class="row-text"><label for="newchat-backup">Auto-backup this project</label>
-        <span class="row-sub">Snapshots your files before each message, so you can revert if something goes wrong</span></div>
-      <button id="newchat-backup" class="switch" role="switch" aria-checked="true"><span></span></button>
+    <!-- Reopening a project you already work in is by far the commonest way
+         into this sheet, and it used to mean a round trip through the OS
+         folder picker even though every session already carries its path. -->
+    <div id="newchat-recent-wrap" hidden>
+      <p class="newchat-lede">Pick up where you left off</p>
+      <div id="newchat-recent" class="newchat-recent"></div>
     </div>
-    <div id="newchat-gh" class="newchat-gh">
-      <input id="newchat-gh-url" class="text-input" placeholder="Clone a GitHub repo — owner/repo or URL">
-      <button id="newchat-gh-go" class="btn btn-primary">Clone</button>
+
+    <div class="sheet-actions newchat-primary">
+      <button id="newchat-whiteboard" class="btn btn-ghost">Whiteboard</button>
+      <button id="newchat-folder" class="btn btn-primary">Open a folder…</button>
     </div>
-    <div class="newchat-gh-actions">
-      <button id="newchat-gh-pick" class="btn btn-ghost">Browse my repos…</button>
-      <button id="newchat-gh-new" class="btn btn-ghost">Create a new repo…</button>
-    </div>
+
+    <details id="newchat-gh-more" class="newchat-more">
+      <summary>Start from a GitHub repository…</summary>
+      <div id="newchat-gh" class="newchat-gh">
+        <input id="newchat-gh-url" class="text-input" placeholder="owner/repo or URL">
+        <button id="newchat-gh-go" class="btn btn-primary">Clone</button>
+      </div>
+      <div class="newchat-gh-actions">
+        <button id="newchat-gh-pick" class="btn btn-ghost">Browse my repos…</button>
+        <button id="newchat-gh-new" class="btn btn-ghost">Create a new repo…</button>
+      </div>
     <div id="newchat-repo-list" class="provider-list" hidden></div>
     <div id="newchat-new-repo" class="newchat-new-repo" hidden>
       <input id="newchat-new-name" class="text-input" placeholder="New repository name">
@@ -352,9 +364,14 @@
       <button id="newchat-new-go" class="btn btn-primary">Create &amp; open</button>
     </div>
     <p class="row-sub" id="newchat-gh-hint" hidden>Connect a GitHub token in Settings → GitHub to clone private repositories.</p>
-    <div class="sheet-actions">
-      <button id="newchat-whiteboard" class="btn btn-ghost">Open whiteboard</button>
-      <button id="newchat-folder" class="btn btn-primary">Open a folder…</button>
+    </details>
+
+    <!-- A per-chat setting, not a way in: it belongs after the choice, not in
+         front of it. On by default, and changeable later in Settings → Chat. -->
+    <div class="row newchat-backup-row">
+      <div class="row-text"><label for="newchat-backup">Auto-backup this project</label>
+        <span class="row-sub">Snapshots your files before each message, so you can undo a turn</span></div>
+      <button id="newchat-backup" class="switch" role="switch" aria-checked="true"><span></span></button>
     </div>
   </div>
 </div>
@@ -413,20 +430,34 @@
   <div class="sheet glass-strong settings" role="dialog" aria-modal="true" aria-labelledby="settings-title">
     <div class="sheet-head">
       <h2 id="settings-title">Settings</h2>
+      <div class="settings-find">
+        <svg class="settings-find-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input id="settings-search" type="text" placeholder="Search settings…"
+               aria-label="Search settings" autocomplete="off" spellcheck="false">
+      </div>
       <button id="settings-close" class="icon-btn" aria-label="Close settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
       </button>
     </div>
 
+    <div class="settings-body">
     <div class="settings-tabs" role="tablist">
       <button class="settings-tab-btn on" data-tab="general" role="tab">General</button>
       <button class="settings-tab-btn" data-tab="voice" role="tab">Voice</button>
       <button class="settings-tab-btn" data-tab="models" role="tab">Models &amp; tools</button>
       <button class="settings-tab-btn" data-tab="browser" role="tab">Browser</button>
       <button class="settings-tab-btn" data-tab="github" role="tab">GitHub</button>
+      <button class="settings-tab-btn" data-tab="phone" role="tab">Phone</button>
       <button class="settings-tab-btn" data-tab="tasks" role="tab">Tasks</button>
       <button class="settings-tab-btn" data-tab="chat" role="tab">Chat</button>
+      <p class="about">Make No Mistakes <span id="about-version"></span> — a coding
+         agent that runs on whichever model you point it at.</p>
     </div>
+
+    <div class="settings-panes">
+    <p id="settings-noresults" class="row-sub settings-noresults" hidden>
+      Nothing matches that. Try a word from the setting's name, like "voice",
+      "token" or "backup".</p>
 
     <section data-tab="general">
       <h3>Appearance</h3>
@@ -507,11 +538,11 @@
         <button data-v="describe" role="radio">Describe</button>
         <button data-v="direct" role="radio">Direct</button>
       </div>
-      <p class="row-sub">Describe: the free GLM vision model narrates images for the
-         coding model — works with any chat model, best code quality. Direct: images
-         (both ones you attach and ones the agent opens with view_image) are sent
-         straight to the chat model — use this when your model is multimodal; the
-         free default falls back to GLM vision automatically.</p>
+      <p class="row-sub">Describe: a vision model narrates images for the coding model
+         — works with any chat model, even one that can't see. Direct: images (both
+         ones you attach and ones the agent opens with view_image) are sent straight
+         to the chat model — use this when your model is multimodal. If it turns out
+         not to be, Describe is used automatically rather than failing.</p>
     </section>
 
     <section data-tab="voice">
@@ -618,8 +649,8 @@
 
     <section data-tab="models">
       <h3>APIs</h3>
-      <p class="row-sub">The API this chat talks to — click one to select it. New chats
-         always start on the free z.ai default. Any OpenAI-compatible endpoint works
+      <p class="row-sub">The API this chat talks to — click one to select it. New chats start
+         on the one you chose at setup. Any OpenAI-compatible endpoint works
          (OpenRouter, Ollama, LM Studio, paid APIs).</p>
       <div id="api-list" class="provider-list"></div>
       <div class="sheet-actions api-actions">
@@ -636,6 +667,10 @@
           <button id="prov-save" class="btn btn-primary">Save API</button>
         </div>
       </div>
+    </section>
+
+    <section data-tab="models">
+      <h3>Extensions</h3>
       <details id="mcp-editor">
         <summary>MCP servers — external tools for the agent…</summary>
         <p class="row-sub">Connect Model Context Protocol servers (stdio). Their tools
@@ -666,6 +701,10 @@
           </div>
         </div>
       </details>
+    </section>
+
+    <section data-tab="models">
+      <h3>Answer quality</h3>
       <div class="row"><div class="row-text"><label>Thinking effort</label>
         <span class="row-sub">Also on the chip in the title bar. Higher = better answers, slower.</span></div>
         <div class="seg" id="seg-think" role="radiogroup" aria-label="Thinking effort">
@@ -683,6 +722,10 @@
       <div class="row"><div class="row-text"><label for="opt-reasoning">Show reasoning</label>
         <span class="row-sub">Display the thinking stream in chat</span></div>
         <button id="opt-reasoning" class="switch" role="switch" aria-checked="true"><span></span></button></div>
+    </section>
+
+    <section data-tab="models">
+      <h3>How it works</h3>
       <div class="row"><div class="row-text"><label for="opt-verify">Nudge to verify edits</label>
         <span class="row-sub">When the agent edits files but runs nothing to check them, ask it once to
           verify (run tests / the affected code). Turn off if you'd rather it just edits without
@@ -800,7 +843,10 @@
         </div>
       </div>
 
-      <h3 style="margin-top:22px">Your phone</h3>
+    </section>
+
+    <section data-tab="phone">
+      <h3>Your phone</h3>
       <div class="row"><div class="row-text"><label>Set up your phone</label>
         <span class="row-sub">One scan: installs the app, fills in your keys, and turns on shared
           chats. The agent then runs on the phone itself. Your keys go from screen to camera — they
@@ -930,8 +976,8 @@
          not affected.</p>
     </section>
 
-    <p class="about">Make No Mistakes <span id="about-version"></span> — powered by z.ai's free
-       GLM-4.7-Flash &amp; GLM-4.6V-Flash. Total cost: $0.00.</p>
+    </div><!-- /.settings-panes -->
+    </div><!-- /.settings-body -->
   </div>
 </div>
 
@@ -942,8 +988,9 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
     </div>
     <h2 id="key-title">Welcome to Make No Mistakes</h2>
-    <p>Choose where the model runs. Both of the first two have a free tier and
-       need no card. You can add more, or change this, at any time.</p>
+    <p id="key-lede">Choose where the model runs. Both of the first two have a
+       free tier and need no card. You can add more, or change this, at any
+       time.</p>
     <!-- Drawn from the provider catalogue rather than written out here, so the
          desktop and the phone offer the same options in the same words. -->
     <div id="prov-choices" class="prov-choices" role="radiogroup"

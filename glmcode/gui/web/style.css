@@ -1455,15 +1455,71 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 /* settings specifics */
 .settings section { margin-bottom: 20px; }
 
-/* Settings tabs -- group the many sections so the sheet isn't one long scroll. */
-.settings-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin: 2px 0 16px; }
+/* Settings tabs -- group the many sections so the sheet isn't one long scroll.
+   A rail down the side rather than a strip across the top: at the sheet's old
+   560px the seven tabs wrapped onto two rows at every window size, which reads
+   as two unrelated groups. A column also has room for an eighth. */
+.sheet.settings {
+  width: min(920px, calc(100vw - 48px));
+  height: min(760px, calc(100vh - 96px));
+  max-height: calc(100vh - 96px);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.settings-body { display: flex; gap: 24px; flex: 1; min-height: 0; }
+.settings-tabs {
+  flex: none; width: 172px; display: flex; flex-direction: column; gap: 2px;
+  border-right: 1px solid var(--stroke-soft); padding-right: 12px;
+}
+/* Only the settings pane scrolls, so the rail and the search box stay put --
+   scrolling a long tab must not scroll the way back out of it. */
+.settings-panes { flex: 1; min-width: 0; overflow-y: auto; padding-right: 4px; }
 .settings-tab-btn {
-  padding: 7px 13px; border-radius: 999px; border: 1px solid transparent;
+  padding: 8px 12px; border-radius: 9px; border: 1px solid transparent;
   background: transparent; color: var(--muted); font-size: 13.5px; font-family: inherit;
-  cursor: pointer; transition: background 0.12s ease, color 0.12s ease;
+  cursor: pointer; text-align: left; transition: background 0.12s ease, color 0.12s ease;
 }
 .settings-tab-btn:hover { background: var(--glass-hi); color: var(--text); }
 .settings-tab-btn.on { background: var(--glass-hi); color: var(--text); font-weight: 600; }
+
+/* Search. The sheet holds ~40 controls across eight groups; without this the
+   only way to find one is to remember which group it was filed under. */
+.settings-find { position: relative; display: flex; align-items: center; flex: none; }
+.settings-find-ico {
+  position: absolute; left: 10px; width: 14px; height: 14px;
+  color: var(--text-faint); pointer-events: none;
+}
+#settings-search {
+  width: 210px; padding: 7px 11px 7px 30px; border-radius: 9px;
+  border: 1px solid var(--stroke-soft); background: var(--glass-hi);
+  color: var(--text); font-family: inherit; font-size: 13px; outline: none;
+}
+#settings-search:focus { border-color: var(--accent); }
+.settings-noresults { padding: 18px 2px; }
+
+/* Searching hides non-matches with a class, never the `hidden` attribute:
+   half the elements in here manage their own `hidden` (#api-form,
+   #gh-connected, the sync panels), so clearing the search would have un-hidden
+   all of them at once. `!important` because the global `[hidden]` rule below
+   carries it, and a matching row inside a group is competing with that. */
+.settings.searching .settings-tabs { opacity: 0.4; pointer-events: none; }
+.settings.searching .s-nomatch { display: none !important; }
+.settings.searching section[data-tab]::before {
+  content: attr(data-tab-label); display: block; margin-bottom: 6px;
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.09em;
+  color: var(--accent); font-weight: 700;
+}
+.settings.searching section[data-tab].s-nomatch::before { display: none; }
+
+/* Narrow windows: fall back to the strip across the top. */
+@media (max-width: 820px) {
+  .settings-body { flex-direction: column; gap: 12px; }
+  .settings-tabs {
+    width: auto; flex-direction: row; flex-wrap: wrap;
+    border-right: 0; border-bottom: 1px solid var(--stroke-soft);
+    padding-right: 0; padding-bottom: 10px;
+  }
+  #settings-search { width: 150px; }
+}
 .settings h3 {
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
   color: var(--text-faint); margin-bottom: 10px; font-weight: 700;
@@ -1527,6 +1583,40 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 .rule-badge.rule-deny  { color: #ff9a9a; background: rgba(200,70,70,.16);  border-color: rgba(200,70,70,.32); }
 
 /* GitHub: new-chat clone row, repo picker, and the composer-foot sync chip */
+/* Recent projects: the first thing in the sheet, because reopening one is the
+   commonest reason to be here and it used to be the longest route. */
+.newchat-lede {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em;
+  color: var(--text-faint); font-weight: 700; margin: 2px 0 8px;
+}
+.newchat-recent { display: flex; flex-direction: column; gap: 3px; margin-bottom: 16px; }
+.newchat-recent-row {
+  display: flex; align-items: baseline; gap: 10px; width: 100%;
+  padding: 9px 12px; border-radius: 10px; border: 1px solid transparent;
+  background: var(--glass-hi); color: var(--text); font-family: inherit;
+  font-size: 13.5px; text-align: left; cursor: pointer;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+.newchat-recent-row:hover { border-color: var(--accent); }
+.ncr-name { font-weight: 600; flex: none; }
+.ncr-path {
+  font-size: 11.5px; color: var(--text-faint); flex: 1; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right;
+}
+/* The primary pair sits directly under the list, so "Open a folder…" is the
+   one obviously-blue thing on screen. Cloning is a fold-out below it -- it was
+   competing for that job with a second primary button and an empty text box. */
+.newchat-primary { margin: 0 0 6px; }
+.newchat-more { margin-top: 10px; }
+.newchat-more > summary {
+  cursor: pointer; font-size: 13px; color: var(--muted); padding: 7px 2px;
+  list-style: none;
+}
+.newchat-more > summary::-webkit-details-marker { display: none; }
+.newchat-more > summary::before { content: "▸ "; }
+.newchat-more[open] > summary::before { content: "▾ "; }
+.newchat-more > summary:hover { color: var(--text); }
+
 .newchat-gh { display: flex; gap: 8px; margin: 10px 0 4px; }
 .newchat-gh .text-input { flex: 1; }
 /* Browse / create, right where you start a project */
@@ -1695,6 +1785,15 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
   color: var(--text-dim); background: transparent; cursor: pointer;
   transition: background 0.2s ease, color 0.2s ease;
 }
+/* A seg standing on its own fills the width, and its buttons share it out via
+   `flex: 1` -- which is why they carry no horizontal padding. Inside a `.row`
+   there is no width to share: the label takes it, and the buttons collapse to
+   the width of their own text. "Low Medium High Max" came out as four words
+   jammed against each other with the selected one's pill cutting into its
+   neighbours. In a row the seg sizes to its content instead. */
+.row .seg { flex: none; margin-bottom: 0; }
+.row .seg button { flex: none; padding: 7px 13px; white-space: nowrap; }
+
 .seg button:hover { color: var(--text); }
 .seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .seg button.on {
@@ -1719,7 +1818,12 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 .switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .switch:disabled { opacity: 0.4; cursor: default; }
 
-.about { font-size: 11.5px; color: var(--text-faint); text-align: center; margin-top: 4px; }
+/* Foot of the settings rail: `margin-top: auto` pushes it down, which also
+   stops a short group (General is two rows) leaving the column half empty. */
+.about {
+  font-size: 11.5px; color: var(--text-faint); line-height: 1.5;
+  margin-top: auto; padding: 16px 12px 4px;
+}
 
 .onboard { text-align: center; }
 .onboard h2 { font-size: 22px; margin-bottom: 8px; letter-spacing: -0.02em; }

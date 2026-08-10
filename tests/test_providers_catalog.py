@@ -251,3 +251,41 @@ def test_a_model_whose_price_is_unknown_is_not_claimed_to_be_free():
 def test_pro_is_still_offered_as_a_model():
     """Uncertain about the price is not a reason to hide the better model."""
     assert "gemini-2.5-pro" in providers.preset("google")["models"]
+
+
+# -- what a model costs, and when to say nothing ------------------------- #
+
+def test_a_hand_typed_endpoint_gets_no_price_claim():
+    """The bug this whole tier exists to prevent. The app printed "$0.00" and
+    "via z.ai" from constants in the markup -- fine while z.ai was the only
+    thing it could talk to, and a claim about a stranger's billing the moment
+    it could talk to anything else."""
+    assert providers.model_tier("https://openrouter.ai/api/v1", "gpt-4o") == ""
+
+
+def test_a_model_running_on_this_machine_is_known_to_be_free():
+    """Not a free tier -- there is no quota, no account, and no policy that
+    can change next month. That is worth saying, and it is knowable."""
+    for url in ("http://localhost:11434/v1", "http://127.0.0.1:1234/v1",
+                "http://[::1]:8080/v1"):
+        assert providers.model_tier(url, "qwen2.5-coder") == "local", url
+
+
+def test_a_remote_host_is_never_mistaken_for_a_local_one():
+    """Substring matching on "localhost" would call this local. It is not."""
+    assert not providers.is_local("https://localhost.evil.example.com/v1")
+    assert not providers.is_local("https://api.z.ai/api/paas/v4")
+
+
+def test_the_free_tier_is_only_claimed_for_the_models_it_covers():
+    g = providers.preset("google")["base_url"]
+    assert providers.model_tier(g, "gemini-2.5-flash") == "free"
+    assert providers.model_tier(g, "gemini-2.5-pro") == "unsure"
+    # A Gemini model the catalogue has never heard of: no claim either way.
+    assert providers.model_tier(g, "gemini-9.9-ultra") == ""
+
+
+def test_a_trailing_slash_does_not_lose_the_provider():
+    """Base URLs are stored rstrip'd in some paths and not others."""
+    g = providers.preset("google")["base_url"]
+    assert providers.model_tier(g + "/", "gemini-2.5-flash") == "free"
