@@ -211,6 +211,63 @@ def test_leaving_the_app_mid_turn_is_the_case_that_matters(phone):
     assert phone.errors == []
 
 
+def test_an_app_killed_mid_tool_comes_back_with_a_sendable_history(phone):
+    """The case the repair exists for, end to end.
+
+    Being killed between a tool running and its result being recorded leaves an
+    assistant message whose tool_calls have no matching reply. Every
+    OpenAI-compatible API rejects that outright, so without the repair the
+    resume fails on its first request and the chat is stuck for good -- a worse
+    outcome than the failure this whole change is meant to remove.
+
+    Nothing here is simulated above the fetch boundary: the turn really is
+    abandoned mid-tool, the page really is thrown away, and the app really does
+    cold-boot and restore from what happened to be on disk.
+    """
+    phone.setup()
+    # Keep signed in, so the relaunch skips the PIN the way an installed PWA
+    # that has been killed does.
+    phone.page.click("#btn-chat-settings")
+    phone.page.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
+    phone.page.check("#set-keepsignedin")
+    phone.page.click("#btn-settings-done")
+
+    phone.page.evaluate("() => window.__seedFile('notes.md', 'hello')")
+    phone.reply({"role": "assistant", "tool_calls": [{"id": "call_1", "type": "function", "function": {
+        "name": "read_file", "arguments": '{"path": "notes.md"}'}}]})
+    phone.page.evaluate("() => { window.__holdTool = 'notes.md'; }")
+    phone.send("read the notes")
+    phone.page.wait_for_function("() => window.__toolInFlight === true", timeout=15000)
+
+    # Backgrounded with the read still open -- this is the save that captures a
+    # half-finished tool round -- and then killed outright, so the turn's own
+    # cleanup never runs.
+    hide(phone)
+    # The save on hide is asynchronous (it encrypts), and iOS does not kill an
+    # app the instant it backgrounds. Killing it here mid-write would be testing
+    # a race, not the resume.
+    phone.page.wait_for_timeout(400)
+    phone.relaunch()
+    phone.page.wait_for_selector("#screen-chat:not([hidden])", timeout=15000)
+    phone.wait_idle()
+
+    assert resumed(phone), "a turn killed mid-tool was not picked up on relaunch"
+    sent = phone.page.evaluate(
+        "() => window.__sent.length ? window.__sent[0].messages : null")
+    assert sent, "the resumed turn never reached the model"
+
+    # The invariant the API enforces: every call answered, or it 400s.
+    calls = [c["id"] for m in sent if m.get("tool_calls") for c in m["tool_calls"]]
+    answered = {m.get("tool_call_id") for m in sent if m.get("role") == "tool"}
+    assert calls, "the half-finished tool round was not in the restored history"
+    assert set(calls) <= answered, (
+        f"resumed with unanswered tool_calls {set(calls) - answered}, "
+        "which the model API rejects outright")
+    filler = [m for m in sent if m.get("role") == "tool" and "interrupted" in (m.get("content") or "")]
+    assert filler, "the gap was filled with something other than the interrupted note"
+    assert phone.errors == []
+
+
 def test_a_real_error_in_the_foreground_is_not_treated_as_a_suspension(phone):
     """A rejected key or a bad request fails the same way a killed request does.
     Resuming that would call the same endpoint and fail again, forever."""

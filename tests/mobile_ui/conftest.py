@@ -88,6 +88,21 @@ FAKE_GITHUB = r"""() => {
     if (m) {
       const path = decodeURIComponent(m[1]);
       if (method === "GET") {
+        // Hold a file read open, so a test can stop a turn in the one window
+        // that matters: after the model has asked for a tool and before its
+        // result has been recorded. That is the gap the OS kills the app in,
+        // and the only way to produce a saved history with an unanswered
+        // tool_call.
+        // Matched on path, not "the next read": the cross-device lock reads
+        // through this same endpoint at the START of a turn, before the agent
+        // has run at all, so holding the next GET holds the wrong one and stops
+        // the turn before it begins.
+        if (window.__holdTool && path === window.__holdTool) {
+          window.__holdTool = null;
+          window.__toolInFlight = true;
+          await new Promise((res) => { window.__releaseTool = res; });
+          window.__toolInFlight = false;
+        }
         const f = files[path];
         if (!f) return j({ message: "Not Found" }, 404);
         return j({ content: f.content, sha: f.sha, size: atob(f.content).length });
@@ -192,6 +207,19 @@ class Phone:
         self.page.goto(url, wait_until="domcontentloaded")
         self.page.reload(wait_until="domcontentloaded")
         self.page.evaluate("window.__fakeGitHub()")
+        return self
+
+    def relaunch(self):
+        """A cold launch on the same storage, as after iOS kills the app.
+
+        The stub is installed at document start rather than invoked after the
+        reload: with "keep me signed in" the app unlocks, restores the session
+        and can be talking to the model before a later evaluate() would land.
+        Everything it holds -- seeded files, the reply queue, __sent -- is reset
+        by that, exactly as a real relaunch resets a fake server's memory.
+        """
+        self.page.add_init_script("window.__fakeGitHub && window.__fakeGitHub();")
+        self.page.reload(wait_until="domcontentloaded")
         return self
 
     def setup(self, sync_pass="sync passphrase"):
