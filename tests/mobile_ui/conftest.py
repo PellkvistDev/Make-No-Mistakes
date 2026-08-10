@@ -302,6 +302,24 @@ class Phone:
         }""", passphrase)
 
 
+    def write_stored_chat(self, chat, passphrase="sync passphrase"):
+        """Write a chat into the sync store the way the OTHER device does.
+
+        The mirror of stored_chats: opens the store from scratch with only the
+        passphrase and saves through it, rather than reaching into the app. What
+        is under test is how the phone reacts to something another machine
+        wrote, so it has to arrive the way another machine's write arrives.
+        """
+        return self.page.evaluate("""async ([pass, chat]) => {
+          const AC = window.AgentCore;
+          const probe = AC.makeGitHub({ token: "ghtoken", owner: "", repo: "" });
+          const { owner, repo } = await AC.ensureSyncRepo(probe);
+          const gh = AC.makeGitHub({ token: "ghtoken", owner, repo, branch: AC.SYNC_REPO_BRANCH });
+          const { store } = await AC.openSync(gh, pass);
+          return await store.save(chat);
+        }""", [passphrase, chat])
+
+
 @pytest.fixture
 def phone(browser, app_url):
     ctx = browser.new_context(viewport={"width": 390, "height": 844})

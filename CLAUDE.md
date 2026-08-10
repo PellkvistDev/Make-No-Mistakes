@@ -84,6 +84,44 @@ What *is* done, in `withRun`:
   no matching reply, which OpenAI-compatible APIs reject outright — so without
   it the resume fails on its first call and the chat is stuck for good.
 
+## The desktop finishes turns the phone couldn't
+
+Since the phone genuinely cannot work in the background, the machine that can
+picks up after it. The phone marks the chat `interrupted` and publishes that in
+the synced chat; the desktop scans for it on its 30-second timer
+(`sync_finish_interrupted`) and finishes the turn with `pickup_note()`.
+
+The whole design is about one failure: **two devices running the same turn.**
+Both would call the model, both would commit, and each would end up holding a
+history the other has never seen. Everything below exists to make that
+impossible, so do not remove any of it as redundant.
+
+- **A grace period** (`PICKUP_GRACE_MS`, 2 min). The phone resumes its own turn
+  the instant it returns, so the desktop must not race it. Measured from the
+  chat's `updated` stamp — the phone refreshes that when it saves on being
+  backgrounded, so the clock starts when the phone went away.
+- **The index is a cache, never the decision.** `pickup_candidates` shortlists
+  from index rows; the chat body is re-read and re-checked before acting,
+  because the phone may have come back in between.
+- **The device lock is taken without `force`.** A phone that is awake is
+  finishing its own turn; a stolen lock is exactly the bad case.
+- **Chats already running here are skipped before the pull**, not after.
+  `sync_pull_chat` re-activates the session from the store, so pulling over a
+  live chat overwrites the messages the running agent is holding. The
+  `turn_lock` check after the pull is too late to prevent that.
+- **`interrupted` is always sent explicitly.** `SyncStore.save` merges, and an
+  absent field means "nothing to say" — so omitting it would leave the last
+  `True` standing and the chat would be picked up forever.
+- **The phone awaits `refreshOpenChatFromSync` before resuming.** Otherwise it
+  redoes a turn the desktop already finished.
+
+`heal_interrupted_turn` exists in both `glmcode/syncstore.py` and
+`mobile/agent-core.js` and the two must stay in step: each end adopts the
+other's histories, and a turn killed between a tool running and its result
+being recorded is unsendable until repaired. On the desktop it runs inside
+`chat_to_session`, so every route in is covered — including the manual pull
+button, which could always land such a history and fail on its first request.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by

@@ -282,6 +282,135 @@ def test_session_to_chat_is_phone_compatible():
     assert chat["desktop"]["model"] == "glm-4.7"
 
 
+# ---- finishing a turn the phone could not ---------------------------------
+# The phone runs the agent in the page, so iOS suspending the app kills the
+# request and the turn ends unfinished. It marks the chat and syncs it; this is
+# the half that lets a machine with no such problem finish the job.
+#
+# The danger throughout is two devices running the same turn: both would call
+# the model, both would commit, and each would write a history the other never
+# saw. Everything below is about making that the case that cannot happen.
+
+def test_a_finished_turn_says_so_explicitly_rather_than_staying_silent():
+    """save() merges, and absent means "nothing to say". A desktop push that
+    omitted the flag would leave the phone's stale True in place, and the chat
+    would be picked up again on the next scan, forever."""
+    sess = {"id": "c1", "title": "t", "messages": [{"role": "user", "content": "hi"}]}
+    assert syncstore.session_to_chat(sess)["interrupted"] is False
+    assert syncstore.session_to_chat(sess, interrupted=True)["interrupted"] is True
+
+
+def test_the_flag_survives_the_trip_back_to_a_session():
+    phone_chat = {"id": "c1", "title": "t", "device": "phone", "interrupted": True,
+                  "messages": [{"role": "user", "content": "hi"}]}
+    assert syncstore.chat_to_session(phone_chat)["interrupted"] is True
+    phone_chat["interrupted"] = False
+    assert syncstore.chat_to_session(phone_chat)["interrupted"] is False
+    del phone_chat["interrupted"]
+    # An older phone that has never heard of this field is not "interrupted".
+    assert syncstore.chat_to_session(phone_chat)["interrupted"] is False
+
+
+def test_an_unanswered_tool_call_is_repaired_on_the_way_in():
+    """The desktop adopting a phone history killed mid-tool would otherwise
+    send an unanswered tool_call and be rejected on its first request."""
+    chat = {"id": "c1", "device": "phone", "messages": [
+        {"role": "user", "content": "read it"},
+        {"role": "assistant", "tool_calls": [
+            {"id": "call_1", "function": {"name": "read_file", "arguments": "{}"}}]},
+    ]}
+    msgs = syncstore.chat_to_session(chat)["messages"]
+    assert msgs[-1]["role"] == "tool"
+    assert msgs[-1]["tool_call_id"] == "call_1"
+    assert msgs[-1]["content"] == syncstore.INTERRUPTED_TOOL
+
+
+def test_the_repair_matches_the_phones_own():
+    """Both ends adopt each other's histories, so these have to agree. The
+    filler goes directly after the call, since the pairing is positional."""
+    msgs = [
+        {"role": "assistant", "tool_calls": [
+            {"id": "a", "function": {"name": "read_file", "arguments": "{}"}},
+            {"id": "b", "function": {"name": "write_file", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "a", "content": "the real result"},
+    ]
+    out = syncstore.heal_interrupted_turn(msgs)
+    fillers = [m for m in out if m.get("content") == syncstore.INTERRUPTED_TOOL]
+    assert [f["tool_call_id"] for f in fillers] == ["b"]
+    assert out[1]["tool_call_id"] == "b"          # straight after the call
+    assert any(m.get("tool_call_id") == "a" and m["content"] == "the real result"
+               for m in out)
+
+
+def test_the_repair_leaves_a_clean_history_alone_and_is_idempotent():
+    clean = [{"role": "user", "content": "hi"},
+             {"role": "assistant", "content": "hello"}]
+    assert syncstore.heal_interrupted_turn(clean) == clean
+    once = syncstore.heal_interrupted_turn(
+        [{"role": "assistant", "tool_calls": [{"id": "a", "function": {}}]}])
+    assert syncstore.heal_interrupted_turn(once) == once
+
+
+def test_the_repair_survives_junk_from_the_store():
+    assert syncstore.heal_interrupted_turn([]) == []
+    assert syncstore.heal_interrupted_turn(None) == []
+    syncstore.heal_interrupted_turn(
+        [{"role": "assistant", "tool_calls": [None, {"no_id": 1}]},
+         {"role": "tool"}, "not a dict"])
+
+
+def _row(cid, device="phone", interrupted=True, age_ms=999_999):
+    return {"id": cid, "device": device, "interrupted": interrupted,
+            "updated": 10_000_000 - age_ms}
+
+
+NOW = 10_000_000
+
+
+def test_only_unfinished_phone_turns_are_picked_up():
+    rows = [
+        _row("owed"),
+        _row("done", interrupted=False),
+        _row("mine", device="desktop"),
+    ]
+    got = [r["id"] for r in syncstore.pickup_candidates(rows, now_ms=NOW)]
+    assert got == ["owed"]
+
+
+def test_a_chat_the_phone_only_just_put_down_is_left_alone():
+    """The phone resumes its own turn the moment it comes back. Stepping in
+    immediately is how both devices end up running the same turn."""
+    fresh = _row("fresh", age_ms=5_000)
+    assert syncstore.pickup_candidates([fresh], now_ms=NOW) == []
+    # ...and once it is clear the phone is not coming back:
+    old = _row("old", age_ms=syncstore.PICKUP_GRACE_MS + 1)
+    assert [r["id"] for r in syncstore.pickup_candidates([old], now_ms=NOW)] == ["old"]
+
+
+def test_a_row_with_no_timestamp_is_not_treated_as_infinitely_old():
+    """Missing is unknown, not ancient. Reading it as 0 would make every
+    unstamped row instantly eligible -- the opposite of a grace period."""
+    row = _row("nostamp")
+    row["updated"] = 0
+    assert syncstore.pickup_candidates([row], now_ms=NOW) == []
+    del row["updated"]
+    assert syncstore.pickup_candidates([row], now_ms=NOW) == []
+
+
+def test_the_longest_abandoned_chat_is_offered_first():
+    rows = [_row("recent", age_ms=200_000), _row("ancient", age_ms=900_000),
+            _row("middle", age_ms=500_000)]
+    got = [r["id"] for r in syncstore.pickup_candidates(rows, now_ms=NOW)]
+    assert got == ["ancient", "middle", "recent"]
+
+
+def test_pickup_survives_a_junk_index():
+    """The index is read from a shared store that other clients write."""
+    assert syncstore.pickup_candidates([]) == []
+    assert syncstore.pickup_candidates(None) == []
+    assert syncstore.pickup_candidates([{}], now_ms=NOW) == []
+
+
 def test_chat_to_session_round_trips_a_desktop_chat():
     sess = {
         "id": "s1", "title": "T", "cwd": "/x", "todos": [],
@@ -634,6 +763,149 @@ def test_sync_pull_chat_lands_a_phone_chat_in_a_usable_folder(monkeypatch, tmp_p
     assert seen["cwd"] == str(tmp_path), "must fall back to the active workdir"
     # the phone's empty system slot is dropped before activation
     assert [m["role"] for m in seen["messages"]] == ["user"]
+
+
+# ---- the desktop finishing what the phone could not ------------------------
+
+def _pickup_api(monkeypatch, rows, chats, *, on=True, **attrs):
+    """An Api wired to a store holding `rows` (index) and `chats` (bodies)."""
+    class Store:
+        def list(self):
+            return list(rows)
+
+        def load(self, cid):
+            return chats.get(cid)
+
+    api = _bare_api(**attrs)
+    api._cfg = types.SimpleNamespace(extra={}, sync_finish_interrupted=on)
+    monkeypatch.setattr(gui_app.Api, "_open_sync_store", lambda self: (Store(), None))
+    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pw")
+    return api
+
+
+def _abandoned(cid="p1", age_ms=999_999):
+    return {"id": cid, "device": "phone", "interrupted": True,
+            "updated": int(time.time() * 1000) - age_ms}
+
+
+def _watch(api, monkeypatch):
+    """Record the turns started AND the pulls attempted.
+
+    The pulls matter on their own: sync_pull_chat re-activates the session from
+    the store, so pulling a chat that is running here would overwrite the
+    messages the agent is holding. "No turn started" is not enough to show that
+    did not happen.
+    """
+    seen = types.SimpleNamespace(turns=[], pulls=[])
+
+    def fake_pull(self, cid):
+        seen.pulls.append(cid)
+        return {"ok": True}
+
+    monkeypatch.setattr(gui_app.Api, "sync_pull_chat", fake_pull)
+    monkeypatch.setattr(gui_app.Api, "_try_acquire_device_lock",
+                        lambda self, sid, force=False: None)
+    monkeypatch.setattr(gui_app.threading, "Thread",
+                        lambda target, args=(), daemon=None: types.SimpleNamespace(
+                            start=lambda: seen.turns.append(args)))
+    return seen
+
+
+def test_an_abandoned_phone_turn_is_finished_here(monkeypatch):
+    row = _abandoned()
+    chat = {"id": "p1", "title": "From phone", "interrupted": True}
+    api = _pickup_api(monkeypatch, [row], {"p1": chat})
+    api._chats["p1"] = types.SimpleNamespace(sid="p1", turn_lock=threading.Lock())
+    seen = _watch(api, monkeypatch)
+
+    res = api.sync_finish_interrupted()
+    assert res["picked"] == "p1"
+    assert seen.turns, "the turn was never started"
+    # It says why, in the transcript, rather than the desktop silently running
+    # tools nobody asked it to.
+    assert seen.turns[0][1] == syncstore.pickup_note()
+
+
+def test_a_chat_the_phone_already_finished_is_left_alone(monkeypatch):
+    """The index is a cache. Between listing and loading, the phone may have
+    come back and finished the turn itself."""
+    row = _abandoned()
+    stale = {"id": "p1", "title": "From phone", "interrupted": False}
+    api = _pickup_api(monkeypatch, [row], {"p1": stale})
+    api._chats["p1"] = types.SimpleNamespace(sid="p1", turn_lock=threading.Lock())
+    seen = _watch(api, monkeypatch)
+
+    assert api.sync_finish_interrupted()["picked"] is None
+    assert not seen.turns, "acted on a stale index row without re-checking the body"
+
+
+def test_a_chat_the_phone_still_holds_is_not_taken(monkeypatch):
+    """The courtesy lock, without force. A phone that is awake is finishing its
+    own turn; starting a second one is worse than the turn not finishing."""
+    api = _pickup_api(monkeypatch, [_abandoned()],
+                      {"p1": {"id": "p1", "interrupted": True}})
+    api._chats["p1"] = types.SimpleNamespace(sid="p1", turn_lock=threading.Lock())
+    seen = _watch(api, monkeypatch)
+    # Force is what steals a live lock, so the stub has to distinguish them or
+    # the test cannot tell a polite request from a rude one.
+    monkeypatch.setattr(gui_app.Api, "_try_acquire_device_lock",
+                        lambda self, sid, force=False: None if force else {"locked": True})
+
+    assert api.sync_finish_interrupted()["picked"] is None
+    assert not seen.turns, "started a turn on a chat another device is running"
+    # ...and the per-chat lock is handed back, or this chat could never be
+    # picked up again for the life of the process.
+    assert not api._chats["p1"].turn_lock.locked()
+
+
+def test_a_chat_already_running_here_is_skipped(monkeypatch):
+    api = _pickup_api(monkeypatch, [_abandoned()],
+                      {"p1": {"id": "p1", "interrupted": True}})
+    busy = types.SimpleNamespace(sid="p1", turn_lock=threading.Lock())
+    busy.turn_lock.acquire()
+    api._chats["p1"] = busy
+    seen = _watch(api, monkeypatch)
+    assert api.sync_finish_interrupted()["picked"] is None
+    assert not seen.turns
+    # The pull is the dangerous half: it re-activates the session from the
+    # store, overwriting the messages the running agent is holding.
+    assert not seen.pulls, "pulled over a chat that was mid-turn on this machine"
+
+
+def test_pickup_can_be_switched_off(monkeypatch):
+    api = _pickup_api(monkeypatch, [_abandoned()],
+                      {"p1": {"id": "p1", "interrupted": True}}, on=False)
+    # A chat that would otherwise be taken, so the switch is what stops it.
+    api._chats["p1"] = types.SimpleNamespace(sid="p1", turn_lock=threading.Lock())
+    seen = _watch(api, monkeypatch)
+    assert api.sync_finish_interrupted()["picked"] is None
+    assert not seen.turns and not seen.pulls
+
+
+def test_being_offline_is_quiet_rather_than_an_error(monkeypatch):
+    """This runs on a 30-second timer. A machine with no network must not
+    produce an error every tick."""
+    class Dead:
+        def list(self):
+            raise syncstore.SyncError("no network")
+
+    api = _bare_api()
+    api._cfg = types.SimpleNamespace(extra={}, sync_finish_interrupted=True)
+    monkeypatch.setattr(gui_app.Api, "_open_sync_store", lambda self: (Dead(), None))
+    monkeypatch.setattr(gui_app.syncstore, "crypto_available", lambda: True)
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "pw")
+    assert api.sync_finish_interrupted() == {"ok": True, "picked": None}
+
+
+def test_sync_without_a_passphrase_does_nothing(monkeypatch):
+    api = _pickup_api(monkeypatch, [_abandoned()],
+                      {"p1": {"id": "p1", "interrupted": True}})
+    api._chats["p1"] = types.SimpleNamespace(sid="p1", turn_lock=threading.Lock())
+    monkeypatch.setattr(gui_app.syncstore, "load_passphrase", lambda: "")
+    seen = _watch(api, monkeypatch)
+    assert api.sync_finish_interrupted()["picked"] is None
+    assert not seen.turns and not seen.pulls
 
 
 def test_sync_push_chat_uploads_the_saved_session(monkeypatch):

@@ -2061,6 +2061,76 @@ class Api:
             r["local"] = r.get("id") in local_ids
         return {"chats": rows}
 
+    def sync_finish_interrupted(self):
+        """Finish a turn a phone was suspended part-way through.
+
+        The phone runs the agent in the page, so iOS killing the app kills the
+        request with it. It marks the chat and syncs it; this machine has no
+        such problem, so it can pick the turn up and have the answer waiting.
+
+        One chat per call, and it returns rather than raising: this runs on a
+        timer, so it reports "nothing to do" far more often than not, and a
+        machine that is offline or has sync switched off must simply do
+        nothing rather than log an error every time round.
+        """
+        quiet = {"ok": True, "picked": None}
+        if not self._cfg.sync_finish_interrupted:
+            return quiet
+        if not (syncstore.crypto_available() and syncstore.load_passphrase()):
+            return quiet
+        store, err = self._open_sync_store()
+        if err or store is None:
+            return quiet
+        try:
+            rows = store.list()
+        except (syncstore.SyncError, githubsync.GitHubError):
+            return quiet                      # offline: try again next tick
+        for row in syncstore.pickup_candidates(rows):
+            cid = row.get("id") or ""
+            live = self._chats.get(cid)
+            # Already running here -- either this scan started it a moment ago
+            # or the user is driving it themselves.
+            if live is not None and live.turn_lock.locked():
+                continue
+            try:
+                chat = store.load(cid)
+            except (syncstore.SyncError, githubsync.GitHubError):
+                continue
+            # The index is a cache rebuilt on every save; the body is the truth.
+            # Between the list above and here, the phone may have come back and
+            # finished the turn itself.
+            if not chat or not chat.get("interrupted"):
+                continue
+            res = self._finish_one_interrupted(cid, chat)
+            if res is not None:
+                return res
+        return quiet
+
+    def _finish_one_interrupted(self, cid: str, chat: dict):
+        """Take one abandoned chat and start its turn here. None = not taken."""
+        # Pull first: this rebuilds the session locally, applies the handoff
+        # marker so the model stops imitating the phone's tools, and repairs
+        # any tool_call the phone never got to answer.
+        res = self.sync_pull_chat(cid)
+        if res.get("error"):
+            return None
+        cs = self._chats.get(cid)
+        if cs is None:
+            return None
+        if not cs.turn_lock.acquire(blocking=False):
+            return None
+        # The courtesy lock, taken WITHOUT force. If the phone is awake and
+        # holding this chat, it is finishing its own turn and this machine must
+        # not start a second one -- that is the failure this whole path exists
+        # to avoid, and it is worse than the turn not finishing at all.
+        if self._try_acquire_device_lock(cid, force=False) is not None:
+            cs.turn_lock.release()
+            return None
+        threading.Thread(
+            target=self._run_send_turn,
+            args=(cs, syncstore.pickup_note(), [], False), daemon=True).start()
+        return {"ok": True, "picked": cid, "title": chat.get("title") or ""}
+
     def sync_pull_chat(self, chat_id: str):
         """Download one synced chat into the local session store and open it."""
         store, err = self._open_sync_store()
@@ -2394,6 +2464,13 @@ class Api:
     def _scheduler_loop(self) -> None:
         from .. import scheduler as sched
         while not self._sched_stop.wait(30):
+            # Turns a phone was suspended part-way through. In its own try, and
+            # before the early `continue` below: a machine with no scheduled
+            # tasks is still the machine that can finish the phone's work.
+            try:
+                self.sync_finish_interrupted()
+            except Exception:
+                pass   # offline, or sync off — nothing to report every 30s
             try:
                 tasks = self._cfg.scheduled_tasks
                 if not tasks:

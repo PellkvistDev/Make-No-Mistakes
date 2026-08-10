@@ -341,7 +341,7 @@
     refreshOpenChatFromSync();
   }, LIVE_POLL_MS);
 
-  document.addEventListener("visibilitychange", () => {
+  document.addEventListener("visibilitychange", async () => {
     if (document.hidden) {
       // The usual way this happens is starting a turn and THEN leaving, so
       // sampling document.hidden once at the start would miss almost every
@@ -357,7 +357,11 @@
     // back on its own, so a turn still running needs a fresh one.
     if (currentRun) keepScreenAwake();
     // Back in the foreground and still unlocked: see if the desktop moved on.
-    if (session) refreshOpenChatFromSync();
+    // AWAITED, and before the resume below. The desktop may have finished this
+    // very turn while the phone was away, and starting it again here would run
+    // it twice -- two sets of tool calls, two commits, and each device holding
+    // a history the other has never seen.
+    if (session) await refreshOpenChatFromSync();
     resumeInterruptedTurn();
   });
   ["pointerdown", "keydown"].forEach((ev) => document.addEventListener(ev, armIdle, { passive: true }));
@@ -722,6 +726,12 @@
         project: carry.project || (session.repo && session.repo.full_name) || "",
         device: "phone",
         pending: session.pending || [],
+        // Published, not just kept locally: this is what lets a machine that
+        // the OS cannot suspend finish a turn this one was stopped part-way
+        // through. Sent explicitly every time, because the store merges and an
+        // absent field means "nothing to say" -- omitting it once the turn had
+        // finished would leave the last True standing.
+        interrupted: !!session.interrupted,
         messages: stripImages(session.messages || []),
         transcript: session.transcript || [],
       }));
@@ -758,6 +768,13 @@
       const data = await store.load(session.chatId);
       if (!data || !Array.isArray(data.messages)) return;
       session.syncedAt = row.updated;
+      // Taken before the length guard below. If another device finished the
+      // turn this phone abandoned, the news that it is no longer owed matters
+      // even when the history did not get longer -- otherwise the phone would
+      // resume a turn that has already been answered elsewhere.
+      if (Object.prototype.hasOwnProperty.call(data, "interrupted")) {
+        session.interrupted = !!data.interrupted;
+      }
       if (data.messages.length <= (session.messages || []).length) return;
       session.messages = data.messages;
       session.transcript = data.transcript || [];

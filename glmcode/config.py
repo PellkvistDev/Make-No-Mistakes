@@ -141,6 +141,10 @@ class Config:
     last_session_id: str = ""        # desktop app: session to resume on launch
     read_aloud: bool = False         # desktop app: auto-speak assistant replies (Kokoro TTS)
     notifications: bool = True       # desktop app: OS toasts while the window is unfocused
+    # Finish turns a phone was suspended part-way through. On by default: the
+    # phone cannot do this for itself (iOS gives web content no background
+    # execution at all), so leaving it off means the work is simply lost.
+    sync_finish_interrupted: bool = True
     reduce_effects: bool = True      # desktop app: blur-free fast theme (default); glass is opt-in
     browser_headless: bool = False   # control_chrome: hide the browser window (default: watch it)
     browser_keep_logins: bool = False  # control_chrome: persistent agent profile (logins survive restarts)
