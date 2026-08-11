@@ -226,3 +226,45 @@ def test_subagent_inherits_model_override(scripted_agent):
     finally:
         agent_mod.Agent.run_turn = real_run
     assert sub_holder["override"] == "custom/model-x"
+
+
+# --------------------------------------------------------------------- #
+# Whose key goes where.
+#
+# ZAI_API_KEY used to be consulted for EVERY provider, after the preset's own
+# variable and before the stored key. That is one provider's credential being
+# offered to another, and it is reachable two ways that both look ordinary.
+
+def test_a_typed_in_endpoint_is_not_given_the_zai_key(monkeypatch):
+    """Pick "Other", point it at a local server, leave the key box empty --
+    which a local server invites you to do -- and the z.ai key was sent there."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-zai-secret")
+    monkeypatch.delenv("MNM_API_KEY", raising=False)
+    cfg = config.Config(provider_preset="custom",
+                        base_url="http://localhost:11434/v1", api_key="")
+    assert cfg.resolve_api_key() == ""
+
+
+def test_google_does_not_fall_back_to_the_zai_key(monkeypatch):
+    """The locked-down-machine path: `setx` is blocked by policy, so
+    GOOGLE_API_KEY never persists. The stored api_key is the right answer and
+    this fallback used to win ahead of it."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-zai-secret")
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    cfg = config.Config(provider_preset="google", api_key="sk-google-stored")
+    assert cfg.resolve_api_key() == "sk-google-stored"
+
+
+def test_an_install_predating_presets_still_finds_its_key(monkeypatch):
+    """Why the fallback exists at all: no preset was ever chosen, and the key
+    is sitting in ZAI_API_KEY under a name no migration could reach."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-from-2025")
+    cfg = config.Config(provider_preset="", base_url="", api_key="")
+    assert cfg.resolve_api_key() == "sk-from-2025"
+
+
+def test_a_chosen_provider_still_prefers_its_own_variable(monkeypatch):
+    monkeypatch.setenv("ZAI_API_KEY", "sk-zai")
+    monkeypatch.setenv("GOOGLE_API_KEY", "sk-google")
+    cfg = config.Config(provider_preset="google")
+    assert cfg.resolve_api_key() == "sk-google"

@@ -130,6 +130,14 @@ def find_provider(cfg: "Config", name: str) -> dict | None:
     # otherwise silently fall back and change model mid-conversation.
     if name == BUILTIN_PROVIDER_NAME:
         return builtin_provider(cfg)
+    # Same problem, one step later: a provider typed in by hand is named after
+    # its host ("localhost:11434"), and gains a proper label the day it becomes
+    # a preset. Chats saved in between still refer to it by host. Matching that
+    # against the primary's own host resolves them, and does so for any future
+    # preset that adopts a URL people were already typing.
+    host = (cfg.base_url or "").split("//")[-1].split("/")[0]
+    if host and name == host:
+        return builtin_provider(cfg)
     return None
 
 
@@ -247,16 +255,39 @@ class Config:
         if not key:
             found = _providers.preset_from_base_url(self.base_url)
             key = found["key"] if found else ""
-        return _providers.env_var_for(key) or "ZAI_API_KEY"
+        if not key:
+            # Nothing identifiable: a config from before presets, whose key is
+            # in ZAI_API_KEY under a name no migration could reach.
+            return "ZAI_API_KEY"
+        # "" for a preset that takes no key (Ollama). It must NOT fall through
+        # to ZAI_API_KEY -- that would read a z.ai key and send it to a server
+        # on this machine, which is the leak this function used to have by a
+        # different route.
+        return _providers.env_var_for(key)
 
     def resolve_api_key(self) -> str:
-        # The preset's own variable first, then ZAI_API_KEY. The fallback is
-        # what stops an existing install losing its key the moment presets
-        # arrive: it was stored under the old name and there is no migration
-        # that could reach an environment variable.
-        return (os.environ.get(self.provider_env_var(), "").strip()
-                or os.environ.get("ZAI_API_KEY", "").strip()
-                or self.api_key)
+        var = self.provider_env_var()
+        key = os.environ.get(var, "").strip() if var else ""
+        if key:
+            return key
+        # ZAI_API_KEY is a MIGRATION PATH, not a general fallback, and the
+        # difference matters: it used to be consulted for every provider, so
+        # choosing one could hand it another's key. Pick "Other", point it at
+        # a local Ollama or an endpoint you typed, leave the key box empty as
+        # a local server invites you to -- and the z.ai key went to that
+        # endpoint. Same for Google on a machine where `setx` is blocked by
+        # policy: GOOGLE_API_KEY never persists, this fallback fires ahead of
+        # the stored api_key, and requests fail 401 holding the wrong key.
+        #
+        # An empty provider_preset is the marker for a config written before
+        # presets existed, whose key really is sitting in ZAI_API_KEY under a
+        # name nothing could migrate. Once a provider has been chosen
+        # explicitly, only its own variable and the stored key count.
+        if not self.provider_preset:
+            legacy = os.environ.get("ZAI_API_KEY", "").strip()
+            if legacy:
+                return legacy
+        return self.api_key
 
     def resolve_tavily_key(self) -> str:
         return os.environ.get("TAVILY_API_KEY", "").strip() or self.tavily_api_key

@@ -988,9 +988,12 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
     </div>
     <h2 id="key-title">Welcome to Make No Mistakes</h2>
-    <p id="key-lede">Choose where the model runs. Both of the first two have a
-       free tier and need no card. You can add more, or change this, at any
-       time.</p>
+    <!-- Deliberately counts nothing. This used to say "both of the first two
+         have a free tier", which was a fact about the list rather than about
+         any provider, and went stale the moment a third free one was added.
+         Each card states its own terms, where they cannot drift. -->
+    <p id="key-lede">Choose where the model runs. You can add more, or change
+       this, at any time.</p>
     <!-- Drawn from the provider catalogue rather than written out here, so the
          desktop and the phone offer the same options in the same words. -->
     <div id="prov-choices" class="prov-choices" role="radiogroup"
@@ -1004,6 +1007,9 @@
              placeholder="Model name, exactly as the provider spells it"
              aria-label="Model name">
     </div>
+    <!-- Models found on a local server, so nobody has to type one exactly as
+         Ollama spells it. Filled by loadLocalModels(). -->
+    <div id="prov-local" class="prov-local" aria-live="polite" hidden></div>
     <input id="key-input" class="text-input" type="password"
            placeholder="Paste your API key" aria-label="API key">
     <p id="key-error" class="prov-error" role="alert" hidden></p>

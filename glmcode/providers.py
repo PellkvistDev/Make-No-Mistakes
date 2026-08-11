@@ -20,6 +20,12 @@ they would be annoyed to discover afterwards.
 _ENV_VARS = {
     "zai": "ZAI_API_KEY",
     "google": "GOOGLE_API_KEY",
+    # Ollama has no key and no account, so it gets no variable. Deliberately
+    # "" rather than absent: env_var_for() returns "" either way, but a
+    # provider that is *known* to need no key is a different thing from one
+    # nobody has thought about, and config.provider_env_var() relies on the
+    # difference to avoid falling back to ZAI_API_KEY for it.
+    "ollama": "",
     # Typed in by hand, so there is no vendor to name it after. Deliberately
     # not ZAI_API_KEY: an endpoint someone pasted is not z.ai, and reusing that
     # name is how the config ended up believing everything was.
@@ -92,6 +98,49 @@ PRESETS = [
             "Click Get API key, then Create API key.",
             "Copy it and paste it below.",
         ],
+    },
+    {
+        "key": "ollama",
+        "label": "Ollama (on this PC)",
+        # Ollama serves an OpenAI-compatible API on this path, so it needs no
+        # more special-casing than any hosted provider: same /chat/completions,
+        # same tool calls, no client of its own.
+        "base_url": "http://localhost:11434/v1",
+        # Empty on purpose, and the only preset for which that is true. Which
+        # models exist depends on what has been pulled onto this machine, so
+        # naming one here would be a guess -- and a guess that fails at the
+        # first request rather than at setup. The models are read from the
+        # running server instead (Api.local_models).
+        "model": "",
+        "vision_model": "",
+        "models": [],
+        "free_models": [],
+        "unsure_models": [],
+        # No key, no account. env_var_for() returns "" and setup does not ask.
+        "env_var": "",
+        "needs_key": False,
+        # Nothing to send them to for a key; the link is the download.
+        "key_url": "https://ollama.com/download",
+        "blurb": "Runs on your own machine. No account, no key, no limits.",
+        # The one genuinely unconditional "free" in this file: there is no
+        # quota to run out of, no tier to be moved off, and no policy that can
+        # change next month, because there is no company in the loop.
+        "free": "Free, always, and your code never leaves this PC.",
+        # Said because it is the real trade and it is not obvious to someone
+        # comparing three "free" options: local models are much weaker than
+        # the hosted ones, and the machine has to be up to it.
+        "caveat": (
+            "Quality depends on your hardware. A small local model will not "
+            "match the hosted options above at hard coding work."
+        ),
+        "steps": [
+            "Install Ollama from ollama.com and let it start.",
+            "Pull a coding model, e.g.  ollama pull qwen2.5-coder",
+            "Come back here — it finds what you have installed.",
+        ],
+        # Offered when the server is up but empty, so the fix is a command to
+        # copy rather than a question about which model to choose.
+        "suggest_pull": "qwen2.5-coder",
     },
 ]
 
@@ -209,6 +258,13 @@ def choices() -> list:
         c = {k: p[k] for k in
              ("key", "label", "base_url", "model", "models", "key_url",
               "blurb", "free", "caveat", "steps")}
+        # Whether to ask for a key at all, and whether the models have to be
+        # read off a running server instead of listed here. Both default to
+        # the hosted-provider answer, so adding an ordinary preset needs
+        # neither field.
+        c["needs_key"] = p.get("needs_key", True)
+        c["local"] = is_local(p["base_url"])
+        c["suggest_pull"] = p.get("suggest_pull", "")
         # Per model, not just per provider: a provider is not simply free or
         # paid. Three states rather than two, because "I do not know" is the
         # honest answer for some of them and pretending otherwise is how a
@@ -232,6 +288,9 @@ def choices() -> list:
         "free": "",
         "caveat": "",
         "model_options": [],
+        "needs_key": True,
+        "local": False,
+        "suggest_pull": "",
         "steps": [
             "Paste the API's base URL (the part ending in /v1 or similar).",
             "Paste a key if it needs one — local servers usually do not.",

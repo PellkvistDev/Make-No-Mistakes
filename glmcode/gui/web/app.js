@@ -4671,10 +4671,69 @@ function provPick(key) {
   // option someone might mind, and this app sends source code.
   if (c.caveat) parts.push(`<p class="prov-caveat">${esc(c.caveat)}</p>`);
   $("prov-detail").innerHTML = parts.join("");
-  $("key-store-note").textContent = custom
-    ? "Stored as the MNM_API_KEY user environment variable on this PC."
-    : `Stored as a user environment variable on this PC.`;
+  // A provider that takes no key must not show a key box -- an empty field
+  // above a Start button reads as something you have failed to fill in.
+  $("key-input").hidden = c.needs_key === false;
+  $("key-store-note").textContent = c.needs_key === false
+    ? "Nothing is stored, and nothing leaves this PC."
+    : custom ? "Stored as the MNM_API_KEY user environment variable on this PC."
+      : "Stored as a user environment variable on this PC.";
   $("key-error").hidden = true;
+  // A local server can be asked what it has, which beats asking the person in
+  // front of it to type a model name exactly as Ollama spells it.
+  $("prov-local").hidden = !c.local;
+  // Cleared unconditionally: only the local probe ever disables Start, and
+  // leaving it disabled after clicking away from Ollama would strand someone
+  // on a provider that is perfectly ready to go.
+  $("key-save").disabled = false;
+  if (c.local) loadLocalModels(c);
+}
+
+/* ---- what the local server actually has ------------------------------- *
+ * Three outcomes worth telling apart, because the fix differs: not running,
+ * running with nothing pulled, and ready. The old route through "Other" gave
+ * the same blank box for all three. */
+let localModel = "";
+
+async function loadLocalModels(c) {
+  const box = $("prov-local");
+  localModel = "";
+  box.innerHTML = '<p class="row-sub">Looking for it on this PC…</p>';
+  let res = null;
+  try { res = await api().local_models(c.key); } catch (e) { res = null; }
+  // Someone can click another card while the probe is in flight.
+  if (provChosen !== c.key) return;
+
+  // Nothing to start with, so Start does not pretend otherwise. It used to
+  // stay live and answer with an error, which makes the button the thing that
+  // tells you the state -- after you have already committed to it.
+  if (!res || !res.running) {
+    $("key-save").disabled = true;
+    box.innerHTML = '<p class="prov-local-none">Not running on this PC yet — '
+      + 'install it from the link above, then reopen this window.</p>';
+    return;
+  }
+  if (!res.models.length) {
+    $("key-save").disabled = true;
+    const pull = c.suggest_pull || "qwen2.5-coder";
+    box.innerHTML = '<p class="prov-local-none">Running, but no models pulled '
+      + 'yet. In a terminal:</p>'
+      + `<p class="prov-pull mono">ollama pull ${esc(pull)}</p>`;
+    return;
+  }
+  $("key-save").disabled = false;
+  box.innerHTML = '<p class="prov-local-lede">Found on this PC — pick one:</p>'
+    + '<div class="prov-local-models">' + res.models.map((m, i) =>
+      `<button type="button" class="prov-model-btn${i ? "" : " on"}"
+               data-model="${esc(m)}">${esc(m)}</button>`).join("") + "</div>";
+  localModel = res.models[0];
+  box.querySelectorAll(".prov-model-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      localModel = b.dataset.model;
+      box.querySelectorAll(".prov-model-btn")
+        .forEach((o) => o.classList.toggle("on", o === b));
+    });
+  });
 }
 
 function renderProvChoices() {
@@ -4764,9 +4823,11 @@ $("key-save").addEventListener("click", async () => {
   try {
     // The fallback key, not "zai": nothing has chosen z.ai at this point, and
     // defaulting to it is how a Google key ended up in ZAI_API_KEY.
+    // The model comes from the local server's own list when there is one, and
+    // from the typed box otherwise.
     res = await api().save_setup(provChosen || PROV_FALLBACK.key, key,
                                  $("prov-base-url").value.trim(),
-                                 $("prov-model").value.trim());
+                                 localModel || $("prov-model").value.trim());
   } catch (e) {
     res = null;
   }

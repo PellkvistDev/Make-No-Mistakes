@@ -891,6 +891,31 @@ class Api:
                 out.append({"preset": key, "env_var": var})
         return out
 
+    @staticmethod
+    def local_models(preset: str = "ollama"):
+        """What is installed on the local server right now.
+
+        Setup asks this instead of asking the user. Which models exist depends
+        on what has been pulled onto this machine, so there is no list that
+        could live in the catalogue -- and making someone type a model name
+        exactly as Ollama spells it is precisely the work worth removing. The
+        three outcomes are different enough to be worth telling apart:
+        not running, running but empty, and ready.
+        """
+        import requests as _requests
+        p = providers_mod.preset(preset)
+        if not p or not providers_mod.is_local(p["base_url"]):
+            return {"error": "not a local provider"}
+        host = p["base_url"].rsplit("/v1", 1)[0]
+        try:
+            # Short: this runs while someone is looking at the setup screen,
+            # and "no server" is the common answer, not an exceptional one.
+            r = _requests.get(f"{host}/api/tags", timeout=1.5)
+            models = [m["name"] for m in (r.json().get("models") or [])]
+        except Exception:
+            return {"running": False, "models": []}
+        return {"running": True, "models": sorted(models)}
+
     def save_setup(self, preset: str, api_key: str, base_url: str = "",
                    model: str = ""):
         """First run: record which provider was picked, and store its key.
@@ -902,8 +927,14 @@ class Api:
         api_key = (api_key or "").strip()
         known = providers_mod.preset(preset)
         if known:
-            base_url, model = known["base_url"], known["model"]
-            vision = known["vision_model"]
+            base_url = known["base_url"]
+            # A preset normally names its model. Ollama cannot: which models
+            # exist depends on what has been pulled here, so the page sends
+            # back one read off the running server.
+            model = known["model"] or (model or "").strip()
+            if not model:
+                return {"error": f"choose a {known['label']} model"}
+            vision = known["vision_model"] or model
         else:
             # "Other": the endpoint and model are the whole point, so they are
             # required here in a way a preset's never are.
@@ -922,7 +953,8 @@ class Api:
         # someone to the registry to copy out a key the app can already read.
         env_var = providers_mod.env_var_for(preset)
         reused = bool(env_var and os.environ.get(env_var, "").strip())
-        if known and not api_key and not reused:
+        needs_key = known.get("needs_key", True) if known else False
+        if needs_key and not api_key and not reused:
             return {"error": f"paste your {known['label']} API key"}
         self._cfg.provider_preset = preset
         # Set here and nowhere else: getting to the end of this method is the
@@ -932,7 +964,15 @@ class Api:
         self._cfg.model = model
         self._cfg.vision_model = vision
         persisted = False
-        if api_key:
+        if not needs_key and not api_key:
+            # A keyless provider must not inherit the previous one's key.
+            # cfg.api_key is the "setx was blocked" fallback and would still be
+            # holding a hosted key from an earlier setup -- which resolve_api_key
+            # would then hand to a server on this machine. A placeholder, since
+            # the request still carries an Authorization header and local
+            # servers ignore what is in it.
+            self._cfg.api_key = "local"
+        elif api_key:
             try:
                 persisted = persist_env_var(self._cfg.provider_env_var(), api_key)
             except Exception:
