@@ -332,6 +332,58 @@ THINKING_MODES = ("low", "medium", "high", "max")
 THINKING_REFINE_PASSES = {"low": 0, "medium": 0, "high": 1, "max": 3}
 
 
+def _model_is_stale(model: str, preset: dict, listed: set, retired: set,
+                    known: set) -> bool:
+    """Is this model one nothing still recommends?
+
+    In order of authority: a model the vendor is known to refuse to new keys is
+    stale whatever else says; failing that, the endpoint's own listing decides;
+    and with neither, the catalogue is all there is.
+    """
+    if not model:
+        return False
+    if model in retired:
+        return True
+    if listed:
+        return model not in listed
+    return model not in known
+
+
+def _retire_stale_model(cfg: "Config") -> None:
+    """Move a saved config off a model its own preset has dropped.
+
+    Updating a preset's default only ever changed what a NEW install picks.
+    Anyone already set up kept the model in their config file -- so every new
+    chat went on choosing gemini-2.5-flash long after the preset stopped
+    recommending it and Google stopped serving it to new keys. The fix has to
+    reach the config, not just the catalogue.
+
+    Deliberately narrow. It fires only when the provider is a known preset AND
+    the saved model is absent from BOTH the preset's list and whatever the
+    endpoint last said it serves -- i.e. nothing that knows anything still
+    lists it. A model typed in by hand, or one the provider confirms exists, is
+    left alone: overruling a deliberate choice is worse than the staleness.
+    """
+    from . import providers as _providers
+    p = _providers.preset(cfg.provider_preset)
+    if not p or not cfg.model:
+        return
+    known = set(p.get("chat_models") or p.get("models") or [])
+    listed = set(cfg.available_models or [])
+    retired = set(p.get("retired_models") or [])
+    if not _model_is_stale(cfg.model, p, listed, retired, known):
+        return
+    replacement = p.get("model") or ""
+    if not replacement or replacement == cfg.model:
+        return
+    cfg.model = replacement
+    # The vision model rides along only if it is stale by the SAME rule -- it
+    # is usually the identical string, and leaving it behind would point image
+    # work at the model that was just retired.
+    if _model_is_stale(cfg.vision_model, p, listed, retired, known):
+        cfg.vision_model = p.get("vision_model") or replacement
+
+
 def load_config() -> Config:
     cfg = Config()
     data = {}
@@ -351,6 +403,7 @@ def load_config() -> Config:
     # than the one setup_done exists to fix.
     if "setup_done" not in data:
         cfg.setup_done = CONFIG_FILE.exists()
+    _retire_stale_model(cfg)
     if cfg.mode not in PERMISSION_MODES:
         cfg.mode = "ask"
     # Configs written before thinking_mode existed only had the boolean

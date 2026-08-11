@@ -88,6 +88,11 @@ class RateLimiter:
             time.sleep(delay)
 
 
+def _raise_if_cancelled(cancel) -> None:
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
+
+
 class ZaiClient:
     def __init__(self, api_key: str, base_url: str, rate_limiter: Optional[RateLimiter] = None):
         self.api_key = api_key
@@ -155,9 +160,17 @@ class ZaiClient:
                 wait = round(random.uniform(base / 2, base), 1)
                 if on_status:
                     on_status(f"retrying in {wait}s ({last_err})")
-                time.sleep(wait)
+                self._sleep_unless_cancelled(wait, cancel)
             if self.rate_limiter:
                 self.rate_limiter.wait()
+            # The last gate before a request goes out, and the only one that
+            # used to be missing: the cancel check lived inside the loop
+            # reading a response body, which is not running while the client is
+            # asleep between attempts -- exactly where a 429 leaves it. So Stop
+            # during a rate-limit backoff did nothing and the client carried on
+            # hammering the API. Placed after the rate limiter because that
+            # blocks too, and both waits can run for tens of seconds.
+            _raise_if_cancelled(cancel)
             try:
                 return self._stream_once(payload, on_content, on_reasoning, cancel)
             except ApiError as e:
@@ -171,6 +184,21 @@ class ZaiClient:
         raise ApiError(0, f"gave up after {MAX_RETRIES} attempts: {last_err}")
 
     # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _sleep_unless_cancelled(seconds: float, cancel) -> None:
+        """Wait, but stay interruptible.
+
+        A backoff can be 30 seconds, and a single time.sleep through it means
+        Stop is not noticed until it ends -- by which point another request has
+        usually gone out. Waiting on the Event itself is what makes the button
+        take effect immediately rather than eventually.
+        """
+        if cancel is None:
+            time.sleep(seconds)
+            return
+        if cancel.wait(seconds):    # returns True the moment it is set
+            raise Cancelled()
 
     def _portable(self, messages: list) -> list:
         """History minus anything this endpoint will not recognise.

@@ -510,3 +510,52 @@ def test_the_note_follows_the_route_the_agent_actually_took(tmp_path):
         has_note = "do not call view_image" in \
             ag.messages[0]["content"].lower().replace("\n", " ")
         assert has_note is expected, base
+
+
+# ------------------------------------------- a saved config goes stale too
+
+def _saved(tmp_path, monkeypatch, data):
+    monkeypatch.setattr(config_mod, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(config_mod, "CONFIG_FILE", tmp_path / "config.json")
+    import json
+    (tmp_path / "config.json").write_text(json.dumps(data))
+    return config_mod.load_config()
+
+
+def test_an_install_pinned_to_a_retired_model_is_moved_off_it(tmp_path, monkeypatch):
+    """Changing a preset's default only changed what a NEW install picks.
+    Anyone already set up kept gemini-2.5-flash in their config, so every new
+    chat went on choosing it long after Google stopped serving it."""
+    cfg = _saved(tmp_path, monkeypatch, {
+        "provider_preset": "google", "model": "gemini-2.5-flash",
+        "vision_model": "gemini-2.5-flash",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"})
+    from glmcode import providers
+    assert cfg.model == providers.preset("google")["model"]
+    assert cfg.vision_model == providers.preset("google")["vision_model"]
+
+
+def test_a_model_the_preset_still_lists_is_left_alone(tmp_path, monkeypatch):
+    from glmcode import providers
+    retired = set(providers.preset("google").get("retired_models") or [])
+    keep = [m for m in providers.preset("google")["chat_models"]
+            if m not in retired][-1]
+    cfg = _saved(tmp_path, monkeypatch,
+                 {"provider_preset": "google", "model": keep})
+    assert cfg.model == keep
+
+
+def test_a_model_the_provider_confirms_it_serves_is_left_alone(tmp_path, monkeypatch):
+    """The endpoint outranks the catalogue here as everywhere else."""
+    cfg = _saved(tmp_path, monkeypatch, {
+        "provider_preset": "google", "model": "gemini-experimental-x",
+        "available_models": ["gemini-experimental-x"]})
+    assert cfg.model == "gemini-experimental-x"
+
+
+def test_a_hand_typed_provider_is_never_second_guessed(tmp_path, monkeypatch):
+    """Overruling a deliberate choice is worse than the staleness."""
+    cfg = _saved(tmp_path, monkeypatch, {
+        "provider_preset": "custom", "model": "whatever-i-typed",
+        "base_url": "https://example.test/v1"})
+    assert cfg.model == "whatever-i-typed"
