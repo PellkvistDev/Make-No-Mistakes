@@ -432,3 +432,51 @@ def test_no_show_all_button_when_there_is_nothing_held_back(desktop):
     desktop.page.wait_for_timeout(250)
     assert desktop.page.query_selector('#model-menu [data-a="all"]') is None
     assert desktop.errors == []
+
+
+def test_adding_an_api_offers_the_presets_rather_than_a_blank_form(desktop):
+    """Adding a second API meant knowing its base URL and how the vendor
+    spells its models. The app already knows both."""
+    desktop.boot(providers={"providers": [], "chat_provider": "", "chat_model": ""},
+                 provider_choices=CHOICES)
+    desktop.page.click("#settings-btn")
+    desktop.page.wait_for_timeout(200)
+    # APIs live on the Models tab; the sheet opens on General.
+    desktop.page.click('.settings-tab-btn[data-tab="models"]')
+    desktop.page.wait_for_timeout(200)
+    desktop.page.click("#api-add")
+    desktop.page.wait_for_timeout(400)
+
+    labels = desktop.page.eval_on_selector_all(
+        "#api-presets .api-preset", "els => els.map(e => e.textContent)")
+    assert any("Google AI Studio" in t for t in labels), labels
+
+    # Clicking one fills the endpoint and the model names.
+    desktop.page.click("#api-presets .api-preset >> nth=1")
+    assert desktop.page.input_value("#prov-url").endswith("/v1beta/openai")
+    assert "gemini" in desktop.page.input_value("#prov-models")
+    assert desktop.errors == []
+
+
+def test_an_api_already_set_up_is_not_offered_again(desktop):
+    """Adding it twice makes a second entry on the same endpoint with no key."""
+    desktop.boot(providers={"providers": [
+        {"name": "Google AI Studio", "builtin": True,
+         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+         "models": ["gemini-3.6-flash"], "all_models": ["gemini-3.6-flash"],
+         "local": False, "tier": "", "key_url": "", "has_key": True}],
+        "chat_provider": "Google AI Studio", "chat_model": "gemini-3.6-flash"},
+        provider_choices=CHOICES)
+    desktop.page.evaluate("() => populateModelPicker()")
+    desktop.page.click("#settings-btn")
+    desktop.page.wait_for_timeout(200)
+    # APIs live on the Models tab; the sheet opens on General.
+    desktop.page.click('.settings-tab-btn[data-tab="models"]')
+    desktop.page.wait_for_timeout(200)
+    desktop.page.click("#api-add")
+    desktop.page.wait_for_timeout(400)
+
+    labels = desktop.page.eval_on_selector_all(
+        "#api-presets .api-preset", "els => els.map(e => e.textContent)")
+    assert not any("Google" in t for t in labels), labels
+    assert desktop.errors == []

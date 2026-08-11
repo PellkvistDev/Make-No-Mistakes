@@ -3068,7 +3068,42 @@ function closeApiForm() {
   }
 }
 
+/* One click per known provider, instead of remembering a base URL and how a
+ * vendor spells its models. Drawn from the same catalogue as the first screen,
+ * so the two cannot offer different things. */
+async function renderApiPresets() {
+  const box = $("api-presets");
+  if (!box) return;
+  let res = null;
+  try { res = await api().provider_choices(); } catch (e) { res = null; }
+  const choices = (res && res.choices) || [];
+  const configured = new Set((providersCache?.providers || [])
+    .map((p) => (p.base_url || "").replace(/\/+$/, "").toLowerCase()));
+  // Anything already set up is left out: it is on the list above, and adding
+  // it twice creates a second entry with the same endpoint and no key.
+  const offer = choices.filter((c) => c.base_url
+    && !configured.has(c.base_url.replace(/\/+$/, "").toLowerCase()));
+  box.hidden = offer.length === 0;
+  box.innerHTML = "";
+  for (const c of offer) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "api-preset";
+    b.textContent = "+ " + c.label;
+    b.addEventListener("click", () => {
+      $("prov-name").value = c.label;
+      $("prov-url").value = c.base_url;
+      $("prov-models").value = (c.model_options || []).map((m) => m.name).join(", ");
+      $("prov-key").placeholder = c.needs_key === false
+        ? "No key needed" : `Paste your ${c.label} key`;
+      $("prov-key").focus();
+    });
+    box.appendChild(b);
+  }
+}
+
 $("api-add").addEventListener("click", () => {
+  renderApiPresets();
   const ps = providersCache?.providers || [];
   const builtin = ps.find((p) => p.builtin);
   // First time here with nothing configured at all: pre-fill the provider

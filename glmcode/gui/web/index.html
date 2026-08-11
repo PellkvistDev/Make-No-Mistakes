@@ -660,6 +660,10 @@
         <button id="api-add" class="btn btn-primary">Add API…</button>
       </div>
       <div id="api-form" class="provider-form" hidden>
+        <!-- The same catalogue the first screen uses. Adding a second API
+             meant knowing its base URL and its model names by heart; these are
+             the ones the app already knows. -->
+        <div id="api-presets" class="api-presets" hidden></div>
         <input id="prov-name" class="text-input" placeholder="Name (e.g. OpenRouter)">
         <input id="prov-url" class="text-input" placeholder="Base URL (OpenAI-compatible), e.g. https://openrouter.ai/api/v1">
         <input id="prov-key" class="text-input" type="password" placeholder="API key (leave empty for local servers)">

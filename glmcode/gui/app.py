@@ -2190,12 +2190,14 @@ class Api:
                              "and restart, or type the keys into the phone by hand."}
         token_gh = self._gh_token() or ""
         passphrase = syncstore.load_passphrase() or ""
+        phone_providers = pairing.providers_for_phone(all_providers(self._cfg))
         payload = pairing.build_payload(
             model_key=self._cfg.resolve_api_key(),
             base_url=self._cfg.base_url,
             model=self._cfg.model,
             github_token=token_gh,
             sync_passphrase=passphrase,
+            providers=phone_providers,
         )
         if len(payload) <= 2:   # only v + exp: nothing worth sending
             return {"error": "Nothing to send yet — add your model key first."}
@@ -2209,7 +2211,8 @@ class Api:
             return {"error": f"Couldn't build the pairing code: {e}"}
         return {"code": code, "svg": svg, "ttl": pairing.PAIR_TTL_SECONDS,
                 "includes": {"model_key": bool(self._cfg.resolve_api_key()),
-                             "github": bool(token_gh), "sync": bool(passphrase)}}
+                             "github": bool(token_gh), "sync": bool(passphrase),
+                             "providers": len(phone_providers)}}
 
     # -- Cross-device session sync (shared with the phone app) --------------- #
     #
