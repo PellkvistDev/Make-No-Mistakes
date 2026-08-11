@@ -191,7 +191,26 @@ def _project_memory(cwd: Path) -> str:
     return ""
 
 
-def build_system_prompt(cwd: Path | None = None, model: str = "") -> str:
+SEES_IMAGES_NOTE = """
+
+# Images you have already been given
+Images the user attaches arrive in this conversation as images — you are
+looking at them right now. Do NOT call view_image on an image that is already
+in the conversation: you have it, the call costs a round trip and a permission
+prompt, and its answer is a worse copy of what you can see. view_image is only
+for an image file on disk that has NOT been shown to you — one you generated,
+screenshotted, or found while working."""
+
+
+def build_system_prompt(cwd: Path | None = None, model: str = "",
+                        sees_images: bool = False) -> str:
+    """`sees_images`: this model is being handed images directly.
+
+    Without saying so, a multimodal model reads the tool list, sees view_image,
+    reads "read it yourself before responding: ... view_image for images", and
+    calls it on a picture already in front of it -- correctly following the
+    instructions, which were written when nothing could see.
+    """
     cwd = cwd or Path.cwd()
     env = (
         "\n\n# Environment\n"
@@ -212,8 +231,8 @@ def build_system_prompt(cwd: Path | None = None, model: str = "") -> str:
         f"and nothing more confident than that.\n"
         f"{_git_info(cwd)}"
     )
-    return (SYSTEM_PROMPT + env + _project_map(cwd) + _user_memory()
-            + _project_memory(cwd))
+    return (SYSTEM_PROMPT + (SEES_IMAGES_NOTE if sees_images else "")
+            + env + _project_map(cwd) + _user_memory() + _project_memory(cwd))
 
 
 def conversational_project_context(cwd: Path | None = None) -> str:
