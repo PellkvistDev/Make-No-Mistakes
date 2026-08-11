@@ -362,3 +362,29 @@ def test_an_empty_server_shows_the_command_that_fixes_it(desktop):
     assert "ollama pull qwen2.5-coder" in desktop.page.inner_text("#prov-local")
     assert desktop.page.is_disabled("#key-save")
     assert desktop.errors == []
+
+
+def test_the_model_picker_shows_every_model_the_provider_offers(desktop):
+    """Connecting Google gave a picker with one entry: the UI kept only the
+    first model of the built-in provider, because that row used to be
+    [chat, vision] and the vision model is not a chat choice."""
+    desktop.boot(providers={
+        "providers": [{"name": "Google AI Studio", "builtin": True,
+                       "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+                       "models": ["gemini-2.5-flash", "gemini-2.5-flash-lite",
+                                  "gemini-2.5-pro"],
+                       "local": False, "tier": "free", "key_url": "",
+                       "has_key": True}],
+        "chat_provider": "Google AI Studio",
+        "chat_model": "gemini-2.5-flash", "chat_tier": "free"})
+    # The picker is filled from api().providers(), which the chip reads rather
+    # than fetching itself.
+    desktop.page.evaluate("() => populateModelPicker()")
+    desktop.page.wait_for_timeout(300)
+    desktop.page.click("#model-chip")
+    desktop.page.wait_for_timeout(200)
+
+    shown = desktop.page.eval_on_selector_all(
+        "#model-menu .model-opt .model-opt-name", "els => els.map(e => e.textContent)")
+    assert shown == ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"]
+    assert desktop.errors == []

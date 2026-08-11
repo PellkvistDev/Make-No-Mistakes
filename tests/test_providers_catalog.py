@@ -324,3 +324,63 @@ def test_a_trailing_slash_does_not_lose_the_provider():
     """Base URLs are stored rstrip'd in some paths and not others."""
     g = providers.preset("google")["base_url"]
     assert providers.model_tier(g + "/", "gemini-2.5-flash") == "free"
+
+
+# ---- what the model picker is given ---------------------------------------
+#
+# Connecting Google produced a picker with one entry. builtin_provider()
+# reported [model, vision_model] and the UI kept the first, so every other
+# model on the same key was unreachable without adding the provider again by
+# hand -- a list the catalogue already had.
+
+def test_the_builtin_provider_offers_every_model_on_its_key():
+    cfg = _cfg(provider_preset="google",
+               base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+               model="gemini-2.5-flash", vision_model="gemini-2.5-flash")
+    models = cfgmod.builtin_provider(cfg)["models"]
+    assert "gemini-2.5-flash" in models
+    assert "gemini-2.5-pro" in models
+    assert "gemini-2.5-flash-lite" in models
+
+
+def test_the_vision_model_is_not_offered_as_something_to_code_with():
+    """z.ai's vision model is routed to automatically for images. Choosing it
+    to hold a coding conversation in is a mistake the picker should not
+    invite -- which is what the old slice(0, 1) was really protecting."""
+    cfg = _cfg(provider_preset="zai", base_url="https://api.z.ai/api/paas/v4",
+               model="glm-4.7-flash", vision_model="glm-4.6v-flash")
+    models = cfgmod.builtin_provider(cfg)["models"]
+    assert models == ["glm-4.7-flash"]
+
+
+def test_a_model_set_by_hand_stays_selectable():
+    """It is in use. Dropping it because the catalogue does not list it would
+    take the current chat's model out of its own picker."""
+    cfg = _cfg(provider_preset="google",
+               base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+               model="gemini-3.0-experimental")
+    models = cfgmod.builtin_provider(cfg)["models"]
+    assert models[0] == "gemini-3.0-experimental"
+    assert "gemini-2.5-pro" in models
+
+
+def test_an_unknown_endpoint_offers_what_it_was_configured_with():
+    cfg = _cfg(provider_preset="custom", base_url="https://example.test/v1",
+               model="some-model")
+    assert cfgmod.builtin_provider(cfg)["models"] == ["some-model"]
+
+
+def test_setup_offers_the_same_models_the_picker_will():
+    """The two screens read the same list, or you choose one thing at setup
+    and find another afterwards."""
+    google = next(c for c in providers.choices() if c["key"] == "google")
+    names = [m["name"] for m in google["model_options"]]
+    assert names == providers.chat_models(
+        "https://generativelanguage.googleapis.com/v1beta/openai")
+
+
+def test_flash_lite_is_offered_rather_than_quietly_dropped():
+    """It was left out on an unverified claim about tool-call streaming."""
+    names = [m["name"] for m in
+             next(c for c in providers.choices() if c["key"] == "google")["model_options"]]
+    assert "gemini-2.5-flash-lite" in names
