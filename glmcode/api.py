@@ -97,6 +97,8 @@ class ZaiClient:
         # -- the name is all that is left of that.
         from . import providers as _providers
         self.supports_thinking = _providers.supports(self.base_url, "thinking")
+        self.supports_thought_signature = _providers.supports(
+            self.base_url, "thought_signature")
         self.rate_limiter = rate_limiter
         self.session = requests.Session()
         self.session.headers.update({
@@ -123,7 +125,7 @@ class ZaiClient:
         """Send a chat completion request, streaming. Returns the final result."""
         payload: dict = {
             "model": model,
-            "messages": messages,
+            "messages": self._portable(messages),
             "temperature": temperature,
             "max_tokens": max_tokens,
             "stream": True,
@@ -169,6 +171,41 @@ class ZaiClient:
         raise ApiError(0, f"gave up after {MAX_RETRIES} attempts: {last_err}")
 
     # ------------------------------------------------------------------ #
+
+    def _portable(self, messages: list) -> list:
+        """History minus anything this endpoint will not recognise.
+
+        A chat can change provider mid-conversation, and its history then still
+        carries whatever the previous one attached -- Gemini's
+        extra_content.google.thought_signature being the case in hand. Sending
+        that on is the same mistake as sending z.ai's `thinking` field to
+        Google: a strict validator rejects the entire request over a field
+        nobody asked for.
+
+        The history itself is left untouched, so switching back to the provider
+        that issued the signatures keeps them intact. Only the copy on the wire
+        is trimmed, and only where there is something to trim.
+        """
+        if self.supports_thought_signature:
+            return messages
+        # The overwhelmingly common case is a history with nothing to trim, and
+        # it is walked on every request of every turn -- so check first and
+        # hand back the original list rather than rebuilding it each time.
+        if not any(isinstance(m, dict) and any(
+                c.get("extra_content") for c in (m.get("tool_calls") or []))
+                for m in messages):
+            return messages
+        out = []
+        for m in messages:
+            calls = m.get("tool_calls") if isinstance(m, dict) else None
+            if not calls or not any(c.get("extra_content") for c in calls):
+                out.append(m)
+                continue
+            m = dict(m)
+            m["tool_calls"] = [{k: v for k, v in c.items() if k != "extra_content"}
+                               for c in calls]
+            out.append(m)
+        return out
 
     def _stream_once(self, payload, on_content, on_reasoning, cancel=None) -> ChatResult:
         url = f"{self.base_url}/chat/completions"
@@ -237,6 +274,17 @@ class ZaiClient:
                         slot["function"]["name"] = fn["name"]
                     if fn.get("arguments"):
                         slot["function"]["arguments"] += fn["arguments"]
+                    # Anything the provider hung off the tool call, kept as-is.
+                    # Gemini 3 puts a thought_signature here --
+                    # extra_content.google.thought_signature -- an encrypted
+                    # record of the reasoning behind the call, and it REQUIRES
+                    # it back on every following request:
+                    #   400 Function call is missing a thought_signature
+                    # Rebuilding the call from id/name/arguments dropped it, so
+                    # tool use died on the second or third step of every task.
+                    if tc.get("extra_content"):
+                        slot.setdefault("extra_content", {}).update(
+                            tc["extra_content"])
 
         result.tool_calls = [tool_calls[i] for i in sorted(tool_calls)]
         for i, tc in enumerate(result.tool_calls):

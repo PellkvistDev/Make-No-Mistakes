@@ -749,6 +749,16 @@
           if (tc.function.name) slot.function.name = tc.function.name;
           if (tc.function.arguments) slot.function.arguments += tc.function.arguments;
         }
+        // Whatever the provider attached to the call, kept verbatim. Gemini 3
+        // returns extra_content.google.thought_signature here and rejects the
+        // next request without it ("Function call is missing a
+        // thought_signature"), so rebuilding the call from id/name/arguments
+        // alone kills tool use a step or two in. The desktop client does the
+        // same; these two have to agree, because a chat started on one is
+        // continued on the other.
+        if (tc.extra_content) {
+          slot.extra_content = Object.assign({}, slot.extra_content, tc.extra_content);
+        }
       }
     }
     // Read an SSE body to completion, feeding text deltas out as they land.

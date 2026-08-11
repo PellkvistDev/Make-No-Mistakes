@@ -108,6 +108,11 @@ PRESETS = [
         # since -- and this file cannot be right about it for long. Only the
         # key itself knows, so the app says where to look instead of claiming.
         "unsure_models": [],
+        # Gemini 3 returns a thought_signature on every tool call and requires
+        # it back on each following request. Declared as an extension so it is
+        # sent here and stripped for everyone else, exactly like z.ai's
+        # `thinking` -- the two are the same problem pointing opposite ways.
+        "extensions": ["thought_signature"],
         "env_var": "GOOGLE_API_KEY",
         "key_url": "https://aistudio.google.com/apikey",
         "blurb": "Gemini models. A free tier with no card required.",
