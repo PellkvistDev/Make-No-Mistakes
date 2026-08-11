@@ -2896,6 +2896,16 @@ async function populateModelPicker(data) {
 // The setup provider's row contributes only its chat model (its vision model
 // routes automatically and isn't a chat choice); custom APIs contribute
 // every model they list.
+let showAllModels = false;
+
+function hiddenModelCount(res) {
+  let n = 0;
+  for (const p of res.providers || []) {
+    n += ((p.all_models || []).length - (p.models || []).length);
+  }
+  return Math.max(0, n);
+}
+
 function modelEntries(res) {
   const out = [];
   for (const p of res.providers || []) {
@@ -2903,7 +2913,12 @@ function modelEntries(res) {
     // this kept the first, because the vision model is not something to code
     // with. The backend now sends only chat choices, so slicing here just hid
     // every model a preset offers beyond the one picked at setup.
-    const models = p.models || [];
+    // The shortlist by default, everything when asked. A provider's listing
+    // is not a list of what your key can use -- Google publishes previews,
+    // experiments, dated snapshots and separately-licensed models on the same
+    // endpoint, and several 404 when called -- so showing all forty by default
+    // is a menu you have to decode. Nothing is removed from reach.
+    const models = (showAllModels ? (p.all_models || p.models) : p.models) || [];
     for (const m of models) out.push({ provider: p.name, model: m, builtin: !!p.builtin });
   }
   return out;
@@ -2944,8 +2959,20 @@ function buildModelMenu(res) {
   // is a 404 mid-conversation, and the fix is to ask the provider what it has
   // now -- so that is a button here, where you already are, rather than
   // something to work out.
-  foot.innerHTML = '<button class="model-menu-add" data-a="refresh">⟳ Refresh from provider</button>'
+  const hidden = hiddenModelCount(res);
+  foot.innerHTML =
+    (hidden && !showAllModels
+      ? `<button class="model-menu-add" data-a="all">Show all — ${hidden} more, including previews</button>`
+      : showAllModels
+        ? '<button class="model-menu-add" data-a="fewer">Show fewer</button>' : "")
+    + '<button class="model-menu-add" data-a="refresh">⟳ Refresh from provider</button>'
     + '<button class="model-menu-add" data-a="apis">+ Add or manage APIs…</button>';
+  for (const [act, val] of [["all", true], ["fewer", false]]) {
+    const b = foot.querySelector(`[data-a="${act}"]`);
+    // Rebuilt in place rather than closing: the whole point is comparing the
+    // longer list against the shorter one.
+    if (b) b.addEventListener("click", () => { showAllModels = val; buildModelMenu(res); });
+  }
   foot.querySelector('[data-a="refresh"]').addEventListener("click", async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;

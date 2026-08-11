@@ -388,3 +388,47 @@ def test_the_model_picker_shows_every_model_the_provider_offers(desktop):
         "#model-menu .model-opt .model-opt-name", "els => els.map(e => e.textContent)")
     assert shown == ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro"]
     assert desktop.errors == []
+
+
+def _google_row(models, all_models):
+    return {"providers": [{"name": "Google AI Studio", "builtin": True,
+                           "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+                           "models": models, "all_models": all_models,
+                           "local": False, "tier": "", "key_url": "",
+                           "has_key": True}],
+            "chat_provider": "Google AI Studio",
+            "chat_model": models[0], "chat_tier": ""}
+
+
+def _menu(desktop):
+    return desktop.page.eval_on_selector_all(
+        "#model-menu .model-opt .model-opt-name", "els => els.map(e => e.textContent)")
+
+
+def test_the_menu_shows_a_shortlist_not_the_whole_listing(desktop):
+    """Refreshing from Google returned ~40 models, several unusable. The menu
+    leads with the ones worth picking and says how many it is holding back."""
+    everything = ["gemini-3.5-flash", "gemini-3.5-flash-preview-05-20",
+                  "gemini-3.5-flash-exp", "gemini-2.5-pro-002"]
+    desktop.boot(providers=_google_row(["gemini-3.5-flash"], everything))
+    desktop.page.evaluate("() => populateModelPicker()")
+    desktop.page.click("#model-chip")
+    desktop.page.wait_for_timeout(250)
+
+    assert _menu(desktop) == ["gemini-3.5-flash"]
+    assert "3 more" in desktop.page.inner_text('#model-menu [data-a="all"]')
+
+    # ...and the rest are one click away, never removed.
+    desktop.page.click('#model-menu [data-a="all"]')
+    desktop.page.wait_for_timeout(250)
+    assert _menu(desktop) == everything
+    assert desktop.errors == []
+
+
+def test_no_show_all_button_when_there_is_nothing_held_back(desktop):
+    desktop.boot(providers=_google_row(["gemini-3.5-flash"], ["gemini-3.5-flash"]))
+    desktop.page.evaluate("() => populateModelPicker()")
+    desktop.page.click("#model-chip")
+    desktop.page.wait_for_timeout(250)
+    assert desktop.page.query_selector('#model-menu [data-a="all"]') is None
+    assert desktop.errors == []

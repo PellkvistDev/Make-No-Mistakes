@@ -470,3 +470,60 @@ def test_models_you_cannot_chat_with_are_kept_out_of_the_picker():
     for real in ("gemini-2.5-pro", "gemini-3-flash", "glm-4.7-flash",
                  "qwen2.5-coder:7b"):
         assert providers.is_chat_model(real), real
+
+
+# ---- a listing is not a list of what your key can use ---------------------
+#
+# Refreshing from Google returned ~40 models, several of which 404 when called.
+# Google publishes previews, experiments, dated snapshots and separately
+# licensed open models on the same endpoint and does not filter by key access,
+# so the listing cannot be shown raw -- but nothing may be put out of reach
+# either, since it is also the only list there is.
+
+def test_previews_and_snapshots_are_not_in_the_default_menu():
+    listing = [
+        "gemini-3.5-flash",                       # the real thing
+        "gemini-3.5-flash-preview-05-20",         # a preview
+        "gemini-3.5-flash-exp",                   # an experiment
+        "gemini-2.5-pro-002",                     # a pinned snapshot
+        "gemini-flash-latest",                    # a moving alias
+        "gemma-3-27b",                            # separately licensed
+        "text-embedding-004",                     # not a chat model at all
+    ]
+    assert providers.shortlist(listing) == ["gemini-3.5-flash"]
+
+
+def test_show_all_still_reaches_everything_chatlike():
+    """Narrowing the default view must not narrow the choice: a key really may
+    be entitled to a preview, and hiding it would be the worse failure."""
+    cfg = _cfg(provider_preset="google",
+               base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+               model="gemini-3.5-flash")
+    cfg.available_models = ["gemini-3.5-flash", "gemini-3.5-flash-preview-05-20"]
+    row = cfgmod.builtin_provider(cfg)
+    assert row["models"] == ["gemini-3.5-flash"]
+    assert "gemini-3.5-flash-preview-05-20" in row["all_models"]
+
+
+def test_a_provider_of_nothing_but_previews_still_offers_them():
+    """Better a menu of previews than an empty one."""
+    only = ["gemini-4.0-flash-preview", "gemini-4.0-pro-preview"]
+    assert providers.shortlist(only) == only
+
+
+def test_the_model_in_use_is_never_shortlisted_away():
+    """Being on a preview is a good reason to see it in its own picker."""
+    cfg = _cfg(provider_preset="google",
+               base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+               model="gemini-3.5-flash-preview-05-20")
+    cfg.available_models = ["gemini-3.5-flash", "gemini-3.5-flash-preview-05-20"]
+    assert cfg.model in cfgmod.builtin_provider(cfg)["models"]
+
+
+def test_stability_is_judged_by_shape_not_by_a_list_of_names():
+    for unstable in ("gemini-9-pro-preview", "gemini-9-pro-exp",
+                     "gemini-9-pro-001", "gemini-9-pro-2027-01-15",
+                     "gemini-flash-latest"):
+        assert not providers.is_stable(unstable), unstable
+    for stable in ("gemini-3.5-flash", "glm-4.7-flash", "qwen2.5-coder:7b"):
+        assert providers.is_stable(stable), stable
