@@ -535,14 +535,16 @@
     <section data-tab="models">
       <h3>Vision</h3>
       <div class="seg" id="seg-vision" role="radiogroup" aria-label="Image handling">
+        <button data-v="auto" role="radio">Auto</button>
         <button data-v="describe" role="radio">Describe</button>
         <button data-v="direct" role="radio">Direct</button>
       </div>
-      <p class="row-sub">Describe: a vision model narrates images for the coding model
-         — works with any chat model, even one that can't see. Direct: images (both
-         ones you attach and ones the agent opens with view_image) are sent straight
-         to the chat model — use this when your model is multimodal. If it turns out
-         not to be, Describe is used automatically rather than failing.</p>
+      <p class="row-sub"><strong>Auto</strong> (default): models that can read images
+         are given them directly; the rest get a written description. Nothing to set.
+         <strong>Describe</strong>: always narrate images through a vision model —
+         works with any chat model, even one that can't see. <strong>Direct</strong>:
+         always send the image itself. Override Auto only for a hand-typed endpoint
+         or a local model, where it has no way to know.</p>
     </section>
 
     <section data-tab="voice">

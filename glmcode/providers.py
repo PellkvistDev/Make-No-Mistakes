@@ -76,8 +76,13 @@ PRESETS = [
         # Flash rather than Flash-Lite deliberately: the Lite models are cheaper
         # and faster but do not reliably stream tool-call arguments, and every
         # turn here is tool calls.
-        "model": "gemini-2.5-flash",
-        "vision_model": "gemini-2.5-flash",
+        "model": "gemini-3.6-flash",
+        "vision_model": "gemini-3.6-flash",
+        # Every Gemini model reads images itself, so there is nothing to route
+        # to a second model. A property of the vendor's whole line rather than
+        # of any one model name, which is why it is safe to write down here --
+        # unlike the model names above it, which keep going stale.
+        "multimodal": True,
         # Pro is offered because it is a real option on this key and a better
         # model -- but it is NOT free, and has not been since Google moved the
         # Pro models behind billing. Listing it without saying so would make
@@ -345,6 +350,17 @@ def chat_models(base_url: str) -> list:
     if not p:
         return []
     return list(p.get("chat_models") or p.get("models") or [])
+
+
+def is_multimodal(base_url: str) -> bool:
+    """Does this endpoint's own chat model read images?
+
+    False for anything unknown, which keeps the describe route -- narrating an
+    image to a model that could have read it wastes a call, but sending an
+    image to one that cannot read it fails the turn.
+    """
+    p = preset_from_base_url(base_url)
+    return bool(p and p.get("multimodal"))
 
 
 def supports(base_url: str, extension: str) -> bool:

@@ -200,7 +200,11 @@ class Config:
     codebase_memory_neural: bool = False  # search_code uses a local embedding model (semantic) instead of lexical TF-IDF
     parallel_attempts: int = 1       # "race": 1 = off; 2 or 3 = run that many isolated attempts from a common baseline and keep the best
     show_reasoning: bool = True      # print the model's reasoning (dimmed)
-    vision_route: str = "describe"   # describe | direct
+    # auto = ask the provider (see Agent._images_go_direct). It used to
+    # default to "describe", so a model that reads images perfectly well was
+    # handed somebody else's prose about them instead -- and the agent called
+    # view_image on a picture the user had just attached.
+    vision_route: str = "auto"       # auto | describe | direct
     # Auto-compact above this. The GLM models carry ~200k; the headroom is for
     # the reply, not for the counter being wrong -- the estimate now calibrates
     # itself against the prompt_tokens the API reports (api.calibrate_ratio),

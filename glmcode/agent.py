@@ -18,6 +18,7 @@ from .api import (ApiError, Cancelled, RateLimiter, Usage, ZaiClient,
 from .config import Config
 from .events import AgentEvents
 from .permissions import PermissionEngine
+from . import providers
 from .prompts import (ATTEMPT_TASK, BROWSER_AGENT_SYSTEM, BROWSER_RESUME_NOTE,
                       COMPACT_PROMPT, CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM,
                       FRESH_CRITIC_SYSTEM, GREEN_GIVEUP_NUDGE, GREEN_NUDGE,
@@ -401,6 +402,26 @@ class Agent:
     # ------------------------------------------------------------------ #
     # Images
 
+    def _images_go_direct(self) -> bool:
+        """Should images be sent to the chat model itself?
+
+        "auto" -- the default -- asks the provider rather than the user. Every
+        Gemini model reads images natively, so narrating one to it through a
+        second model was a wasted call AND a worse answer: the coding model
+        only ever saw somebody else's prose about the picture. It also made the
+        agent call view_image on an image the user had just attached, which is
+        the tool call you saw declined.
+
+        "describe" and "direct" remain, because auto cannot know what a
+        hand-typed endpoint or a local model can do -- and being wrong either
+        way is recoverable only by saying so.
+        """
+        route = self.cfg.vision_route
+        if route in ("direct", "describe"):
+            return route == "direct"
+        base = getattr(self.client, "base_url", "") or self.cfg.base_url
+        return providers.is_multimodal(base)
+
     def attach_images(self, text: str, image_paths: list[Path]) -> dict:
         """Build the user message for a turn that includes images.
 
@@ -409,7 +430,7 @@ class Agent:
         vision_route == "direct": embed images; the turn runs on the vision model.
         """
         names = ", ".join(p.name for p in image_paths)
-        if self.cfg.vision_route == "direct":
+        if self._images_go_direct():
             content: list = [
                 {"type": "image_url", "image_url": {"url": self._encode(p)}}
                 for p in image_paths
@@ -476,7 +497,7 @@ class Agent:
         """
         paths = paths or []
         embed_images = embed_images or []
-        if self.cfg.vision_route != "direct":
+        if not self._images_go_direct():
             return (self.attach_files(text, paths) if paths
                     else {"role": "user", "content": text})
         from .api import IMAGE_EXTENSIONS
@@ -520,7 +541,7 @@ class Agent:
         """
         base = self.model_override or self.cfg.model
         if self._payload_has_images():
-            if self.model_override and self.cfg.vision_route == "direct":
+            if self.model_override and self._images_go_direct():
                 target = base
             else:
                 target = self.cfg.vision_model
@@ -587,7 +608,7 @@ class Agent:
         # Direct mode: embed the image into the conversation so a multimodal
         # chat model sees it itself, instead of getting a GLM-vision writeup.
         # If it's too big to embed, fall through to the describe path below.
-        if self.cfg.vision_route == "direct":
+        if self._images_go_direct():
             try:
                 uri = self._encode(p)
             except ValueError:

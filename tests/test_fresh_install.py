@@ -434,3 +434,41 @@ def test_with_no_override_the_prompt_names_the_default():
 
     ag.rebuild_system_prompt()
     assert "glm-4.7-flash" in ag.messages[0]["content"]
+
+
+# ------------------------------------------------- images and multimodal
+
+def _vision_agent(base_url, route="auto"):
+    from glmcode.agent import Agent
+    ag = Agent.__new__(Agent)
+    ag.cfg = config_mod.Config(vision_route=route, base_url=base_url)
+    ag.client = types.SimpleNamespace(base_url=base_url)
+    return ag
+
+
+GOOGLE = "https://generativelanguage.googleapis.com/v1beta/openai"
+ZAI = "https://api.z.ai/api/paas/v4"
+
+
+def test_a_multimodal_model_is_given_the_image_itself():
+    """The reported flow: attach a picture to Gemini and the agent called
+    view_image on it instead of just looking, because the route defaulted to
+    describe -- so the coding model only ever saw someone else's prose."""
+    assert _vision_agent(GOOGLE)._images_go_direct() is True
+
+
+def test_a_model_with_a_separate_vision_model_still_gets_a_description():
+    assert _vision_agent(ZAI)._images_go_direct() is False
+
+
+def test_an_explicit_choice_still_wins_over_auto():
+    """Auto cannot know what a hand-typed endpoint or a local model can do."""
+    assert _vision_agent(ZAI, "direct")._images_go_direct() is True
+    assert _vision_agent(GOOGLE, "describe")._images_go_direct() is False
+
+
+def test_the_route_follows_the_chat_model_not_the_configured_default():
+    """A chat switched to Gemini reads images even though setup was z.ai."""
+    ag = _vision_agent(ZAI)
+    ag.client = types.SimpleNamespace(base_url=GOOGLE)
+    assert ag._images_go_direct() is True
