@@ -1666,6 +1666,11 @@ class Api:
             builtin_client = self._ensure_client()
             if builtin_client is not None:
                 agent.client = builtin_client
+            # The prompt names the model, so it has to be rebuilt when the
+            # model changes. Without this the switch takes effect on the wire
+            # and not in the prompt, and the two disagree for the rest of the
+            # chat.
+            agent.rebuild_system_prompt()
             return
         self.session_provider = prov["name"]
         self.session_model = model or (prov.get("models") or [""])[0]
@@ -1674,6 +1679,7 @@ class Api:
         # Vision keeps working through the built-in provider.
         zai_key = self._cfg.resolve_api_key()
         agent.vision_client = ZaiClient(zai_key, self._cfg.base_url) if zai_key else None
+        agent.rebuild_system_prompt()   # see above: the prompt names the model
 
     def _activate_session(self, sid: str, messages: list, cwd: str,
                           prompt_tokens: int, completion_tokens: int,
