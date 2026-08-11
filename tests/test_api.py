@@ -353,3 +353,62 @@ def test_a_history_with_nothing_to_trim_is_passed_straight_through():
     c = _Capture("https://api.z.ai/api/paas/v4")
     c.chat(model="m", messages=history)
     assert c.payloads[0]["messages"] is history
+
+
+# --------------------------------------------------------------------- #
+# Stop, during a retry.
+#
+# A rate limit leaves the client asleep between attempts, and the only cancel
+# check was inside the loop reading a response body -- which is not running
+# then. So pressing Stop during a 429 backoff did nothing visible and the
+# client carried on hammering the API afterwards.
+
+class _AlwaysRateLimited(ZaiClient):
+    def __init__(self, base_url="https://api.z.ai/api/paas/v4"):
+        super().__init__("k", base_url)
+        self.attempts = 0
+
+    def _stream_once(self, payload, *a, **k):
+        self.attempts += 1
+        raise ApiError(429, "rate limited")
+
+
+def test_stop_is_heard_during_a_retry_backoff():
+    """Set the flag while it is asleep between attempts, as a person pressing
+    Stop does -- it must give up then, not after the wait expires."""
+    import threading as _t
+    from glmcode.api import Cancelled
+
+    c = _AlwaysRateLimited()
+    cancel = _t.Event()
+    _t.Timer(0.15, cancel.set).start()
+
+    started = time.monotonic()
+    with pytest.raises(Cancelled):
+        c.chat(model="m", messages=[{"role": "user", "content": "hi"}],
+               cancel=cancel)
+    # Promptly, not "eventually": the first backoff is 1-2s, so anything at or
+    # above that means the sleep was slept through and only noticed afterwards.
+    assert time.monotonic() - started < 0.8
+    assert c.attempts <= 2
+
+
+def test_stop_before_the_first_request_sends_nothing():
+    import threading as _t
+    from glmcode.api import Cancelled
+
+    c = _AlwaysRateLimited()
+    cancel = _t.Event()
+    cancel.set()
+    with pytest.raises(Cancelled):
+        c.chat(model="m", messages=[{"role": "user", "content": "hi"}],
+               cancel=cancel)
+    assert c.attempts == 0
+
+
+def test_without_a_cancel_the_retries_still_happen():
+    """The stop path must not have quietly disabled retrying for everyone."""
+    c = _AlwaysRateLimited()
+    with pytest.raises(ApiError):
+        c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+    assert c.attempts > 1

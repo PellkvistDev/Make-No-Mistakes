@@ -113,6 +113,13 @@ PRESETS = [
         # since -- and this file cannot be right about it for long. Only the
         # key itself knows, so the app says where to look instead of claiming.
         "unsure_models": [],
+        # Still selectable -- a key issued before the cut-off may well serve
+        # them -- but never chosen automatically. Google refuses these to new
+        # keys ahead of their announced 16 Oct 2026 shutdown, so a config left
+        # pointing at one fails on its first message. Listed is not the same as
+        # recommended, and this is the difference.
+        "retired_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite",
+                           "gemini-2.5-pro"],
         # Gemini 3 returns a thought_signature on every tool call and requires
         # it back on each following request. Declared as an extension so it is
         # sent here and stripped for everyone else, exactly like z.ai's
