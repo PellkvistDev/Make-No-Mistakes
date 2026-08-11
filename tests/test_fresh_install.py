@@ -472,3 +472,41 @@ def test_the_route_follows_the_chat_model_not_the_configured_default():
     ag = _vision_agent(ZAI)
     ag.client = types.SimpleNamespace(base_url=GOOGLE)
     assert ag._images_go_direct() is True
+
+
+def test_a_model_that_can_see_is_told_not_to_call_view_image():
+    """Auto routing put the image in front of Gemini and it called view_image
+    anyway -- correctly, because the prompt says "read it yourself before
+    responding: ... view_image for images". That instruction was written when
+    nothing could see. The model needs telling that it already has the image."""
+    from glmcode.prompts import build_system_prompt
+    p = build_system_prompt(model="gemini-3.6-flash", sees_images=True)
+    low = p.lower()
+    assert "do not call view_image" in low.replace("\n", " ")
+    assert "already in the conversation" in low.replace("\n", " ")
+
+
+def test_a_model_that_cannot_see_is_not_told_it_has_the_image():
+    from glmcode.prompts import build_system_prompt
+    p = build_system_prompt(model="glm-4.7-flash", sees_images=False)
+    assert "do not call view_image" not in p.lower().replace("\n", " ")
+
+
+def test_the_note_follows_the_route_the_agent_actually_took(tmp_path):
+    """Prompt and routing come from one decision, so they cannot disagree."""
+    from glmcode.agent import Agent
+    for base, expected in ((GOOGLE, True), (ZAI, False)):
+        ag = Agent.__new__(Agent)
+        ag.conversational = False
+        ag.workdir = tmp_path
+        ag.transcript = None
+        ag.messages = []
+        ag.cfg = config_mod.Config(model="m", vision_route="auto", base_url=base)
+        ag.client = types.SimpleNamespace(base_url=base)
+        ag.model_override = None
+        ag._with_usage_note = lambda s: s
+
+        ag.rebuild_system_prompt()
+        has_note = "do not call view_image" in \
+            ag.messages[0]["content"].lower().replace("\n", " ")
+        assert has_note is expected, base

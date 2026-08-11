@@ -320,7 +320,8 @@ class Agent:
             # chat switched to Gemini 3 what it is and it answers with a
             # blend: the name it was handed, and the name it knows.
             self._base_system_prompt = build_system_prompt(
-                self.workdir, self.model_override or self.cfg.model)
+                self.workdir, self.model_override or self.cfg.model,
+                sees_images=self._images_go_direct())
         if self.transcript:
             # Tell the model its transcript files exist and where, so it can
             # grep them for anything compacted out of context or said in a
@@ -419,7 +420,10 @@ class Agent:
         route = self.cfg.vision_route
         if route in ("direct", "describe"):
             return route == "direct"
-        base = getattr(self.client, "base_url", "") or self.cfg.base_url
+        # getattr on self as well as on the client: rebuild_system_prompt calls
+        # this during __init__, before the client is necessarily assigned.
+        client = getattr(self, "client", None)
+        base = getattr(client, "base_url", "") or self.cfg.base_url
         return providers.is_multimodal(base)
 
     def attach_images(self, text: str, image_paths: list[Path]) -> dict:
