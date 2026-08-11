@@ -294,13 +294,20 @@ def test_google_makes_no_free_claim_about_any_individual_model():
     real; which model it applies to is AI Studio's answer, not this file's."""
     g = next(c for c in providers.choices() if c["key"] == "google")
     assert all(m["tier"] == "" for m in g["model_options"])
-    assert "free tier" in g["free"].lower()
-    assert "AI Studio" in g["free"]
+    assert "free" in g["free"].lower()
+    # The line may quote allowances -- those came off a real quota page -- but
+    # it must not label one model free and leave the rest ambiguous.
+    assert not any(m["name"] in g["free"] for m in g["model_options"])
 
 
-def test_pro_is_still_offered_as_a_model():
-    """Uncertain about the price is not a reason to hide the better model."""
-    assert "gemini-2.5-pro" in providers.preset("google")["models"]
+def test_a_model_with_no_free_allowance_is_not_offered():
+    """This replaces a test asserting the opposite. Hiding Pro used to be
+    wrong -- being unsure of a price is no reason to withhold a better model.
+    It is right now for a different reason: a real free-tier quota page shows
+    every Pro model at 0 / 0, i.e. no access at all, so offering one would put
+    a model in the picker that fails the moment it is chosen. The change is in
+    the evidence, not in the principle."""
+    assert not any("pro" in m for m in providers.preset("google")["models"])
 
 
 # -- what a model costs, and when to say nothing ------------------------- #
@@ -380,7 +387,8 @@ def test_a_model_set_by_hand_stays_selectable():
                model="gemini-3.0-experimental")
     models = cfgmod.builtin_provider(cfg)["models"]
     assert models[0] == "gemini-3.0-experimental"
-    assert "gemini-2.5-pro" in models
+    # ...alongside, not instead of, what the catalogue recommends.
+    assert set(models[1:]) & set(providers.chat_models(cfg.base_url))
 
 
 def test_an_unknown_endpoint_offers_what_it_was_configured_with():
@@ -439,7 +447,8 @@ def test_the_catalogue_is_used_until_the_provider_has_been_asked():
     cfg = _cfg(provider_preset="google",
                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
                model="gemini-2.5-flash")
-    assert "gemini-2.5-pro" in cfgmod.builtin_provider(cfg)["models"]
+    assert cfgmod.builtin_provider(cfg)["models"] == providers.shortlist(
+        providers.chat_models(cfg.base_url))
 
 
 def test_the_preferred_model_is_the_best_one_actually_on_offer():

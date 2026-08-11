@@ -2929,6 +2929,27 @@ function renderModelChip(res) {
   $("model-chip").title = `Model: ${res.chat_model} (via ${res.chat_provider}) — click to switch`;
 }
 
+/* A ring showing how much of today's free-tier allowance is gone. Drawn only
+ * when a limit is actually known: an unknown quota is NOT a full ring, and
+ * guessing one would be the same mistake as printing a price nobody checked. */
+function quotaRing(q) {
+  const used = Math.max(0, q.used || 0);
+  const frac = Math.min(1, used / q.rpd);
+  const wrap = document.createElement("span");
+  wrap.className = "model-quota" + (used >= q.rpd ? " spent"
+    : frac >= 0.8 ? " low" : "");
+  wrap.title = `${used} of ${q.rpd} requests today`
+    + (q.rpm ? ` · ${q.rpm}/minute` : "")
+    + "\nCounted by this app, so it can differ from your provider's own total.";
+  wrap.innerHTML =
+    '<svg viewBox="0 0 20 20" aria-hidden="true">'
+    + '<circle class="mq-bg" cx="10" cy="10" r="8"/>'
+    + `<circle class="mq-fg" cx="10" cy="10" r="8" stroke-dasharray="${(frac * 50.26).toFixed(1)} 50.26"/>`
+    + "</svg><em></em>";
+  wrap.querySelector("em").textContent = `${used}/${q.rpd}`;
+  return wrap;
+}
+
 const CHECK_SVG = '<svg class="model-opt-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
 
 function buildModelMenu(res) {
@@ -2949,6 +2970,11 @@ function buildModelMenu(res) {
       `<span class="model-opt-prov"></span></span>`;
     opt.querySelector(".model-opt-name").textContent = e.model;
     opt.querySelector(".model-opt-prov").textContent = e.provider;
+    // Today's requests against this model, where a free-tier allowance is
+    // known. A day's quota is small enough to run out inside one task, so it
+    // belongs next to the model rather than in a settings page.
+    const q = (res.providers || []).find((p) => p.name === e.provider)?.quota?.[e.model];
+    if (q && q.rpd) opt.appendChild(quotaRing(q));
     opt.addEventListener("click", () => selectModel(e));
     menu.appendChild(opt);
   }
