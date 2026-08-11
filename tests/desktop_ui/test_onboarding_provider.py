@@ -245,9 +245,14 @@ def test_the_lede_stops_counting_options_it_is_no_longer_showing(desktop):
     assert desktop.errors == []
 
 
-def test_the_lede_is_left_alone_when_the_catalogue_loads(desktop):
+def test_the_lede_counts_nothing_it_would_have_to_keep_updating(desktop):
+    """It used to say "both of the first two have a free tier" -- a fact about
+    the list, not about any provider, which went stale the moment a third free
+    one was added. Each card states its own terms instead."""
     onboard(desktop)
-    assert "first two" in desktop.page.inner_text("#key-lede").lower()
+    lede = desktop.page.inner_text("#key-lede").lower()
+    assert "first two" not in lede and "first three" not in lede
+    assert "change this" in lede
     assert desktop.errors == []
 
 
@@ -267,4 +272,93 @@ def test_setup_says_when_the_key_is_already_on_this_pc(desktop):
     # A provider with no key on this machine still asks for one.
     desktop.page.click('.prov-card[data-key="zai"]')
     assert "paste" in desktop.page.get_attribute("#key-input", "placeholder").lower()
+    assert desktop.errors == []
+
+
+# --------------------------------------------------- a provider with no key
+
+OLLAMA = {"key": "ollama", "label": "Ollama (on this PC)",
+          "base_url": "http://localhost:11434/v1", "model": "", "models": [],
+          "key_url": "https://ollama.com/download", "model_options": [],
+          "blurb": "Runs on your own machine. No account, no key, no limits.",
+          "free": "Free, always, and your code never leaves this PC.",
+          "caveat": "Quality depends on your hardware.",
+          "needs_key": False, "local": True, "suggest_pull": "qwen2.5-coder",
+          "steps": ["Install Ollama.", "Pull a model.", "Come back here."]}
+
+
+def with_ollama(**extra):
+    return dict(CHOICES, choices=CHOICES["choices"] + [OLLAMA], **extra)
+
+
+def test_a_keyless_provider_shows_no_key_box(desktop):
+    """An empty field above a Start button reads as something you have failed
+    to fill in."""
+    desktop.boot(boot={"needsKey": True}, provider_choices=with_ollama(),
+                 local_models={"running": True, "models": ["qwen2.5-coder"]})
+    desktop.page.wait_for_selector("#prov-choices .prov-card", timeout=8000)
+
+    desktop.page.click('.prov-card[data-key="ollama"]')
+    desktop.page.wait_for_timeout(300)
+    assert desktop.page.is_hidden("#key-input")
+    assert "nothing leaves this pc" in desktop.page.inner_text("#key-store-note").lower()
+
+    # ...and the box comes back for one that does need a key.
+    desktop.page.click('.prov-card[data-key="zai"]')
+    assert desktop.page.is_visible("#key-input")
+    assert desktop.errors == []
+
+
+def test_installed_models_are_offered_rather_than_typed(desktop):
+    """The whole point: nobody should have to spell a model name the way
+    Ollama spells it."""
+    desktop.boot(boot={"needsKey": True}, provider_choices=with_ollama(),
+                 local_models={"running": True,
+                               "models": ["llama3.1:8b", "qwen2.5-coder:7b"]})
+    desktop.page.wait_for_selector("#prov-choices .prov-card", timeout=8000)
+    desktop.page.click('.prov-card[data-key="ollama"]')
+    desktop.page.wait_for_selector(".prov-model-btn", timeout=8000)
+
+    shown = desktop.page.eval_on_selector_all(
+        ".prov-model-btn", "els => els.map(e => e.dataset.model)")
+    assert shown == ["llama3.1:8b", "qwen2.5-coder:7b"]
+
+    desktop.page.click('.prov-model-btn[data-model="qwen2.5-coder:7b"]')
+    desktop.page.click("#key-save")
+    desktop.page.wait_for_timeout(300)
+
+    saved = desktop.calls("save_setup")
+    assert saved and saved[0]["args"][0] == "ollama"
+    assert saved[0]["args"][1] == "", "sent a key for a provider that takes none"
+    assert saved[0]["args"][3] == "qwen2.5-coder:7b"
+    assert desktop.errors == []
+
+
+def test_start_is_not_offered_when_there_is_nothing_to_start(desktop):
+    """Leaving it live means the button is what tells you the state, after you
+    have already committed to pressing it."""
+    desktop.boot(boot={"needsKey": True}, provider_choices=with_ollama(),
+                 local_models={"running": False, "models": []})
+    desktop.page.wait_for_selector("#prov-choices .prov-card", timeout=8000)
+
+    desktop.page.click('.prov-card[data-key="ollama"]')
+    desktop.page.wait_for_timeout(400)
+    assert desktop.page.is_disabled("#key-save")
+    assert "not running" in desktop.page.inner_text("#prov-local").lower()
+
+    # Clicking away must not leave a ready provider stranded behind it.
+    desktop.page.click('.prov-card[data-key="google"]')
+    assert not desktop.page.is_disabled("#key-save")
+    assert desktop.errors == []
+
+
+def test_an_empty_server_shows_the_command_that_fixes_it(desktop):
+    desktop.boot(boot={"needsKey": True}, provider_choices=with_ollama(),
+                 local_models={"running": True, "models": []})
+    desktop.page.wait_for_selector("#prov-choices .prov-card", timeout=8000)
+    desktop.page.click('.prov-card[data-key="ollama"]')
+    desktop.page.wait_for_timeout(400)
+
+    assert "ollama pull qwen2.5-coder" in desktop.page.inner_text("#prov-local")
+    assert desktop.page.is_disabled("#key-save")
     assert desktop.errors == []

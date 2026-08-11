@@ -130,6 +130,14 @@ def find_provider(cfg: "Config", name: str) -> dict | None:
     # otherwise silently fall back and change model mid-conversation.
     if name == BUILTIN_PROVIDER_NAME:
         return builtin_provider(cfg)
+    # Same problem, one step later: a provider typed in by hand is named after
+    # its host ("localhost:11434"), and gains a proper label the day it becomes
+    # a preset. Chats saved in between still refer to it by host. Matching that
+    # against the primary's own host resolves them, and does so for any future
+    # preset that adopts a URL people were already typing.
+    host = (cfg.base_url or "").split("//")[-1].split("/")[0]
+    if host and name == host:
+        return builtin_provider(cfg)
     return None
 
 
@@ -247,11 +255,19 @@ class Config:
         if not key:
             found = _providers.preset_from_base_url(self.base_url)
             key = found["key"] if found else ""
-        return _providers.env_var_for(key) or "ZAI_API_KEY"
+        if not key:
+            # Nothing identifiable: a config from before presets, whose key is
+            # in ZAI_API_KEY under a name no migration could reach.
+            return "ZAI_API_KEY"
+        # "" for a preset that takes no key (Ollama). It must NOT fall through
+        # to ZAI_API_KEY -- that would read a z.ai key and send it to a server
+        # on this machine, which is the leak this function used to have by a
+        # different route.
+        return _providers.env_var_for(key)
 
     def resolve_api_key(self) -> str:
         var = self.provider_env_var()
-        key = os.environ.get(var, "").strip()
+        key = os.environ.get(var, "").strip() if var else ""
         if key:
             return key
         # ZAI_API_KEY is a MIGRATION PATH, not a general fallback, and the

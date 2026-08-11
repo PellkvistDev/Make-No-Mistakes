@@ -27,11 +27,29 @@ def test_every_preset_can_actually_be_used():
     end the user has to work around."""
     for p in providers.PRESETS:
         assert p["key"] and p["label"]
-        assert p["base_url"].startswith("https://"), p["key"]
-        assert p["model"] in p["models"], f"{p['key']} starts on a model it does not list"
+        # https for anything hosted. A server on this machine is the exception
+        # and the only one: Ollama speaks plain http on localhost, and there is
+        # no certificate it could present for it.
+        if providers.is_local(p["base_url"]):
+            assert p["base_url"].startswith("http://"), p["key"]
+        else:
+            assert p["base_url"].startswith("https://"), p["key"]
+        # A preset normally names the model it starts on. A local one cannot:
+        # which models exist depends on what has been pulled onto the machine,
+        # so it starts on nothing and reads the list off the running server.
+        if p["model"]:
+            assert p["model"] in p["models"], \
+                f"{p['key']} starts on a model it does not list"
+        else:
+            assert p.get("needs_key") is False, \
+                f"{p['key']} names no model but is not a local server"
+            assert p.get("suggest_pull"), \
+                f"{p['key']} has no model and nothing to suggest pulling"
         assert p["key_url"].startswith("https://"), p["key"]
         assert p["steps"], f"{p['key']} tells you nothing about getting a key"
-        assert providers.env_var_for(p["key"]), f"{p['key']} has nowhere to put its key"
+        # Somewhere to put a key, or an explicit statement that it needs none.
+        assert providers.env_var_for(p["key"]) or p.get("needs_key") is False, \
+            f"{p['key']} has nowhere to put its key"
 
 
 def test_presets_do_not_share_an_environment_variable():
@@ -105,10 +123,27 @@ def test_an_old_config_is_named_from_its_base_url():
 
 def test_a_hand_typed_provider_is_not_labelled_as_a_vendor_it_is_not():
     """The old code called every primary provider "z.ai (free)", including one
-    pointed at a local Ollama."""
-    name = cfgmod.builtin_provider_name(_cfg(base_url="http://localhost:11434/v1"))
+    pointed at something else entirely."""
+    name = cfgmod.builtin_provider_name(_cfg(base_url="http://127.0.0.1:9999/v1"))
     assert "z.ai" not in name.lower()
-    assert "localhost:11434" in name
+    assert "127.0.0.1:9999" in name
+
+
+def test_ollamas_own_url_is_recognised_rather_than_shown_as_a_host():
+    """It used to come out as the bare "localhost:11434", because a local
+    server was only ever something you typed in yourself."""
+    name = cfgmod.builtin_provider_name(_cfg(base_url="http://localhost:11434/v1"))
+    assert name == "Ollama (on this PC)"
+
+
+def test_a_chat_saved_before_ollama_was_a_preset_still_resolves():
+    """That rename would otherwise strand chats saved in between: the stored
+    provider name no longer matches anything, and the chat silently falls back
+    to the default model mid-conversation."""
+    cfg = _cfg(base_url="http://localhost:11434/v1")
+    found = cfgmod.find_provider(cfg, "localhost:11434")
+    assert found is not None
+    assert found["base_url"] == "http://localhost:11434/v1"
 
 
 def test_each_preset_reads_its_own_key(monkeypatch):

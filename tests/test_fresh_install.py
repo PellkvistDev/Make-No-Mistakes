@@ -199,3 +199,79 @@ def test_an_empty_box_is_still_refused_with_no_key_anywhere(monkeypatch):
     res = api.save_setup("zai", "")
     assert "error" in res
     assert api._cfg.setup_done is False, "a rejected setup must not count as done"
+
+
+# ------------------------------------------------------- a keyless provider
+#
+# Ollama is the only preset that takes no key, which makes it the one that can
+# be handed somebody else's.
+
+def test_ollama_does_not_inherit_another_providers_key(monkeypatch):
+    """provider_env_var() used to end in `or "ZAI_API_KEY"`, so a preset with
+    no variable of its own read z.ai's -- and sent it to a server on this
+    machine."""
+    monkeypatch.setenv("ZAI_API_KEY", "sk-zai-secret")
+    cfg = config_mod.Config(provider_preset="ollama",
+                            base_url="http://localhost:11434/v1", api_key="local")
+    assert cfg.provider_env_var() == ""
+    assert cfg.resolve_api_key() == "local"
+
+
+def test_setting_up_ollama_clears_a_previous_providers_stored_key(monkeypatch):
+    """cfg.api_key is the "setx was blocked" fallback. Left alone it would
+    still hold the hosted key from an earlier setup, and resolve_api_key()
+    returns it when there is no environment variable -- which is always, here."""
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    api = _api(config_mod.Config(provider_preset="zai", api_key="sk-zai-secret"))
+    monkeypatch.setattr(api, "_resume_last", lambda: None, raising=False)
+    monkeypatch.setattr(api, "list_sessions", lambda: [], raising=False)
+
+    res = api.save_setup("ollama", "", model="qwen2.5-coder")
+    assert res.get("ok") is True
+    assert api._cfg.api_key == "local"
+    assert api._cfg.resolve_api_key() != "sk-zai-secret"
+
+
+def test_ollama_setup_needs_a_model_but_not_a_key(monkeypatch):
+    api = _api(config_mod.Config())
+    monkeypatch.setattr(api, "_resume_last", lambda: None, raising=False)
+    monkeypatch.setattr(api, "list_sessions", lambda: [], raising=False)
+
+    # No model chosen: the preset names none, so there is nothing to fall back on.
+    assert "error" in api.save_setup("ollama", "")
+    assert api._cfg.setup_done is False
+
+    res = api.save_setup("ollama", "", model="qwen2.5-coder:7b")
+    assert res.get("ok") is True
+    assert api._cfg.model == "qwen2.5-coder:7b"
+    assert api._cfg.vision_model == "qwen2.5-coder:7b"
+    assert api._cfg.base_url == "http://localhost:11434/v1"
+
+
+def test_local_models_reports_the_three_states_apart(monkeypatch):
+    """Not running, running-but-empty and ready need different fixes, so they
+    cannot collapse into one "it didn't work"."""
+    import requests
+
+    def reply(payload):
+        return lambda *a, **k: types.SimpleNamespace(json=lambda: payload)
+
+    monkeypatch.setattr(requests, "get", reply({"models": [
+        {"name": "qwen2.5-coder"}, {"name": "llama3"}]}))
+    got = gui_app.Api.local_models("ollama")
+    assert got == {"running": True, "models": ["llama3", "qwen2.5-coder"]}
+
+    monkeypatch.setattr(requests, "get", reply({"models": []}))
+    assert gui_app.Api.local_models("ollama") == {"running": True, "models": []}
+
+    def refused(*a, **k):
+        raise OSError("connection refused")
+    monkeypatch.setattr(requests, "get", refused)
+    assert gui_app.Api.local_models("ollama") == {"running": False, "models": []}
+
+
+def test_local_models_refuses_to_probe_a_hosted_provider():
+    """It builds a URL from the preset and fetches it. Anything not on this
+    machine has no business being reached from here."""
+    assert "error" in gui_app.Api.local_models("google")
+    assert "error" in gui_app.Api.local_models("nonsense")
