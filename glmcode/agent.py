@@ -312,7 +312,14 @@ class Agent:
                 + conversational_project_context(self.workdir)
                 + self._conversational_language_note())
         else:
-            self._base_system_prompt = build_system_prompt(self.workdir, self.cfg.model)
+            # The model actually being called, not the configured default.
+            # Requests use `model_override or cfg.model` (see _call_model), and
+            # this used cfg.model alone -- so choosing another model for a chat
+            # left the prompt telling it that it was the default one. Ask a
+            # chat switched to Gemini 3 what it is and it answers with a
+            # blend: the name it was handed, and the name it knows.
+            self._base_system_prompt = build_system_prompt(
+                self.workdir, self.model_override or self.cfg.model)
         if self.transcript:
             # Tell the model its transcript files exist and where, so it can
             # grep them for anything compacted out of context or said in a

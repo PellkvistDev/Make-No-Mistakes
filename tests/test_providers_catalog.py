@@ -527,3 +527,32 @@ def test_stability_is_judged_by_shape_not_by_a_list_of_names():
         assert not providers.is_stable(unstable), unstable
     for stable in ("gemini-3.5-flash", "glm-4.7-flash", "qwen2.5-coder:7b"):
         assert providers.is_stable(stable), stable
+
+
+# ---- what the agent is told it is -----------------------------------------
+#
+# Reported: a chat switched to Gemini 3.6 Flash, asked what model it was,
+# answered "2.5 Flash / 3.6 Flash". The prompt was built from cfg.model while
+# requests used model_override -- so the app was telling it the name of a model
+# it was not.
+
+def test_the_prompt_names_the_model_that_will_actually_be_called():
+    from glmcode.prompts import build_system_prompt
+    p = build_system_prompt(model="gemini-3.6-flash")
+    assert "gemini-3.6-flash" in p
+
+
+def test_the_prompt_does_not_claim_the_app_is_a_model():
+    """The first line names the AGENT. Without saying so, a model asked what
+    it is blends that name with its own."""
+    from glmcode.prompts import build_system_prompt
+    p = build_system_prompt(model="gemini-3.6-flash")
+    assert "is not a model" in p.replace("\n", " ")
+
+
+def test_no_vendor_is_written_into_the_agents_identity():
+    """It said "You are GLM Code" to every model, whoever was serving it."""
+    from glmcode.prompts import SYSTEM_PROMPT
+    first = SYSTEM_PROMPT.splitlines()[0].lower()
+    for vendor in ("glm", "z.ai", "zai", "gemini", "google", "openai"):
+        assert vendor not in first, f"{vendor} in the agent's own name"

@@ -352,7 +352,8 @@ def test_refreshing_says_so_when_the_provider_cannot_be_reached(monkeypatch):
 
 def _agent():
     return types.SimpleNamespace(model_override="sentinel", vision_client="v",
-                                 client=None, busy=False)
+                                 client=None, busy=False,
+                                 rebuild_system_prompt=lambda: None)
 
 
 def _with_open_chat(cfg):
@@ -382,3 +383,54 @@ def test_choosing_the_default_again_clears_the_override():
     api._apply_chat_model(ag, "Google AI Studio", "gemini-2.5-flash")
     assert api.session_model == ""
     assert ag.model_override is None
+
+
+def test_switching_model_rebuilds_the_prompt_that_names_it():
+    """The switch used to take effect on the wire but not in the prompt, so
+    the two disagreed for the rest of the chat."""
+    api, ag = _with_open_chat(config_mod.Config(model="gemini-2.5-flash"))
+    rebuilt = []
+    ag.rebuild_system_prompt = lambda: rebuilt.append(1)
+
+    api._apply_chat_model(ag, "Google AI Studio", "gemini-3.6-flash")
+    assert ag.model_override == "gemini-3.6-flash"
+    assert rebuilt, "model changed but the prompt still names the old one"
+
+
+def test_the_agents_prompt_names_the_model_it_will_actually_call(tmp_path):
+    """The reported symptom, at its source.
+
+    Requests use `model_override or cfg.model`; the prompt was built from
+    cfg.model alone. Switch a chat to Gemini 3.6, ask it what model it is, and
+    it answers with a blend of the name it was handed and the name it knows.
+    """
+    from glmcode.agent import Agent
+    ag = Agent.__new__(Agent)
+    ag.conversational = False
+    ag.workdir = tmp_path
+    ag.transcript = None
+    ag.messages = []
+    ag.cfg = config_mod.Config(model="gemini-2.5-flash")
+    ag.model_override = "gemini-3.6-flash"
+    ag._with_usage_note = lambda s: s
+
+    ag.rebuild_system_prompt()
+    prompt = ag.messages[0]["content"]
+    assert "gemini-3.6-flash" in prompt
+    assert "gemini-2.5-flash" not in prompt, "told the model it is the default"
+
+
+def test_with_no_override_the_prompt_names_the_default():
+    from glmcode.agent import Agent
+    import pathlib
+    ag = Agent.__new__(Agent)
+    ag.conversational = False
+    ag.workdir = pathlib.Path(".")
+    ag.transcript = None
+    ag.messages = []
+    ag.cfg = config_mod.Config(model="glm-4.7-flash")
+    ag.model_override = None
+    ag._with_usage_note = lambda s: s
+
+    ag.rebuild_system_prompt()
+    assert "glm-4.7-flash" in ag.messages[0]["content"]

@@ -8,7 +8,7 @@ import subprocess
 from datetime import date
 from pathlib import Path
 
-SYSTEM_PROMPT = """You are GLM Code, an interactive coding agent. You help developers with software engineering: writing code, fixing bugs, refactoring, explaining codebases, running commands, and automating work on their machine. You operate in an agentic loop: call tools, observe results, call more tools, until the task is done — then reply with a final answer.
+SYSTEM_PROMPT = """You are Make No Mistakes, an interactive coding agent. You help developers with software engineering: writing code, fixing bugs, refactoring, explaining codebases, running commands, and automating work on their machine. You operate in an agentic loop: call tools, observe results, call more tools, until the task is done — then reply with a final answer.
 
 # Absolute rules (these override everything else)
 
@@ -201,7 +201,15 @@ def build_system_prompt(cwd: Path | None = None, model: str = "") -> str:
         # here -- PowerShell syntax on a mac, or the reverse.
         f"Shell: {'Windows PowerShell' if os.name == 'nt' else 'a POSIX shell (bash/zsh)'}\n"
         f"Today's date: {date.today().isoformat()}\n"
-        f"Model: {model}\n"
+        # Spelled out because the first line of this prompt gives the AGENT a
+        # name, and a model asked what it is will otherwise answer with some
+        # mixture of that name and its own. "Make No Mistakes" is the program;
+        # the model underneath is whatever the user pointed it at, and it is
+        # the only one that knows the rest of its own identity.
+        f"You are running inside an app called Make No Mistakes, which is not "
+        f"a model and did not train you. The model serving this conversation "
+        f"is {model or 'not recorded'}. If asked which model you are, say that "
+        f"and nothing more confident than that.\n"
         f"{_git_info(cwd)}"
     )
     return (SYSTEM_PROMPT + env + _project_map(cwd) + _user_memory()
