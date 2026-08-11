@@ -916,6 +916,54 @@ class Api:
             return {"running": False, "models": []}
         return {"running": True, "models": sorted(models)}
 
+    @staticmethod
+    def _fetch_models(base_url: str, api_key: str) -> list:
+        """Ask an OpenAI-compatible endpoint what it serves. [] if it won't say.
+
+        `GET /models` is part of the OpenAI surface and every provider here
+        implements it. Worth the round trip because a hardcoded model name has
+        a shelf life: gemini-2.5-flash was the documented default and then
+        started answering "no longer available to new users" -- a dead default
+        that no amount of care in this file could have anticipated.
+
+        Never raises. A provider that does not implement it, or a machine with
+        no network right now, falls back to the catalogue rather than ending up
+        with no models at all.
+        """
+        import requests as _requests
+        url = f"{(base_url or '').rstrip('/')}/models"
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        try:
+            r = _requests.get(url, headers=headers, timeout=6)
+            if r.status_code != 200:
+                return []
+            data = r.json().get("data") or []
+            # Google returns "models/gemini-x"; OpenAI returns bare ids.
+            names = [str(m.get("id", "")).split("/")[-1] for m in data]
+        except Exception:
+            return []
+        return sorted({n for n in names if n and providers_mod.is_chat_model(n)})
+
+    def refresh_models(self):
+        """Re-read the primary provider's model list from the provider."""
+        models = self._fetch_models(self._cfg.base_url, self._cfg.resolve_api_key())
+        if not models:
+            return {"error": "couldn't reach the provider to list its models"}
+        self._cfg.available_models = models
+        # The chat model may have been retired out from under us, which is the
+        # whole reason for asking. Move to something that exists rather than
+        # leaving a default that 404s on the next message.
+        if self._cfg.model not in models:
+            self._cfg.model = providers_mod.preferred_model(models, self._cfg.base_url)
+        if self._cfg.vision_model not in models:
+            self._cfg.vision_model = self._cfg.model
+        try:
+            save_config(self._cfg)
+        except Exception:
+            pass
+        self._client = None
+        return self.providers()
+
     def save_setup(self, preset: str, api_key: str, base_url: str = "",
                    model: str = ""):
         """First run: record which provider was picked, and store its key.
@@ -978,6 +1026,20 @@ class Api:
             except Exception:
                 persisted = False
             self._cfg.api_key = api_key   # fallback if the env write failed
+        # Ask the provider what it serves, now that there is a key to ask with.
+        # The catalogue's model is a preference; this is the only thing that
+        # knows whether it still exists. Best-effort, like everything else
+        # here: setup must finish even on a machine with no network yet.
+        try:
+            live = self._fetch_models(base_url, self._cfg.resolve_api_key())
+        except Exception:
+            live = []
+        if live:
+            self._cfg.available_models = live
+            if self._cfg.model not in live:
+                self._cfg.model = providers_mod.preferred_model(live, base_url)
+            if self._cfg.vision_model not in live:
+                self._cfg.vision_model = self._cfg.model
         try:
             save_config(self._cfg)
         except Exception:
@@ -1587,8 +1649,14 @@ class Api:
         prov = find_provider(self._cfg, provider_name) if provider_name else None
         if prov is None or prov.get("builtin"):
             self.session_provider = ""
-            self.session_model = ""
-            agent.model_override = None
+            # A model picked from the built-in provider's OWN list is a real
+            # choice, not "back to the default". This threw it away and reset
+            # to cfg.model, so selecting any other model on that row appeared
+            # to do nothing -- you clicked Pro and got Flash back. Harmless
+            # while that row held exactly one model; wrong as soon as a preset
+            # offered alternatives.
+            self.session_model = "" if (not model or model == self._cfg.model) else model
+            agent.model_override = self.session_model or None
             agent.vision_client = None
             # Point back at the built-in client too (the agent may have been
             # switched to a custom endpoint earlier in this chat).

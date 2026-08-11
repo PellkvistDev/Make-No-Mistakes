@@ -115,7 +115,9 @@ def builtin_provider(cfg: "Config") -> dict:
     # It used to report [model, vision_model], so a preset offering three
     # models produced a picker with one entry and the rest were unreachable
     # without adding the same provider again by hand.
-    models = _providers.chat_models(cfg.base_url)
+    # What the endpoint actually serves wins over what this app was told to
+    # expect. Falls back to the catalogue when nobody has asked it yet.
+    models = list(cfg.available_models) or _providers.chat_models(cfg.base_url)
     if cfg.model and cfg.model not in models:
         # A model set by hand, or one the catalogue has since dropped: it is
         # in use, so it has to stay selectable.
@@ -171,6 +173,13 @@ class Config:
     # found it, and setup never appeared: the one action everybody tries when
     # something is wrong was also the one the app quietly ignored.
     setup_done: bool = False
+    # What the primary endpoint said it can serve, last time it was asked.
+    # A catalogue of model names cannot stay right -- gemini-2.5-flash was the
+    # documented default and then answered
+    #   404 no longer available to new users
+    # on a key issued a week later. The key is the only thing that knows, so
+    # the catalogue expresses a PREFERENCE and this holds the reality.
+    available_models: list = field(default_factory=list)
     mode: str = "ask"                # ask | autoedit | yolo
     temperature: float = 0.6
     max_tokens: int = 16384

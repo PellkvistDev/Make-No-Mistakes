@@ -273,14 +273,29 @@ def test_setup_completes_even_when_the_environment_cannot_be_written(monkeypatch
 
 
 def test_a_model_whose_price_is_unknown_is_not_claimed_to_be_free():
-    """Whether Google's free tier covers Pro has changed more than once: 5 RPM
-    and 100 RPD in early 2026, reported behind billing since. A file in this
-    repo cannot stay right about that, and a confident wrong label is worse
-    than no label -- so the third state exists and Pro is in it."""
+    """No model is labelled free unless the catalogue explicitly says so.
+
+    Asserted by property rather than by naming a model, because naming one is
+    the mistake this file keeps making: "Flash is free" was true when written
+    and then Flash itself was withdrawn. A test pinned to a model name goes
+    stale exactly when the catalogue does, and stops guarding anything.
+    """
+    for c in providers.choices():
+        p = providers.preset(c["key"])
+        declared = set((p or {}).get("free_models") or [])
+        for m in c["model_options"]:
+            if m["tier"] == "free":
+                assert m["name"] in declared, f'{m["name"]} claimed free'
+
+
+def test_google_makes_no_free_claim_about_any_individual_model():
+    """Which models Google's free tier covers has changed repeatedly, and the
+    models themselves are retired ahead of their announced dates. The tier is
+    real; which model it applies to is AI Studio's answer, not this file's."""
     g = next(c for c in providers.choices() if c["key"] == "google")
-    by_name = {m["name"]: m["tier"] for m in g["model_options"]}
-    assert by_name["gemini-2.5-flash"] == "free"
-    assert by_name["gemini-2.5-pro"] == "unsure"
+    assert all(m["tier"] == "" for m in g["model_options"])
+    assert "free tier" in g["free"].lower()
+    assert "AI Studio" in g["free"]
 
 
 def test_pro_is_still_offered_as_a_model():
@@ -313,17 +328,20 @@ def test_a_remote_host_is_never_mistaken_for_a_local_one():
 
 
 def test_the_free_tier_is_only_claimed_for_the_models_it_covers():
+    z = providers.preset("zai")
+    assert providers.model_tier(z["base_url"], z["free_models"][0]) == "free"
+    # A model the catalogue has never heard of: no claim either way.
+    assert providers.model_tier(z["base_url"], "glm-99-ultra") == ""
+    # And Google claims nothing per-model at all.
     g = providers.preset("google")["base_url"]
-    assert providers.model_tier(g, "gemini-2.5-flash") == "free"
-    assert providers.model_tier(g, "gemini-2.5-pro") == "unsure"
-    # A Gemini model the catalogue has never heard of: no claim either way.
-    assert providers.model_tier(g, "gemini-9.9-ultra") == ""
+    assert providers.model_tier(g, "gemini-3.5-flash") == ""
 
 
 def test_a_trailing_slash_does_not_lose_the_provider():
     """Base URLs are stored rstrip'd in some paths and not others."""
-    g = providers.preset("google")["base_url"]
-    assert providers.model_tier(g + "/", "gemini-2.5-flash") == "free"
+    z = providers.preset("zai")
+    assert providers.model_tier(
+        z["base_url"] + "/", z["free_models"][0]) == "free"
 
 
 # ---- what the model picker is given ---------------------------------------
@@ -338,9 +356,10 @@ def test_the_builtin_provider_offers_every_model_on_its_key():
                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
                model="gemini-2.5-flash", vision_model="gemini-2.5-flash")
     models = cfgmod.builtin_provider(cfg)["models"]
-    assert "gemini-2.5-flash" in models
-    assert "gemini-2.5-pro" in models
-    assert "gemini-2.5-flash-lite" in models
+    # More than one, and exactly what the catalogue offers -- named by asking
+    # the catalogue rather than by writing model names into the assertion.
+    assert len(models) > 1
+    assert models == providers.chat_models(cfg.base_url)
 
 
 def test_the_vision_model_is_not_offered_as_something_to_code_with():
@@ -379,8 +398,75 @@ def test_setup_offers_the_same_models_the_picker_will():
         "https://generativelanguage.googleapis.com/v1beta/openai")
 
 
-def test_flash_lite_is_offered_rather_than_quietly_dropped():
-    """It was left out on an unverified claim about tool-call streaming."""
+def test_a_lite_tier_model_is_offered():
+    """Flash-Lite was once dropped on an unverified claim that it does not
+    stream tool-call arguments. Cheap models are a real choice and stay on
+    offer; matched by shape so it survives the next rename."""
     names = [m["name"] for m in
              next(c for c in providers.choices() if c["key"] == "google")["model_options"]]
-    assert "gemini-2.5-flash-lite" in names
+    assert any("lite" in n for n in names), names
+
+
+def test_the_newest_models_are_preferred_over_the_retired_ones():
+    """Google withdraws models ahead of their published shutdown dates, so the
+    preference order has to lead with the current generation -- the 2.5 names
+    are a fallback for keys that still have them, not the default."""
+    order = providers.chat_models(providers.preset("google")["base_url"])
+    newest = [i for i, n in enumerate(order) if n.startswith("gemini-3")]
+    oldest = [i for i, n in enumerate(order) if n.startswith("gemini-2")]
+    assert newest and oldest
+    assert max(newest) < min(oldest)
+
+
+# ---- a catalogue of model names cannot stay right -------------------------
+#
+# gemini-2.5-flash was the documented default and then answered
+#   404 This model is no longer available to new users
+# on a key issued days later. Nothing in this file could have anticipated
+# that, so the catalogue is a PREFERENCE and the key is the authority.
+
+def test_the_live_list_beats_the_catalogue():
+    cfg = _cfg(provider_preset="google",
+               base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+               model="gemini-2.5-flash")
+    cfg.available_models = ["gemini-3-flash", "gemini-3-pro"]
+    models = cfgmod.builtin_provider(cfg)["models"]
+    assert "gemini-3-pro" in models
+    assert "gemini-2.5-pro" not in models, "catalogue outranked the provider"
+
+
+def test_the_catalogue_is_used_until_the_provider_has_been_asked():
+    cfg = _cfg(provider_preset="google",
+               base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+               model="gemini-2.5-flash")
+    assert "gemini-2.5-pro" in cfgmod.builtin_provider(cfg)["models"]
+
+
+def test_the_preferred_model_is_the_best_one_actually_on_offer():
+    url = "https://generativelanguage.googleapis.com/v1beta/openai"
+    # Flash is the catalogue's first preference and it is available.
+    assert providers.preferred_model(
+        ["gemini-2.5-pro", "gemini-2.5-flash"], url) == "gemini-2.5-flash"
+
+
+def test_a_working_model_beats_a_preferred_one_that_is_gone():
+    """The actual failure: every name the catalogue knows has been retired."""
+    url = "https://generativelanguage.googleapis.com/v1beta/openai"
+    assert providers.preferred_model(["gemini-3-flash"], url) == "gemini-3-flash"
+
+
+def test_nothing_usable_is_not_reported_as_a_model():
+    assert providers.preferred_model([], "https://x.test/v1") == ""
+    assert providers.preferred_model(["text-embedding-004"], "https://x.test/v1") == ""
+
+
+def test_models_you_cannot_chat_with_are_kept_out_of_the_picker():
+    """A /models listing is everything the key can reach -- embeddings, image
+    and speech models included. Offering one as a chat model fails at the
+    first request."""
+    for junk in ("text-embedding-004", "imagen-3.0-generate", "veo-2.0",
+                 "gemini-2.5-flash-tts", "aqa"):
+        assert not providers.is_chat_model(junk), junk
+    for real in ("gemini-2.5-pro", "gemini-3-flash", "glm-4.7-flash",
+                 "qwen2.5-coder:7b"):
+        assert providers.is_chat_model(real), real

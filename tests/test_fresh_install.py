@@ -275,3 +275,110 @@ def test_local_models_refuses_to_probe_a_hosted_provider():
     machine has no business being reached from here."""
     assert "error" in gui_app.Api.local_models("google")
     assert "error" in gui_app.Api.local_models("nonsense")
+
+
+# --------------------------------------------- asking the provider directly
+
+class _Resp:
+    def __init__(self, status, payload=None):
+        self.status_code = status
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
+
+
+def _models_reply(monkeypatch, resp):
+    import requests
+    seen = {}
+
+    def fake_get(url, headers=None, timeout=None):
+        seen["url"] = url
+        seen["headers"] = headers or {}
+        if isinstance(resp, Exception):
+            raise resp
+        return resp
+    monkeypatch.setattr(requests, "get", fake_get)
+    return seen
+
+
+def test_the_model_list_comes_from_the_provider(monkeypatch):
+    seen = _models_reply(monkeypatch, _Resp(200, {"data": [
+        {"id": "models/gemini-3-pro"},          # Google's "models/" prefix
+        {"id": "gemini-3-flash"},               # bare id
+        {"id": "models/text-embedding-004"},    # not something to chat with
+    ]}))
+    got = gui_app.Api._fetch_models("https://x.test/v1", "sk-k")
+
+    assert got == ["gemini-3-flash", "gemini-3-pro"]
+    assert seen["url"] == "https://x.test/v1/models"
+    assert seen["headers"]["Authorization"] == "Bearer sk-k"
+
+
+def test_an_unreachable_provider_is_not_an_empty_model_list(monkeypatch):
+    """Falling back to the catalogue beats ending up with no models at all."""
+    _models_reply(monkeypatch, RuntimeError("no network"))
+    assert gui_app.Api._fetch_models("https://x.test/v1", "k") == []
+    _models_reply(monkeypatch, _Resp(404))
+    assert gui_app.Api._fetch_models("https://x.test/v1", "k") == []
+
+
+def test_refreshing_moves_off_a_model_the_provider_has_retired(monkeypatch):
+    """The reported failure. The configured model 404s, so refreshing has to
+    leave a model that exists -- not just update the list around a dead one."""
+    cfg = config_mod.Config(
+        provider_preset="google",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+        model="gemini-2.5-flash", vision_model="gemini-2.5-flash",
+        api_key="k")
+    api = _api(cfg)
+    _models_reply(monkeypatch, _Resp(200, {"data": [{"id": "models/gemini-3-pro"}]}))
+    monkeypatch.setattr(config_mod, "save_config", lambda c: None)
+    monkeypatch.setattr(gui_app, "save_config", lambda c: None)
+
+    api.refresh_models()
+    assert cfg.model == "gemini-3-pro"
+    assert cfg.vision_model == "gemini-3-pro"
+    assert cfg.available_models == ["gemini-3-pro"]
+
+
+def test_refreshing_says_so_when_the_provider_cannot_be_reached(monkeypatch):
+    api = _api(config_mod.Config(base_url="https://x.test/v1", api_key="k"))
+    _models_reply(monkeypatch, RuntimeError("down"))
+    assert "error" in api.refresh_models()
+
+
+# ------------------------------------------- picking a different model
+
+def _agent():
+    return types.SimpleNamespace(model_override="sentinel", vision_client="v",
+                                 client=None, busy=False)
+
+
+def _with_open_chat(cfg):
+    """session_provider/session_model live on the ACTIVE chat, not on Api, so
+    a test without one silently writes into nothing."""
+    api = _api(cfg)
+    ag = _agent()
+    api._chats = {"s1": types.SimpleNamespace(agent=ag, provider="", model="")}
+    api.session_id = "s1"
+    api._ensure_client = lambda: "client"
+    return api, ag
+
+
+def test_choosing_another_model_on_the_builtin_provider_sticks():
+    """Clicking Pro selected Flash again: a model chosen from the built-in
+    provider's own list was read as "back to the default" and discarded."""
+    api, ag = _with_open_chat(config_mod.Config(model="gemini-2.5-flash"))
+
+    api._apply_chat_model(ag, "Google AI Studio", "gemini-2.5-pro")
+    assert api.session_model == "gemini-2.5-pro"
+    assert ag.model_override == "gemini-2.5-pro"
+
+
+def test_choosing_the_default_again_clears_the_override():
+    api, ag = _with_open_chat(config_mod.Config(model="gemini-2.5-flash"))
+
+    api._apply_chat_model(ag, "Google AI Studio", "gemini-2.5-flash")
+    assert api.session_model == ""
+    assert ag.model_override is None

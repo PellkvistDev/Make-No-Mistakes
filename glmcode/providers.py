@@ -82,26 +82,32 @@ PRESETS = [
         # model -- but it is NOT free, and has not been since Google moved the
         # Pro models behind billing. Listing it without saying so would make
         # the free-tier line above cover something it does not.
-        # Everything this key can reach, rather than the one it starts on.
-        # Listing only the default meant the model picker had a single entry
-        # and the other models on the same key were unreachable without adding
-        # the provider again by hand.
-        "models": ["gemini-2.5-flash", "gemini-2.5-flash-lite",
-                   "gemini-2.5-pro"],
-        "chat_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite",
-                        "gemini-2.5-pro"],
-        "free_models": ["gemini-2.5-flash"],
+        # PREFERENCE ORDER, not a promise that any of these exist. The live
+        # list from `GET /models` decides (see preferred_model), so a name
+        # going stale here costs nothing -- which is the only reason it is safe
+        # to write current model names down at all.
+        #
+        # Newest first, because Google retires models ahead of their published
+        # shutdown dates: gemini-2.5-flash answered "no longer available to new
+        # users" months before its announced 16 Oct 2026 shutdown, and the same
+        # is reported for 2.5 Flash-Lite and 2.5 Pro. The 2.5 entries stay at
+        # the back for keys that still have access to them.
+        "models": ["gemini-3.6-flash", "gemini-3.5-flash",
+                   "gemini-3.5-flash-lite", "gemini-3.1-pro",
+                   "gemini-2.5-flash", "gemini-2.5-pro"],
+        "chat_models": ["gemini-3.6-flash", "gemini-3.5-flash",
+                        "gemini-3.5-flash-lite", "gemini-3.1-pro",
+                        "gemini-2.5-flash", "gemini-2.5-pro"],
+        # No per-model free/paid claims. Which models a free tier covers has
+        # changed repeatedly, and a label here would be a guess about someone
+        # else's billing attached to a model name that may not outlive it.
+        "free_models": [],
         # Pro is deliberately neither "free" nor "paid" here. Whether the free
         # tier covers it has changed more than once -- it was 5 RPM / 100 RPD
         # in early 2026, and there are reports of it moving behind billing
         # since -- and this file cannot be right about it for long. Only the
         # key itself knows, so the app says where to look instead of claiming.
-        # Flash-Lite was left out of this list at first, on the strength of a
-        # claim that it does not reliably stream tool-call arguments. That was
-        # never checked against the API, and every turn here is tool calls, so
-        # it was removing a model on a hunch. It is offered; whether the free
-        # tier covers it is the console's answer, not this file's.
-        "unsure_models": ["gemini-2.5-flash-lite", "gemini-2.5-pro"],
+        "unsure_models": [],
         "env_var": "GOOGLE_API_KEY",
         "key_url": "https://aistudio.google.com/apikey",
         "blurb": "Gemini models. A free tier with no card required.",
@@ -109,7 +115,11 @@ PRESETS = [
         # the end of 2025 and no longer publishes one table that applies to
         # everyone -- a figure hardcoded here would quietly become a lie, and
         # the console is the only place that knows the truth for this key.
-        "free": "Flash is free. Your exact quota is shown in AI Studio.",
+        # No model named and no quota quoted. "Flash is free" was true when it
+        # was written and then the model itself was withdrawn; AI Studio is the
+        # only place that knows what this key gets today.
+        "free": "There is a free tier. AI Studio shows which models it covers "
+                "and what your quota is.",
         # Said plainly and shown next to the word "free", because it is the one
         # thing about this option that someone might mind and would otherwise
         # only find out later. This app sends source code.
@@ -249,6 +259,36 @@ def model_tier(base_url: str, model: str) -> str:
     if model in (p.get("unsure_models") or []):
         return "unsure"
     return ""
+
+
+def is_chat_model(name: str) -> bool:
+    """Is this the kind of model you can hold a conversation with?
+
+    A `/models` listing is everything the key can reach, which includes
+    embedding, image and text-to-speech models that would fail on the first
+    chat request. Excluded by what they are called, because that is all the
+    listing gives -- crude, but wrong only in the direction of showing one
+    extra name, never of hiding a usable model behind a guess.
+    """
+    n = (name or "").lower()
+    return not any(w in n for w in (
+        "embedding", "embed", "aqa", "imagen", "image-generation", "veo",
+        "tts", "vision-only", "rerank", "moderation", "whisper", "learnlm"))
+
+
+def preferred_model(available: list, base_url: str) -> str:
+    """Which of these to start on.
+
+    The catalogue's order is a preference, not a promise: whatever it names
+    may be gone. So the first preference that is actually on offer wins, and
+    failing that the first thing offered -- a working model nobody chose beats
+    a chosen model that 404s.
+    """
+    have = [m for m in available if is_chat_model(m)]
+    for want in chat_models(base_url):
+        if want in have:
+            return want
+    return have[0] if have else ""
 
 
 def chat_models(base_url: str) -> list:

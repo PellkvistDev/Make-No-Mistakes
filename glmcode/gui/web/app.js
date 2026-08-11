@@ -2940,8 +2940,22 @@ function buildModelMenu(res) {
   // A quick path to configure more, since this menu is where you'd look.
   const foot = document.createElement("div");
   foot.className = "model-menu-foot";
-  foot.innerHTML = '<button class="model-menu-add">+ Add or manage APIs…</button>';
-  foot.querySelector("button").addEventListener("click", () => {
+  // Providers retire models. When the one you are on stops existing the reply
+  // is a 404 mid-conversation, and the fix is to ask the provider what it has
+  // now -- so that is a button here, where you already are, rather than
+  // something to work out.
+  foot.innerHTML = '<button class="model-menu-add" data-a="refresh">⟳ Refresh from provider</button>'
+    + '<button class="model-menu-add" data-a="apis">+ Add or manage APIs…</button>';
+  foot.querySelector('[data-a="refresh"]').addEventListener("click", async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    btn.textContent = "Asking the provider…";
+    const res = await api().refresh_models();
+    if (res && res.error) { closeModelMenu(); toast(res.error, "error", 5000); return; }
+    populateModelPicker(res);
+    toast(`${(res.providers?.[0]?.models || []).length} models available.`, "info", 2500);
+  });
+  foot.querySelector('[data-a="apis"]').addEventListener("click", () => {
     closeModelMenu();
     openSettingsToApis();
   });
@@ -2963,7 +2977,10 @@ function toggleModelMenu() {
 
 async function selectModel(entry) {
   closeModelMenu();
-  const res = await api().set_chat_model(entry.provider, entry.builtin ? "" : entry.model);
+  // The model is always sent. Sending "" for the built-in provider meant
+  // "whatever the default is", which silently discarded the click on every
+  // model but the default one.
+  const res = await api().set_chat_model(entry.provider, entry.model);
   if (res && res.error) { toast(res.error, "error", 5000); return; }
   populateModelPicker(res);
   toast(`This chat now uses ${res.chat_model}.`, "info", 2000);
