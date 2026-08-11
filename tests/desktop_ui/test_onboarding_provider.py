@@ -249,3 +249,22 @@ def test_the_lede_is_left_alone_when_the_catalogue_loads(desktop):
     onboard(desktop)
     assert "first two" in desktop.page.inner_text("#key-lede").lower()
     assert desktop.errors == []
+
+
+def test_setup_says_when_the_key_is_already_on_this_pc(desktop):
+    """After a reinstall the key is usually still in the environment -- it is
+    kept in the registry, which deleting the app does not touch. Saying so
+    turns "go and find your key again" into pressing Start."""
+    found = dict(CHOICES, found=[{"preset": "google",
+                                  "env_var": "GOOGLE_API_KEY"}])
+    desktop.boot(boot={"needsKey": True}, provider_choices=found)
+    desktop.page.wait_for_selector("#prov-choices .prov-card", timeout=8000)
+
+    desktop.page.click('.prov-card[data-key="google"]')
+    ph = desktop.page.get_attribute("#key-input", "placeholder")
+    assert "GOOGLE_API_KEY" in ph and "leave empty" in ph.lower()
+
+    # A provider with no key on this machine still asks for one.
+    desktop.page.click('.prov-card[data-key="zai"]')
+    assert "paste" in desktop.page.get_attribute("#key-input", "placeholder").lower()
+    assert desktop.errors == []

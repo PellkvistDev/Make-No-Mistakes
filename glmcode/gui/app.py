@@ -797,18 +797,37 @@ class Api:
     def boot(self):
         _startup_log("[py] boot() called")
         has_key = bool(self._cfg.resolve_api_key())
+        # Setup is shown when this install has not been through it -- not
+        # merely when no key can be found. The key is persisted with `setx`,
+        # into the user's registry environment, so it outlives deleting
+        # ~/.makenomistakes AND deleting the app: the check used to find that
+        # leftover, decide the app was configured, and skip straight past
+        # setup. Reinstalling from scratch is what everyone tries first when
+        # something is wrong, and it was the one repair this app ignored.
+        needs_setup = (not self._cfg.setup_done) or (not has_key)
         result = {
             "version": __version__,
-            "needsKey": not has_key,
+            "needsKey": needs_setup,
             "background": self.get_background(),
             "settings": self._settings(),
             "sessions": self.list_sessions(),
             "session": None,
             "contextLimit": self._cfg.context_limit_tokens,
         }
-        if has_key:
-            result["session"] = self._resume_last()
-            result["sessions"] = self.list_sessions()
+        if has_key and not needs_setup:
+            # Reopening the last chat is a convenience, and a convenience must
+            # not be able to stop the app starting. It could: an exception here
+            # propagated out of boot(), so the page never received its settings
+            # or its session list and sat there dead, with the only evidence in
+            # a terminal most people never see. Whatever went wrong with one
+            # stored chat, the window still comes up usable.
+            try:
+                result["session"] = self._resume_last()
+                result["sessions"] = self.list_sessions()
+            except Exception as e:
+                _startup_log(f"[py] resume failed, starting empty: {e!r}")
+                self.session_id = None
+                result["session"] = None
         _startup_log("[py] boot() returning")
         return result
 
@@ -822,7 +841,16 @@ class Api:
                 sid = sessions[0]["id"]
                 data = self._store.load(sid)
         if data is None:
-            self._agent = None
+            # `_agent` is a read-only property derived from the active chat, so
+            # assigning it raised AttributeError and took the whole of boot()
+            # down with it -- leaving the window up with no settings, no
+            # sessions and no setup screen. Clearing session_id is the whole
+            # job: with no active chat, `_agent` already answers None.
+            #
+            # Only reachable when there is nothing to resume, which on a fresh
+            # install is every launch. It survived because it needs a first run
+            # that also skips setup, and setup was skipped exactly when a key
+            # was left behind in the environment by a previous install.
             self.session_id = None
             return None
         return self._activate_session(
@@ -839,7 +867,29 @@ class Api:
         are separate programs and this is the only thing keeping them in step.
         """
         return {"choices": providers_mod.choices(),
-                "chosen": self._cfg.provider_preset or ""}
+                "chosen": self._cfg.provider_preset or "",
+                "found": self._keys_already_on_this_pc()}
+
+    @staticmethod
+    def _keys_already_on_this_pc() -> list:
+        """Which presets already have a key in the environment.
+
+        Reinstalling does not clear these -- they are user environment
+        variables in the registry -- so someone arriving at setup after a
+        reinstall very often has a perfectly good key sitting right there.
+        Making them go and find it again is work the app can do for them, so
+        setup offers to reuse it.
+
+        Only ever the variable's NAME and whether it is set. The value is not
+        sent to the page: it is already in the process, nothing on screen needs
+        it, and a key that never reaches the DOM cannot end up in a screenshot.
+        """
+        out = []
+        for key in providers_mod.preset_keys() + [providers_mod.CUSTOM_KEY]:
+            var = providers_mod.env_var_for(key)
+            if var and os.environ.get(var, "").strip():
+                out.append({"preset": key, "env_var": var})
+        return out
 
     def save_setup(self, preset: str, api_key: str, base_url: str = "",
                    model: str = ""):
@@ -866,10 +916,18 @@ class Api:
                 return {"error": "type the model name"}
             vision = model
         # A local server (Ollama, LM Studio) genuinely has no key, so an empty
-        # one is only refused where it cannot work.
-        if known and not api_key:
+        # one is only refused where it cannot work -- and not even then if this
+        # PC already has one for the chosen provider. Reinstalling leaves the
+        # environment variable behind, so refusing an empty box would send
+        # someone to the registry to copy out a key the app can already read.
+        env_var = providers_mod.env_var_for(preset)
+        reused = bool(env_var and os.environ.get(env_var, "").strip())
+        if known and not api_key and not reused:
             return {"error": f"paste your {known['label']} API key"}
         self._cfg.provider_preset = preset
+        # Set here and nowhere else: getting to the end of this method is the
+        # only thing that means "this install has been set up".
+        self._cfg.setup_done = True
         self._cfg.base_url = base_url
         self._cfg.model = model
         self._cfg.vision_model = vision
@@ -894,8 +952,12 @@ class Api:
             sessions = self.list_sessions()
         except Exception:
             pass
-        return {"ok": True, "persisted": persisted, "session": session,
-                "sessions": sessions, "provider": builtin_provider_name(self._cfg)}
+        # `reused` is not the same as `persisted`: nothing was written, but the
+        # key IS on this PC for good. Without it the page would say "connected
+        # for this session" -- which reads as "you will have to do this again".
+        return {"ok": True, "persisted": persisted, "reused": reused and not api_key,
+                "session": session, "sessions": sessions,
+                "provider": builtin_provider_name(self._cfg)}
 
     def save_api_key(self, key: str):
         key = (key or "").strip()

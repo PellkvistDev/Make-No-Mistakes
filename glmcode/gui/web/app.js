@@ -4620,6 +4620,9 @@ document.addEventListener("keydown", (e) => {
 
 let provChoices = [];
 let provChosen = "";
+// [{ preset, env_var }] for providers whose key is already set on this PC.
+// Names only -- the values stay in Python and never reach the page.
+let provFound = [];
 
 function provPick(key) {
   provChosen = key;
@@ -4633,8 +4636,15 @@ function provPick(key) {
   if (!c) return;
   const custom = c.key === "custom";
   $("prov-custom").hidden = !custom;
-  $("key-input").placeholder = custom
-    ? "API key — leave empty for a local model" : `Paste your ${c.label} API key`;
+  // A key for this provider already on the machine (an earlier install's, in
+  // almost every case) means the box is optional, and the placeholder has to
+  // say so -- otherwise the only visible instruction is to go and fetch a key
+  // that is sitting in the registry three feet away.
+  const found = provFound.find((f) => f.preset === c.key);
+  $("key-input").placeholder = found
+    ? `Already set on this PC (${found.env_var}) — leave empty to reuse it`
+    : custom ? "API key — leave empty for a local model"
+      : `Paste your ${c.label} API key`;
 
   const parts = [];
   if (c.steps && c.steps.length) {
@@ -4721,6 +4731,10 @@ async function loadProvChoices() {
   // a first run that fails on its first request with no clue why. So the
   // manual fields stand in instead: still usable, and honest that the list
   // is what's missing rather than pretending a default was chosen.
+  // Which providers already have a key on this PC. Environment variables
+  // survive deleting the app, so after a reinstall the key is very often still
+  // there -- and making someone go and find it again is work the app can do.
+  provFound = (ok && res.found) || [];
   provChoices = ok ? res.choices : [PROV_FALLBACK];
   renderProvChoices();
   provPick(ok ? (res.chosen || provChoices[0].key) : PROV_FALLBACK.key);
@@ -4760,8 +4774,9 @@ $("key-save").addEventListener("click", async () => {
   btn.textContent = label;
   if (res && res.ok) {
     $("key-backdrop").hidden = true;
-    toast(res.persisted ? `${res.provider} connected` :
-      "Connected for this session", "info", 4000);
+    toast(res.reused ? `${res.provider} connected with the key already on this PC`
+      : res.persisted ? `${res.provider} connected`
+        : "Connected for this session", "info", 4000);
     if (res.sessions) sessions = res.sessions;
     if (res.session) applySession(res.session);
     else showNoSession();

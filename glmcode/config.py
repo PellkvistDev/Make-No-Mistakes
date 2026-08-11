@@ -143,6 +143,15 @@ class Config:
     # by hand). Only ever a label and a set of instructions: the client treats
     # every provider the same, and this changes nothing about how it is called.
     provider_preset: str = ""
+    # Has this install been through setup? Deliberately NOT inferred from
+    # "can a key be found anywhere", which is what the first-run check used to
+    # ask. The key is persisted with `setx`, i.e. into HKCU\Environment in the
+    # registry -- it does not live in this folder, or in the app's folder, or
+    # anywhere else an uninstall or a delete can reach. So deleting
+    # ~/.makenomistakes and reinstalling left the key behind, the old check
+    # found it, and setup never appeared: the one action everybody tries when
+    # something is wrong was also the one the app quietly ignored.
+    setup_done: bool = False
     mode: str = "ask"                # ask | autoedit | yolo
     temperature: float = 0.6
     max_tokens: int = 16384
@@ -271,6 +280,12 @@ def load_config() -> Config:
                     cfg.extra[k] = v
         except (json.JSONDecodeError, OSError):
             pass
+    # A config file that predates this field belongs to someone who has already
+    # been through setup -- there was no other way to get one. Without this
+    # they would all be asked again on the next update, which is a worse bug
+    # than the one setup_done exists to fix.
+    if "setup_done" not in data:
+        cfg.setup_done = CONFIG_FILE.exists()
     if cfg.mode not in PERMISSION_MODES:
         cfg.mode = "ask"
     # Configs written before thinking_mode existed only had the boolean
