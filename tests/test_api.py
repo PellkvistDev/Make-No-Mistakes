@@ -13,7 +13,10 @@ class _Client(ZaiClient):
     """ZaiClient with _stream_once scripted; no network ever."""
 
     def __init__(self, script):
-        self.rate_limiter = None
+        # Through the real __init__: the client derives things from base_url
+        # now (which vendor extensions the endpoint understands), and a double
+        # that skips construction stops resembling the thing it stands in for.
+        super().__init__("k", "https://api.z.ai/api/paas/v4")
         self.n = 0
         self._script = script
 
@@ -156,3 +159,69 @@ def test_calibrate_ratio_rejects_impossible_readings():
     assert api.calibrate_ratio([], 100) is None            # nothing to measure
     assert api.calibrate_ratio(msgs, 1) is None            # 1000 chars/token
     assert api.calibrate_ratio(msgs, 900) is None          # ~1 char/token
+
+
+# --------------------------------------------------------------------- #
+# Vendor extensions.
+#
+# `thinking` is a Zhipu field, not an OpenAI one. It was sent to every
+# endpoint, because when it was added there was only one endpoint. Google's
+# compatibility layer validates strictly and rejects the WHOLE request:
+#
+#   400 Invalid JSON payload received. Unknown name "thinking":
+#       Cannot find field.
+#
+# so every turn failed, over a field the user never asked for.
+
+class _Capture(ZaiClient):
+    """A real client, but the request is captured instead of being sent."""
+
+    def __init__(self, base_url):
+        super().__init__("k", base_url)
+        self.payloads = []
+
+    def _stream_once(self, payload, *a, **k):
+        self.payloads.append(payload)
+        from glmcode.api import ChatResult
+        return ChatResult(content="ok")
+
+
+def _sent(base_url, **kw):
+    c = _Capture(base_url)
+    c.chat(model="m", messages=[{"role": "user", "content": "hi"}], **kw)
+    return c.payloads[0]
+
+
+def test_thinking_is_not_sent_to_google():
+    payload = _sent("https://generativelanguage.googleapis.com/v1beta/openai",
+                    thinking=True)
+    assert "thinking" not in payload
+
+
+def test_thinking_is_still_sent_to_zai():
+    """Turning it off everywhere would be the other way to break this."""
+    payload = _sent("https://api.z.ai/api/paas/v4", thinking=True)
+    assert payload["thinking"] == {"type": "enabled"}
+
+
+def test_thinking_is_not_sent_to_an_endpoint_nobody_knows():
+    """A hand-typed URL could be anything. Omitting an extension costs the
+    feature; sending one a strict validator rejects costs every turn."""
+    for url in ("http://localhost:11434/v1", "https://openrouter.ai/api/v1"):
+        assert "thinking" not in _sent(url, thinking=True), url
+
+
+def test_asking_for_no_thinking_still_means_no_thinking():
+    assert "thinking" not in _sent("https://api.z.ai/api/paas/v4", thinking=False)
+
+
+def test_nothing_else_in_the_payload_is_vendor_specific():
+    """The guard against a sixth round of this. Every other field sent must be
+    one the OpenAI chat-completions schema defines, or a strict endpoint will
+    reject the request the same way."""
+    openai_fields = {"model", "messages", "temperature", "max_tokens",
+                     "stream", "tools", "tool_choice"}
+    payload = _sent("https://generativelanguage.googleapis.com/v1beta/openai",
+                    tools=[{"type": "function",
+                            "function": {"name": "f", "parameters": {}}}])
+    assert set(payload) <= openai_fields, set(payload) - openai_fields

@@ -2899,7 +2899,11 @@ async function populateModelPicker(data) {
 function modelEntries(res) {
   const out = [];
   for (const p of res.providers || []) {
-    const models = p.builtin ? (p.models || []).slice(0, 1) : (p.models || []);
+    // No longer truncated. The built-in row used to report [chat, vision] and
+    // this kept the first, because the vision model is not something to code
+    // with. The backend now sends only chat choices, so slicing here just hid
+    // every model a preset offers beyond the one picked at setup.
+    const models = p.models || [];
     for (const m of models) out.push({ provider: p.name, model: m, builtin: !!p.builtin });
   }
   return out;

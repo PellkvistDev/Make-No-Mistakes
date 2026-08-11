@@ -40,8 +40,20 @@ PRESETS = [
         "model": "glm-4.7-flash",
         "vision_model": "glm-4.6v-flash",
         "models": ["glm-4.7-flash", "glm-4.6v-flash"],
+        # Which of those are a chat choice. glm-4.6v-flash is the vision model
+        # -- it is routed to automatically for images and picking it to code
+        # with would be a mistake, so it is offered as a model but not as a
+        # model to hold a conversation in.
+        "chat_models": ["glm-4.7-flash"],
         "free_models": ["glm-4.7-flash", "glm-4.6v-flash"],
         "env_var": "ZAI_API_KEY",
+        # Non-standard request fields this endpoint understands. `thinking` is
+        # a Zhipu extension, not part of the OpenAI schema, and Google's
+        # compatibility layer rejects the whole request over it:
+        #   400 Unknown name "thinking": Cannot find field.
+        # It was sent to everything, because when it was added there was only
+        # one place it could go.
+        "extensions": ["thinking"],
         "key_url": "https://z.ai/manage-apikey/apikey-list",
         "blurb": "GLM coding models. A free tier with no card required.",
         "free": "glm-4.7-flash and the vision model are free to use.",
@@ -70,14 +82,26 @@ PRESETS = [
         # model -- but it is NOT free, and has not been since Google moved the
         # Pro models behind billing. Listing it without saying so would make
         # the free-tier line above cover something it does not.
-        "models": ["gemini-2.5-flash", "gemini-2.5-pro"],
+        # Everything this key can reach, rather than the one it starts on.
+        # Listing only the default meant the model picker had a single entry
+        # and the other models on the same key were unreachable without adding
+        # the provider again by hand.
+        "models": ["gemini-2.5-flash", "gemini-2.5-flash-lite",
+                   "gemini-2.5-pro"],
+        "chat_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite",
+                        "gemini-2.5-pro"],
         "free_models": ["gemini-2.5-flash"],
         # Pro is deliberately neither "free" nor "paid" here. Whether the free
         # tier covers it has changed more than once -- it was 5 RPM / 100 RPD
         # in early 2026, and there are reports of it moving behind billing
         # since -- and this file cannot be right about it for long. Only the
         # key itself knows, so the app says where to look instead of claiming.
-        "unsure_models": ["gemini-2.5-pro"],
+        # Flash-Lite was left out of this list at first, on the strength of a
+        # claim that it does not reliably stream tool-call arguments. That was
+        # never checked against the API, and every turn here is tool calls, so
+        # it was removing a model on a hunch. It is offered; whether the free
+        # tier covers it is the console's answer, not this file's.
+        "unsure_models": ["gemini-2.5-flash-lite", "gemini-2.5-pro"],
         "env_var": "GOOGLE_API_KEY",
         "key_url": "https://aistudio.google.com/apikey",
         "blurb": "Gemini models. A free tier with no card required.",
@@ -227,6 +251,33 @@ def model_tier(base_url: str, model: str) -> str:
     return ""
 
 
+def chat_models(base_url: str) -> list:
+    """The models of a known endpoint that are a chat choice.
+
+    Not the same as every model it lists: z.ai's vision model is reached
+    automatically for images and picking it to code with would be a mistake.
+    Empty for an endpoint nobody knows -- there is nothing to enumerate.
+    """
+    p = preset_from_base_url(base_url)
+    if not p:
+        return []
+    return list(p.get("chat_models") or p.get("models") or [])
+
+
+def supports(base_url: str, extension: str) -> bool:
+    """Does this endpoint understand a given non-standard request field?
+
+    Unknown endpoints get False, and that asymmetry is the point. Sending a
+    field a server does not know is not a soft failure: a strict validator --
+    Google's is one -- rejects the entire request, so every turn fails with a
+    message about a field the user never asked for. Omitting an extension only
+    costs the feature it enables. Silence is the safe default here for the same
+    reason it is with prices: this file cannot know what someone typed in.
+    """
+    p = preset_from_base_url(base_url)
+    return bool(p and extension in (p.get("extensions") or []))
+
+
 def to_provider(key: str, api_key: str = "") -> dict | None:
     """A preset -> the provider dict the rest of the app already understands.
 
@@ -272,10 +323,12 @@ def choices() -> list:
         # later. Anything unmarked is left unlabelled rather than assumed free.
         free = set(p.get("free_models") or [])
         unsure = set(p.get("unsure_models") or [])
+        # Chat choices, not every model: the setup screen is where someone
+        # decides what to code with, and z.ai's vision model is not that.
         c["model_options"] = [
             {"name": m,
              "tier": "free" if m in free else ("unsure" if m in unsure else "")}
-            for m in p["models"]]
+            for m in (p.get("chat_models") or p["models"])]
         out.append(c)
     out.append({
         "key": CUSTOM_KEY,

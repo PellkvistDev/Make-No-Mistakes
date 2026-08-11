@@ -110,9 +110,20 @@ def builtin_provider_name(cfg: "Config") -> str:
 
 
 def builtin_provider(cfg: "Config") -> dict:
+    from . import providers as _providers
+    # Everything this endpoint can reach, not just the one chosen at setup.
+    # It used to report [model, vision_model], so a preset offering three
+    # models produced a picker with one entry and the rest were unreachable
+    # without adding the same provider again by hand.
+    models = _providers.chat_models(cfg.base_url)
+    if cfg.model and cfg.model not in models:
+        # A model set by hand, or one the catalogue has since dropped: it is
+        # in use, so it has to stay selectable.
+        models = [cfg.model] + models
     return {"name": builtin_provider_name(cfg), "base_url": cfg.base_url,
             "api_key": cfg.resolve_api_key(),
-            "models": [cfg.model, cfg.vision_model], "builtin": True,
+            "models": models or [cfg.model],
+            "vision_model": cfg.vision_model, "builtin": True,
             "preset": cfg.provider_preset or ""}
 
 

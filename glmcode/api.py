@@ -92,6 +92,11 @@ class ZaiClient:
     def __init__(self, api_key: str, base_url: str, rate_limiter: Optional[RateLimiter] = None):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
+        # Worked out once, from the endpoint. `thinking` is a Zhipu field, not
+        # an OpenAI one, and this client stopped being z.ai-only some time ago
+        # -- the name is all that is left of that.
+        from . import providers as _providers
+        self.supports_thinking = _providers.supports(self.base_url, "thinking")
         self.rate_limiter = rate_limiter
         self.session = requests.Session()
         self.session.headers.update({
@@ -126,7 +131,11 @@ class ZaiClient:
         if tools:
             payload["tools"] = tools
             payload["tool_choice"] = "auto"
-        if thinking:
+        # Only where the endpoint is known to understand it. Sent to Google it
+        # is not ignored -- the request is rejected outright with
+        #   400 Unknown name "thinking": Cannot find field.
+        # so every single turn failed, over a field nobody asked for.
+        if thinking and self.supports_thinking:
             payload["thinking"] = {"type": "enabled"}
 
         last_err: Optional[Exception] = None
