@@ -1,6 +1,8 @@
 """Retry/backoff behavior of ZaiClient.chat and RateLimiter spacing."""
 
+import json
 import threading
+import types
 import time
 
 import pytest
@@ -225,3 +227,129 @@ def test_nothing_else_in_the_payload_is_vendor_specific():
                     tools=[{"type": "function",
                             "function": {"name": "f", "parameters": {}}}])
     assert set(payload) <= openai_fields, set(payload) - openai_fields
+
+
+# --------------------------------------------------------------------- #
+# Thought signatures.
+#
+# Gemini 3 attaches an encrypted record of the reasoning behind each tool call
+# and REQUIRES it back on every following request:
+#
+#   400 Function call is missing a thought_signature in functionCall parts.
+#       ... function call `default_api:list_dir`, position 4
+#
+# "Position 4" is the shape of it: the first tool call is fine and the turn
+# dies a step or two later, once history has to carry the signature forward.
+# Rebuilding tool calls from id/name/arguments dropped it.
+
+GOOGLE = "https://generativelanguage.googleapis.com/v1beta/openai"
+SIG = {"google": {"thought_signature": "Ct8BAdHtim8..."}}
+
+
+class _FakeResp:
+    """Just enough of requests' streaming response for the real parser."""
+
+    def __init__(self, lines):
+        self.status_code = 200
+        self._lines = lines
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def iter_lines(self, decode_unicode=True):
+        return iter(self._lines)
+
+
+def _sse(*deltas):
+    """SSE lines carrying tool_call deltas, as Google actually sends them."""
+    out = []
+    for d in deltas:
+        out.append("data: " + json.dumps(
+            {"choices": [{"delta": {"tool_calls": d}}]}))
+    out.append("data: [DONE]")
+    return out
+
+
+class _Stream(ZaiClient):
+    """A real client reading a scripted SSE body.
+
+    Deliberately NOT a reimplementation of the accumulator: an earlier version
+    of this double rebuilt tool calls itself, so deleting the real code under
+    test changed nothing and the test passed against the bug it was written
+    for. Only the socket is faked.
+    """
+
+    def __init__(self, base_url, lines):
+        super().__init__("k", base_url)
+        self.session = types.SimpleNamespace(
+            headers={}, post=lambda *a, **k: _FakeResp(lines))
+
+
+def test_a_thought_signature_survives_the_tool_call_being_rebuilt():
+    """It arrives on one delta and the arguments arrive on others; the call is
+    reassembled from all of them and the signature has to come along."""
+    c = _Stream(GOOGLE, _sse(
+        [{"index": 0, "id": "c1", "function": {"name": "list_dir"},
+          "extra_content": SIG}],
+        [{"index": 0, "function": {"arguments": '{"path"'}}],
+        [{"index": 0, "function": {"arguments": ': "."}'}}],
+    ))
+    res = c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    tc = res.tool_calls[0]
+    assert tc["function"]["arguments"] == '{"path": "."}'
+    assert tc["extra_content"] == SIG
+
+
+def test_the_signature_is_sent_back_to_google():
+    """The whole point: it must reach the NEXT request or that request 400s."""
+    c = _Capture(GOOGLE)
+    history = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "extra_content": SIG,
+             "function": {"name": "list_dir", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "a.py"},
+    ]
+    c.chat(model="m", messages=history)
+    sent = c.payloads[0]["messages"][1]["tool_calls"][0]
+    assert sent["extra_content"] == SIG
+
+
+def test_the_signature_is_not_forwarded_to_a_provider_that_never_issued_it():
+    """A chat can change provider mid-conversation. Sending Google's field on
+    to z.ai is the same mistake as sending z.ai's `thinking` to Google."""
+    history = [
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "extra_content": SIG,
+             "function": {"name": "list_dir", "arguments": "{}"}}]},
+    ]
+    c = _Capture("https://api.z.ai/api/paas/v4")
+    c.chat(model="m", messages=history)
+
+    sent = c.payloads[0]["messages"][0]["tool_calls"][0]
+    assert "extra_content" not in sent
+    assert sent["function"]["name"] == "list_dir"   # the call itself intact
+
+
+def test_trimming_for_one_provider_does_not_damage_the_stored_history():
+    """Switch to z.ai and back, and Google's signatures must still be there --
+    so the trim happens on the copy that goes on the wire, not in place."""
+    history = [
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function", "extra_content": SIG,
+             "function": {"name": "list_dir", "arguments": "{}"}}]},
+    ]
+    _Capture("https://api.z.ai/api/paas/v4").chat(
+        model="m", messages=history)
+    assert history[0]["tool_calls"][0]["extra_content"] == SIG
+
+
+def test_a_history_with_nothing_to_trim_is_passed_straight_through():
+    history = [{"role": "user", "content": "hi"}]
+    c = _Capture("https://api.z.ai/api/paas/v4")
+    c.chat(model="m", messages=history)
+    assert c.payloads[0]["messages"] is history
