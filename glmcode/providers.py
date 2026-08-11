@@ -313,9 +313,29 @@ def is_chat_model(name: str) -> bool:
     return not any(w in n for w in (
         "embedding", "embed", "aqa", "imagen", "image-generation", "veo",
         "tts", "vision-only", "rerank", "moderation", "whisper", "learnlm",
-        # Open-weights and research models. Published on the same listing,
-        # licensed separately, and routinely 404 on an ordinary key.
-        "gemma", "-image", "-audio", "-live", "computer-use"))
+        # Media models. Real, and usable on a Gemini key, but not things you
+        # hold a coding conversation with.
+        "-image", "-audio", "-live", "computer-use"))
+
+
+# Gemma is deliberately NOT in that list, after two wrong reasons for putting
+# it there. The first ("routinely 404s on an ordinary key") is contradicted by
+# a real quota page: Gemma 4 gets 30 rpm and 14,400 requests a day, the largest
+# allowance Google offers. The second -- that Gemma cannot do tool calling --
+# confused the model with one way of serving it: Gemma 4 runs tools perfectly
+# well under a local runner, which implements them through the chat template.
+#
+# Whether GOOGLE'S hosted endpoint accepts a tools array for a gemma-* model is
+# a different question, and reports that it answers "Tool use with function
+# calling is unsupported" are second-hand and span older Gemma versions. So it
+# is selectable and simply not recommended: it stays out of the preset's
+# chat_models, which keeps it off the default menu, and reaches the picker only
+# through the live listing under "show all". Trying it settles the question;
+# hiding it guarantees nobody ever can.
+#
+# Worth knowing before reaching for that daily allowance: the binding limit is
+# 16K tokens per minute against Gemini's 250K, and one agentic request carries
+# the system prompt, the files and the history.
 
 
 # Suffixes that mark a model as something other than the current stable
@@ -339,6 +359,20 @@ def is_stable(name: str) -> bool:
     return not _re.search(r"-\d{2,4}(-\d{2})*$", n)
 
 
+# Families that are a real chat model but not something to put in front of
+# someone by default. Separate from is_chat_model on purpose: that answers "can
+# you converse with it at all", this answers "should the app suggest it". Gemma
+# is here because whether Google's hosted endpoint accepts tool calls for it is
+# untested -- reachable under "show all" so the question can be settled, off the
+# default menu until it is.
+_NOT_RECOMMENDED = ("gemma",)
+
+
+def is_recommended(name: str) -> bool:
+    n = (name or "").lower()
+    return not any(w in n for w in _NOT_RECOMMENDED)
+
+
 def shortlist(models: list) -> list:
     """The models worth putting in a menu, in the order given.
 
@@ -349,7 +383,7 @@ def shortlist(models: list) -> list:
     is possible and an empty picker is useless.
     """
     chat = [m for m in models if is_chat_model(m)]
-    stable = [m for m in chat if is_stable(m)]
+    stable = [m for m in chat if is_stable(m) and is_recommended(m)]
     return stable or chat
 
 

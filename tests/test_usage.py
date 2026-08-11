@@ -92,3 +92,43 @@ def test_an_unknown_model_gets_no_claimed_limit():
     ring for it."""
     assert providers.free_limits(GOOGLE, "gemini-99-turbo") is None
     assert providers.free_limits("https://example.test/v1", "anything") is None
+
+
+def test_gemma_is_selectable_even_though_it_is_not_recommended():
+    """Gemma was filtered out twice, on two wrong reasons: that it 404s on an
+    ordinary key (a quota page says 30 rpm / 14,400 rpd), and that it cannot do
+    tool calling -- which confused the model with one way of serving it. Gemma
+    runs tools fine under a local runner.
+
+    Whether Google's hosted endpoint accepts a tools array for it is a separate
+    question nobody here has measured. So it is reachable and simply not
+    recommended: trying it settles the question, hiding it guarantees nobody
+    ever can.
+    """
+    assert providers.is_chat_model("gemma-4-31b-it")
+    # ...but not on the default menu, and not something the app would pick.
+    assert not any("gemma" in m for m in providers.chat_models(GOOGLE))
+    assert "gemma" not in providers.preset("google")["model"]
+
+
+def test_things_that_are_not_chat_models_stay_out():
+    """Loosening the filter for Gemma must not let image or speech models in --
+    those fail on the first request, which is a different thing from untested."""
+    for junk in ("imagen-4-generate", "veo-3-fast", "gemini-2.5-flash-tts",
+                 "text-embedding-004", "gemini-3-flash-live"):
+        assert not providers.is_chat_model(junk), junk
+
+
+def test_gemma_reaches_the_picker_only_under_show_all():
+    """The two questions are different and were tangled: "can you chat with
+    it" (yes -- it runs tools under a local runner) and "should the app suggest
+    it" (not until Google's hosted endpoint is known to accept tool calls)."""
+    listing = ["gemini-3.5-flash", "gemma-4-31b-it"]
+    assert providers.shortlist(listing) == ["gemini-3.5-flash"]
+    assert "gemma-4-31b-it" in [m for m in listing if providers.is_chat_model(m)]
+
+
+def test_a_provider_offering_only_unrecommended_models_still_offers_them():
+    """Better a menu of the untested than an empty one -- the same rule the
+    preview-only case needed."""
+    assert providers.shortlist(["gemma-4-31b-it"]) == ["gemma-4-31b-it"]
