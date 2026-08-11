@@ -297,6 +297,16 @@
             <input id="set-keepsignedin" type="checkbox" class="toggle" />
           </div>
 
+          <!-- Filled from the APIs paired over from the desktop. Hidden until
+               there is more than one, so a phone with a single API is not shown
+               a menu of one. -->
+          <div class="setting-block" id="set-provider-block" hidden>
+            <label class="setting-label" for="set-provider">API</label>
+            <select id="set-provider" class="setting-input"></select>
+            <p class="setting-hint">Scan the QR on your computer again to add
+               APIs you have set up since.</p>
+          </div>
+
           <div class="setting-block">
             <label class="setting-label" for="set-model">Model</label>
             <input id="set-model" class="setting-input" list="model-list" spellcheck="false" autocapitalize="off" placeholder="glm-4.7-flash" />

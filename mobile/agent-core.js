@@ -1091,6 +1091,43 @@
     "you changed and anything still to verify on a real machine. You cannot run code or spawn further " +
     "sub-agents. Be concise.";
 
+  /* Providers paired over from the desktop.
+   *
+   * Scanning again is how an API added on the desktop reaches the phone, so
+   * this runs on every scan and not just the first -- which makes MERGING the
+   * whole job. Replacing the list would throw away anything set up on the
+   * phone itself, and keeping only what is already here would make a re-scan
+   * do nothing, which is the feature.
+   *
+   * Matched on baseUrl rather than name: the name is a label the desktop may
+   * relabel (it did, when the primary provider stopped being called "z.ai
+   * (free)"), while the URL is what actually identifies an endpoint. */
+  function mergeProviders(existing, incoming) {
+    const out = (existing || []).map((p) => Object.assign({}, p));
+    const at = new Map(out.map((p, i) => [normalizeBase(p.baseUrl), i]));
+    for (const inc of incoming || []) {
+      if (!inc || !inc.baseUrl) continue;
+      const i = at.get(normalizeBase(inc.baseUrl));
+      if (i === undefined) {
+        out.push(Object.assign({}, inc));
+        at.set(normalizeBase(inc.baseUrl), out.length - 1);
+        continue;
+      }
+      // The desktop is the source of truth for what it just sent -- a rotated
+      // key has to win. But a field it did not send must not blank one the
+      // phone has: an absent key means "nothing to say", not "no key".
+      const cur = out[i];
+      if (inc.key) cur.key = inc.key;
+      if (inc.name) cur.name = inc.name;
+      if (inc.models && inc.models.length) cur.models = inc.models.slice();
+    }
+    return out;
+  }
+
+  function normalizeBase(url) {
+    return String(url || "").trim().replace(/\/+$/, "").toLowerCase();
+  }
+
   const CoreAPI = {
     encryptVault, decryptVault, deriveKey, PBKDF2_ITERS,
     aesEncrypt, aesDecrypt, exportRawKey, importRawKey,
@@ -1104,6 +1141,7 @@
     IMAGE_RE, imageMime,
     handoffNote, applyHandoff, HANDOFF_MARKER, repoStateWarning,
     healInterruptedTurn, INTERRUPTED_TOOL,
+    mergeProviders, normalizeBase,
     estimateTokens, trimHistory, historyDigest, splitTurns, COMPACT_PROMPT,
     messageChars, calibrateRatio, DEFAULT_CHARS_PER_TOKEN, IMAGE_CHARS,
     _b64: { bytesToB64, b64ToBytes },

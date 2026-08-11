@@ -62,8 +62,35 @@ def normalize_code(code: str) -> str:
     return "".join(ch for ch in str(code or "").upper() if ch.isalnum())
 
 
+def providers_for_phone(providers: list) -> list:
+    """The providers worth sending, trimmed to what the phone can use.
+
+    A provider on localhost is dropped. The phone cannot reach the desktop's
+    loopback address, so pairing one over would hand someone a menu entry that
+    fails on selection with a connection error and no explanation -- and the
+    honest place to notice that is here, not on the phone.
+
+    Providers with no key are dropped too: there is nothing to send, and an
+    entry the phone cannot authenticate is the same dead end.
+    """
+    from . import providers as _providers
+    out = []
+    for p in providers or []:
+        base = (p.get("base_url") or "").strip()
+        if not base or _providers.is_local(base):
+            continue
+        if not (p.get("api_key") or "").strip():
+            continue
+        out.append({"name": p.get("name") or base,
+                    "baseUrl": base,
+                    "key": p["api_key"],
+                    "models": list(p.get("models") or [])})
+    return out
+
+
 def build_payload(*, model_key: str = "", base_url: str = "", model: str = "",
                   github_token: str = "", sync_passphrase: str = "",
+                  providers: list | None = None,
                   now: float | None = None) -> dict:
     """The cleartext handed to the phone. Only what it actually needs, and only
     the fields that exist -- an absent secret must not show up as an empty
@@ -80,6 +107,12 @@ def build_payload(*, model_key: str = "", base_url: str = "", model: str = "",
         out["githubToken"] = github_token
     if sync_passphrase:
         out["syncPass"] = sync_passphrase
+    # Every configured provider, not just the primary. Scanning again later is
+    # how an API added on the desktop reaches the phone -- the alternative was
+    # typing a base URL and a model name into a phone by hand, or putting keys
+    # in the synced repo, which is the one place they must never go.
+    if providers:
+        out["providers"] = providers
     return out
 
 

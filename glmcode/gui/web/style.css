@@ -2131,3 +2131,16 @@ body.sidebar-open #sidebar { transform: translateX(0); }
 }
 
 [hidden] { display: none !important; }
+
+
+/* Preset shortcuts above the Add-API form. Same idea as the first screen: the
+   endpoint and the model names are things the app knows and a person should
+   not have to. */
+.api-presets { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+.api-preset {
+  padding: 6px 12px; border-radius: 999px; cursor: pointer; font-size: 12.5px;
+  font-family: inherit; color: var(--text-dim);
+  border: 1px solid var(--stroke-soft); background: var(--glass-hi);
+  transition: color 0.12s ease, border-color 0.12s ease;
+}
+.api-preset:hover { color: var(--text); border-color: var(--accent); }

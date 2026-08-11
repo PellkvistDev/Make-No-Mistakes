@@ -380,7 +380,14 @@
     setStatus("model busy — retrying in " + Math.round(waitMs / 1000) + "s… (" + attempt + "/3)");
   }
   function newModel(modelName) {
-    return AC.makeModel({ apiKey: session.secrets.modelKey, model: modelName, baseUrl: session.secrets.baseUrl, onRetry: onModelRetry });
+    // The chosen provider, falling back to what pairing set up. Both the key
+    // and the URL come from the same entry -- taking the key from one provider
+    // and the URL from another is how a key reaches an endpoint that never
+    // issued it.
+    const p = currentProvider();
+    const apiKey = (p && p.key) || session.secrets.modelKey;
+    const baseUrl = (p && p.baseUrl) || session.secrets.baseUrl;
+    return AC.makeModel({ apiKey, model: modelName, baseUrl, onRetry: onModelRetry });
   }
 
   // ================================================================ SETUP
@@ -2315,7 +2322,36 @@
   // Non-secret settings live in plain localStorage. The model NAME isn't a
   // secret (the key is), so it can live here and override what setup stored.
   function pref(k, def) { const v = localStorage.getItem(k); return v === null ? def : v; }
-  function getModelName() { return pref("mnm.model", "") || (session && session.secrets && session.secrets.model) || "glm-4.7-flash"; }
+  /* Every API this phone knows about, paired over from the desktop. Kept in
+   * localStorage next to the other preferences rather than in the vault: the
+   * vault is unlocked with the PIN and this list has to be readable to draw
+   * the settings screen. The KEYS are the sensitive part, and they came from a
+   * camera rather than the network, which is the property worth preserving. */
+  const PROVIDERS_KEY = "mnm.providers";
+  function getProviders() {
+    try { return JSON.parse(localStorage.getItem(PROVIDERS_KEY) || "[]") || []; }
+    catch { return []; }
+  }
+  function setProviders(list) {
+    try { localStorage.setItem(PROVIDERS_KEY, JSON.stringify(list || [])); } catch { }
+  }
+  /* The provider a chat runs on. Falls back to whatever pairing configured
+   * first, so a phone paired before any of this still works untouched. */
+  function currentProvider() {
+    const list = getProviders();
+    const want = pref("mnm.provider", "");
+    return list.find((p) => p.name === want)
+      || list.find((p) => AC.normalizeBase(p.baseUrl)
+        === AC.normalizeBase(session && session.secrets && session.secrets.baseUrl))
+      || list[0] || null;
+  }
+  function getModelName() {
+    const chosen = pref("mnm.model", "");
+    if (chosen) return chosen;
+    const p = currentProvider();
+    if (p && p.models && p.models.length) return p.models[0];
+    return (session && session.secrets && session.secrets.model) || "glm-4.7-flash";
+  }
   function getThinking() { return pref("mnm.thinking", "medium"); }
   function confirmCommits() { return pref("mnm.confirm", "1") === "1"; }
   function planMode() { return pref("mnm.plan", "0") === "1"; }
@@ -2347,6 +2383,9 @@
   // ================================================================ SETTINGS SHEET
   function openSettings() {
     renderBgPicker($("settings-bg"));
+    // Before the model field: it reads the chosen provider's model list, and
+    // filling the box from a stale provider is how the two disagree.
+    renderProviderPicker();
     $("set-model").value = getModelName();
     setSegOn($("set-thinking"), getThinking());
     $("set-plan").checked = planMode();
@@ -2460,8 +2499,57 @@
   $("btn-settings-done").addEventListener("click", closeSettings);
   $("settings-backdrop").addEventListener("click", (e) => { if (e.target === $("settings-backdrop")) closeSettings(); });
   $("btn-settings-lock").addEventListener("click", () => { closeSettings(); lock(); });
+  /* The API picker, and the model list that follows from it. Drawn from the
+   * paired providers so the phone offers what the desktop has, rather than a
+   * base URL typed into a phone and a model name spelled from memory. */
+  function renderProviderPicker() {
+    const list = getProviders();
+    const block = $("set-provider-block");
+    if (!block) return;
+    block.hidden = list.length < 2;
+    const sel = $("set-provider");
+    const cur = currentProvider();
+    sel.innerHTML = "";
+    for (const p of list) {
+      const o = document.createElement("option");
+      o.value = p.name; o.textContent = p.name;
+      if (cur && p.name === cur.name) o.selected = true;
+      sel.appendChild(o);
+    }
+    renderModelOptions();
+  }
+  function renderModelOptions() {
+    const dl = $("model-list");
+    const p = currentProvider();
+    if (!dl || !p || !p.models || !p.models.length) return;
+    // The chosen provider's models, so the suggestions belong to the API that
+    // will actually be called -- glm names against a Gemini key were only ever
+    // going to 404.
+    dl.innerHTML = "";
+    for (const m of p.models) {
+      const o = document.createElement("option");
+      o.value = m;
+      dl.appendChild(o);
+    }
+  }
+  if ($("set-provider")) {
+    $("set-provider").addEventListener("change", () => {
+      localStorage.setItem("mnm.provider", $("set-provider").value);
+      // The model belonged to the old API. Move to one this provider has
+      // rather than sending a name it has never heard of.
+      const p = currentProvider();
+      const models = (p && p.models) || [];
+      if (models.length && !models.includes(pref("mnm.model", ""))) {
+        localStorage.setItem("mnm.model", models[0]);
+        $("set-model").value = models[0];
+      }
+      renderModelOptions();
+      if (session) buildModel();
+    });
+  }
+
   $("set-model").addEventListener("change", () => {
-    localStorage.setItem("mnm.model", $("set-model").value.trim() || "glm-4.7-flash");
+    localStorage.setItem("mnm.model", $("set-model").value.trim() || getModelName());
     if (session) buildModel();
   });
   $("set-thinking").addEventListener("click", (e) => {
@@ -2604,6 +2692,11 @@
         if (data.baseUrl) {
           const sel = $("in-base-url");
           if ([...sel.options].some((o) => o.value === data.baseUrl)) sel.value = data.baseUrl;
+        }
+        // Merged, never replaced: scanning again is how an API added on the
+        // desktop gets here, and it must not delete one added on the phone.
+        if (data.providers && data.providers.length) {
+          setProviders(AC.mergeProviders(getProviders(), data.providers));
         }
         // Sync needs the vault key, which doesn't exist until a PIN is set —
         // so hold it and turn sync on once the vault is unlocked.
