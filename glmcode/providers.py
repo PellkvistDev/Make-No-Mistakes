@@ -42,6 +42,13 @@ PRESETS = [
         "models": ["glm-4.7-flash", "glm-4.6v-flash"],
         "free_models": ["glm-4.7-flash", "glm-4.6v-flash"],
         "env_var": "ZAI_API_KEY",
+        # Non-standard request fields this endpoint understands. `thinking` is
+        # a Zhipu extension, not part of the OpenAI schema, and Google's
+        # compatibility layer rejects the whole request over it:
+        #   400 Unknown name "thinking": Cannot find field.
+        # It was sent to everything, because when it was added there was only
+        # one place it could go.
+        "extensions": ["thinking"],
         "key_url": "https://z.ai/manage-apikey/apikey-list",
         "blurb": "GLM coding models. A free tier with no card required.",
         "free": "glm-4.7-flash and the vision model are free to use.",
@@ -225,6 +232,20 @@ def model_tier(base_url: str, model: str) -> str:
     if model in (p.get("unsure_models") or []):
         return "unsure"
     return ""
+
+
+def supports(base_url: str, extension: str) -> bool:
+    """Does this endpoint understand a given non-standard request field?
+
+    Unknown endpoints get False, and that asymmetry is the point. Sending a
+    field a server does not know is not a soft failure: a strict validator --
+    Google's is one -- rejects the entire request, so every turn fails with a
+    message about a field the user never asked for. Omitting an extension only
+    costs the feature it enables. Silence is the safe default here for the same
+    reason it is with prices: this file cannot know what someone typed in.
+    """
+    p = preset_from_base_url(base_url)
+    return bool(p and extension in (p.get("extensions") or []))
 
 
 def to_provider(key: str, api_key: str = "") -> dict | None:
