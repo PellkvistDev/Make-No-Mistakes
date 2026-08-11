@@ -1167,7 +1167,7 @@ class Api:
                 self._agent.set_mode(value)
             else:
                 c.mode = value
-        elif key == "vision_route" and value in ("describe", "direct"):
+        elif key == "vision_route" and value in ("auto", "describe", "direct"):
             c.vision_route = value
         elif key == "thinking_mode" and value in ("low", "medium", "high", "max"):
             c.thinking_mode = value

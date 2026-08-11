@@ -556,3 +556,29 @@ def test_no_vendor_is_written_into_the_agents_identity():
     first = SYSTEM_PROMPT.splitlines()[0].lower()
     for vendor in ("glm", "z.ai", "zai", "gemini", "google", "openai"):
         assert vendor not in first, f"{vendor} in the agent's own name"
+
+
+# ---- images go to the model that can read them ----------------------------
+
+def test_gemini_reads_images_itself():
+    assert providers.is_multimodal(
+        "https://generativelanguage.googleapis.com/v1beta/openai")
+
+
+def test_a_provider_with_a_separate_vision_model_does_not():
+    assert not providers.is_multimodal("https://api.z.ai/api/paas/v4")
+
+
+def test_an_unknown_endpoint_gets_the_safe_route():
+    """Narrating an image to a model that could have read it wastes a call;
+    sending one to a model that cannot read it fails the turn."""
+    assert not providers.is_multimodal("https://example.test/v1")
+
+
+def test_the_google_default_is_a_model_that_still_exists():
+    """The preset's `model` was left on gemini-2.5-flash when its model LIST
+    was updated -- so setup kept choosing a model retired for new keys."""
+    g = providers.preset("google")
+    assert g["model"] in g["chat_models"]
+    assert g["vision_model"] in g["chat_models"]
+    assert g["model"] == g["chat_models"][0], "default is not the first preference"
