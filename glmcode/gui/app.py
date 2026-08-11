@@ -1410,6 +1410,9 @@ class Api:
             known = providers_mod.preset_from_base_url(p["base_url"])
             out.append({"name": p["name"], "base_url": p["base_url"],
                         "models": models,
+                        # Everything the provider listed, when that is more
+                        # than the shortlist shown by default.
+                        "all_models": p.get("all_models") or models,
                         "builtin": bool(p.get("builtin")),
                         "local": providers_mod.is_local(p["base_url"]),
                         "tier": providers_mod.model_tier(

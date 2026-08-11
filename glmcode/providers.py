@@ -278,7 +278,45 @@ def is_chat_model(name: str) -> bool:
     n = (name or "").lower()
     return not any(w in n for w in (
         "embedding", "embed", "aqa", "imagen", "image-generation", "veo",
-        "tts", "vision-only", "rerank", "moderation", "whisper", "learnlm"))
+        "tts", "vision-only", "rerank", "moderation", "whisper", "learnlm",
+        # Open-weights and research models. Published on the same listing,
+        # licensed separately, and routinely 404 on an ordinary key.
+        "gemma", "-image", "-audio", "-live", "computer-use"))
+
+
+# Suffixes that mark a model as something other than the current stable
+# release of its family: previews, experiments, and pinned dated snapshots.
+_UNSTABLE = ("preview", "-exp", "experimental", "-latest", "-thinking")
+
+
+def is_stable(name: str) -> bool:
+    """Is this the plain, current release of its family?
+
+    `GET /models` lists preview builds, experiments and dated snapshots
+    alongside the real thing -- and does not say which of them the key can
+    actually use. Forty entries, several unusable, is a worse list than the
+    stale one it replaced.
+    """
+    import re as _re
+    n = (name or "").lower()
+    if any(w in n for w in _UNSTABLE):
+        return False
+    # Pinned snapshots: -001, -002, or a date like -05-20 / -2025-04-17.
+    return not _re.search(r"-\d{2,4}(-\d{2})*$", n)
+
+
+def shortlist(models: list) -> list:
+    """The models worth putting in a menu, in the order given.
+
+    Everything else stays available behind "show all" -- hiding a model you
+    are entitled to would be the worse failure, so this narrows the default
+    view and never the choice. Falls back to the full list rather than
+    returning nothing, since a provider whose every name looks like a preview
+    is possible and an empty picker is useless.
+    """
+    chat = [m for m in models if is_chat_model(m)]
+    stable = [m for m in chat if is_stable(m)]
+    return stable or chat
 
 
 def preferred_model(available: list, base_url: str) -> str:

@@ -117,7 +117,14 @@ def builtin_provider(cfg: "Config") -> dict:
     # without adding the same provider again by hand.
     # What the endpoint actually serves wins over what this app was told to
     # expect. Falls back to the catalogue when nobody has asked it yet.
-    models = list(cfg.available_models) or _providers.chat_models(cfg.base_url)
+    #
+    # Shortlisted, because a provider's listing is not a list of what your key
+    # can use: Google publishes previews, experiments, dated snapshots and
+    # separately-licensed open models on the same endpoint, several of which
+    # 404 when called. Forty entries with no way to tell them apart is a worse
+    # menu than the stale one. The rest stay reachable under "show all".
+    everything = list(cfg.available_models) or _providers.chat_models(cfg.base_url)
+    models = _providers.shortlist(everything)
     if cfg.model and cfg.model not in models:
         # A model set by hand, or one the catalogue has since dropped: it is
         # in use, so it has to stay selectable.
@@ -125,6 +132,9 @@ def builtin_provider(cfg: "Config") -> dict:
     return {"name": builtin_provider_name(cfg), "base_url": cfg.base_url,
             "api_key": cfg.resolve_api_key(),
             "models": models or [cfg.model],
+            # Everything the provider listed, for "show all". Narrowing the
+            # default view must never narrow the choice.
+            "all_models": everything or [cfg.model],
             "vision_model": cfg.vision_model, "builtin": True,
             "preset": cfg.provider_preset or ""}
 
