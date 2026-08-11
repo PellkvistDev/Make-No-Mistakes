@@ -251,6 +251,36 @@ def model_tier(base_url: str, model: str) -> str:
     return ""
 
 
+def is_chat_model(name: str) -> bool:
+    """Is this the kind of model you can hold a conversation with?
+
+    A `/models` listing is everything the key can reach, which includes
+    embedding, image and text-to-speech models that would fail on the first
+    chat request. Excluded by what they are called, because that is all the
+    listing gives -- crude, but wrong only in the direction of showing one
+    extra name, never of hiding a usable model behind a guess.
+    """
+    n = (name or "").lower()
+    return not any(w in n for w in (
+        "embedding", "embed", "aqa", "imagen", "image-generation", "veo",
+        "tts", "vision-only", "rerank", "moderation", "whisper", "learnlm"))
+
+
+def preferred_model(available: list, base_url: str) -> str:
+    """Which of these to start on.
+
+    The catalogue's order is a preference, not a promise: whatever it names
+    may be gone. So the first preference that is actually on offer wins, and
+    failing that the first thing offered -- a working model nobody chose beats
+    a chosen model that 404s.
+    """
+    have = [m for m in available if is_chat_model(m)]
+    for want in chat_models(base_url):
+        if want in have:
+            return want
+    return have[0] if have else ""
+
+
 def chat_models(base_url: str) -> list:
     """The models of a known endpoint that are a chat choice.
 
