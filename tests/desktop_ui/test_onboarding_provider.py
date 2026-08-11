@@ -480,3 +480,37 @@ def test_an_api_already_set_up_is_not_offered_again(desktop):
         "#api-presets .api-preset", "els => els.map(e => e.textContent)")
     assert not any("Google" in t for t in labels), labels
     assert desktop.errors == []
+
+
+def test_the_picker_shows_todays_free_tier_usage(desktop):
+    """20 requests a day runs out inside one task, so it belongs where the
+    model is chosen -- not in a settings page nobody opens mid-job."""
+    desktop.boot(providers={"providers": [{
+        "name": "Google AI Studio", "builtin": True,
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "models": ["gemini-3.5-flash-lite", "gemini-3.6-flash", "mystery-model"],
+        "all_models": ["gemini-3.5-flash-lite", "gemini-3.6-flash", "mystery-model"],
+        "quota": {"gemini-3.5-flash-lite": {"used": 12, "rpd": 500, "rpm": 15},
+                  "gemini-3.6-flash": {"used": 23, "rpd": 20, "rpm": 5}},
+        "local": False, "tier": "", "key_url": "", "has_key": True}],
+        "chat_provider": "Google AI Studio",
+        "chat_model": "gemini-3.5-flash-lite", "chat_tier": ""})
+    desktop.page.evaluate("() => populateModelPicker()")
+    desktop.page.click("#model-chip")
+    desktop.page.wait_for_timeout(250)
+
+    rings = desktop.page.eval_on_selector_all(
+        "#model-menu .model-opt", "els => els.map(e => {"
+        "const q = e.querySelector('.model-quota');"
+        "return q ? [e.querySelector('.model-opt-name').textContent,"
+        "            q.textContent, q.className] : null; })")
+    by_model = {r[0]: r for r in rings if r}
+
+    assert by_model["gemini-3.5-flash-lite"][1] == "12/500"
+    # Over its allowance, and marked as such rather than just a full ring.
+    assert by_model["gemini-3.6-flash"][1] == "23/20"
+    assert "spent" in by_model["gemini-3.6-flash"][2]
+    # A model with no known allowance gets NO ring: unknown is not unlimited,
+    # and it is not a full bar either.
+    assert "mystery-model" not in by_model
+    assert desktop.errors == []

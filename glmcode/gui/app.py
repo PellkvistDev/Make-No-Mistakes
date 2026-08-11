@@ -36,6 +36,7 @@ from .. import githubsync
 from .. import pairing
 from .. import qrcode_util
 from .. import syncstore
+from .. import usage as usage_mod
 from ..notify import APP_NAME, notify
 from ..prompts import EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT
 from ..sessions import SessionStore, new_id, to_display
@@ -1408,8 +1409,20 @@ class Api:
             # Where this provider's keys come from, so the key field can point
             # at the right console instead of naming z.ai whatever it is.
             known = providers_mod.preset_from_base_url(p["base_url"])
+            # Requests made today against each model, with the free-tier
+            # allowance where one is known. A day's quota here is small enough
+            # to run out mid-task (20/day for Gemini Flash), so it belongs
+            # where the model is chosen rather than in a settings page.
+            used = usage_mod.today()
+            quota = {}
+            for m in (p.get("all_models") or models):
+                lim = providers_mod.free_limits(p["base_url"], m)
+                if lim or used.get(m):
+                    quota[m] = {"used": used.get(m, 0),
+                                "rpd": (lim or {}).get("rpd"),
+                                "rpm": (lim or {}).get("rpm")}
             out.append({"name": p["name"], "base_url": p["base_url"],
-                        "models": models,
+                        "models": models, "quota": quota,
                         # Everything the provider listed, when that is more
                         # than the shortlist shown by default.
                         "all_models": p.get("all_models") or models,

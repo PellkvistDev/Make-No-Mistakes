@@ -2144,3 +2144,18 @@ body.sidebar-open #sidebar { transform: translateX(0); }
   transition: color 0.12s ease, border-color 0.12s ease;
 }
 .api-preset:hover { color: var(--text); border-color: var(--accent); }
+
+
+/* Free-tier allowance used today, beside each model in the picker. */
+.model-quota { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; flex: none; }
+.model-quota svg { width: 15px; height: 15px; transform: rotate(-90deg); }
+.model-quota .mq-bg { fill: none; stroke: var(--stroke-soft); stroke-width: 3; }
+.model-quota .mq-fg {
+  fill: none; stroke: var(--accent); stroke-width: 3; stroke-linecap: round;
+  transition: stroke-dasharray 0.2s ease;
+}
+.model-quota em { font-style: normal; font-size: 10.5px; color: var(--text-faint); }
+.model-quota.low .mq-fg { stroke: #e8b339; }
+.model-quota.low em { color: #e8b339; }
+.model-quota.spent .mq-fg { stroke: #ff6b6b; }
+.model-quota.spent em { color: #ff6b6b; }

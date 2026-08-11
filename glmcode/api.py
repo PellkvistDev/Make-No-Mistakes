@@ -171,6 +171,14 @@ class ZaiClient:
             # hammering the API. Placed after the rate limiter because that
             # blocks too, and both waits can run for tens of seconds.
             _raise_if_cancelled(cancel)
+            # Counted here rather than at a call site: this is the one place a
+            # request actually goes out, so sub-agents, retries and the vision
+            # model are all included without anything having to remember to.
+            try:
+                from . import usage as _usage
+                _usage.record(model)
+            except Exception:
+                pass
             try:
                 return self._stream_once(payload, on_content, on_reasoning, cancel)
             except ApiError as e:

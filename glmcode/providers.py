@@ -76,8 +76,8 @@ PRESETS = [
         # Flash rather than Flash-Lite deliberately: the Lite models are cheaper
         # and faster but do not reliably stream tool-call arguments, and every
         # turn here is tool calls.
-        "model": "gemini-3.6-flash",
-        "vision_model": "gemini-3.6-flash",
+        "model": "gemini-3.5-flash-lite",
+        "vision_model": "gemini-3.5-flash-lite",
         # Every Gemini model reads images itself, so there is nothing to route
         # to a second model. A property of the vendor's whole line rather than
         # of any one model name, which is why it is safe to write down here --
@@ -97,12 +97,34 @@ PRESETS = [
         # users" months before its announced 16 Oct 2026 shutdown, and the same
         # is reported for 2.5 Flash-Lite and 2.5 Pro. The 2.5 entries stay at
         # the back for keys that still have access to them.
-        "models": ["gemini-3.6-flash", "gemini-3.5-flash",
-                   "gemini-3.5-flash-lite", "gemini-3.1-pro",
-                   "gemini-2.5-flash", "gemini-2.5-pro"],
-        "chat_models": ["gemini-3.6-flash", "gemini-3.5-flash",
-                        "gemini-3.5-flash-lite", "gemini-3.1-pro",
-                        "gemini-2.5-flash", "gemini-2.5-pro"],
+        # Taken from a real free-tier quota page, not from documentation. Every
+        # model here has a non-zero free allowance; the Pro models are absent
+        # because that page shows them as 0 / 0 -- no free access at all, which
+        # is the answer to a question this file spent a long time hedging.
+        #
+        # Lite first, and it is not a quality judgement. Flash gets 20 requests
+        # a DAY on this tier and an agentic task spends several per turn, so it
+        # runs out inside one job; Lite gets 500. A weaker model that answers
+        # beats a better one that 429s, and the picker shows both numbers so
+        # the trade is visible rather than implied.
+        "models": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
+                   "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash",
+                   "gemini-2.5-flash", "gemini-2.5-flash-lite"],
+        "chat_models": ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
+                        "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash",
+                        "gemini-2.5-flash", "gemini-2.5-flash-lite"],
+        # requests/minute and requests/day, free tier. Used to show how much of
+        # today is left, and to say plainly which models a free key cannot
+        # reach at all. A model absent from here gets no claim either way.
+        "free_tier": {
+            "gemini-3.5-flash-lite": {"rpm": 15, "rpd": 500},
+            "gemini-3.1-flash-lite": {"rpm": 15, "rpd": 500},
+            "gemini-3.6-flash": {"rpm": 5, "rpd": 20},
+            "gemini-3.5-flash": {"rpm": 5, "rpd": 20},
+            "gemini-3-flash": {"rpm": 5, "rpd": 20},
+            "gemini-2.5-flash": {"rpm": 5, "rpd": 20},
+            "gemini-2.5-flash-lite": {"rpm": 10, "rpd": 20},
+        },
         # No per-model free/paid claims. Which models a free tier covers has
         # changed repeatedly, and a label here would be a guess about someone
         # else's billing attached to a model name that may not outlive it.
@@ -119,7 +141,7 @@ PRESETS = [
         # pointing at one fails on its first message. Listed is not the same as
         # recommended, and this is the difference.
         "retired_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite",
-                           "gemini-2.5-pro"],
+                           "gemini-2.5-pro", "gemini-3.1-pro"],
         # Gemini 3 returns a thought_signature on every tool call and requires
         # it back on each following request. Declared as an extension so it is
         # sent here and stripped for everyone else, exactly like z.ai's
@@ -135,8 +157,8 @@ PRESETS = [
         # No model named and no quota quoted. "Flash is free" was true when it
         # was written and then the model itself was withdrawn; AI Studio is the
         # only place that knows what this key gets today.
-        "free": "There is a free tier. AI Studio shows which models it covers "
-                "and what your quota is.",
+        "free": "Free tier: Lite models get 500 requests a day, Flash 20. "
+                "No Pro model is available on it.",
         # Said plainly and shown next to the word "free", because it is the one
         # thing about this option that someone might mind and would otherwise
         # only find out later. This app sends source code.
@@ -357,6 +379,18 @@ def chat_models(base_url: str) -> list:
     if not p:
         return []
     return list(p.get("chat_models") or p.get("models") or [])
+
+
+def free_limits(base_url: str, model: str) -> dict | None:
+    """This model's free-tier allowance, or None if nothing is known.
+
+    None is not "unlimited" and the UI must not draw it as a full ring -- it
+    means this file has no figure, which is the honest state for every provider
+    whose quota page nobody has read.
+    """
+    p = preset_from_base_url(base_url)
+    got = (p or {}).get("free_tier", {}).get(model)
+    return dict(got) if got else None
 
 
 def is_multimodal(base_url: str) -> bool:
