@@ -56,17 +56,6 @@ def test_the_socket_host_is_allowed_over_wss_specifically():
 
 def _diagnostics(phone):
     """The panel as rendered, not the function behind it: these are read off a
-    screen and pasted into a chat, so the text is the artefact that matters."""
-    phone.page.evaluate("() => document.getElementById('btn-chat-settings').click()")
-    phone.page.wait_for_timeout(300)
-    text = phone.page.text_content("#set-diag") or ""
-    return dict(
-        (line.split(": ", 1)[0].strip(), line.split(": ", 1)[1].strip())
-        for line in text.split("\n") if ": " in line)
-
-
-def _diagnostics(phone):
-    """The panel as rendered, not the function behind it: these are read off a
     screen and pasted into a chat, so the text IS the artefact that matters."""
     phone.page.evaluate("() => document.getElementById('btn-chat-settings').click()")
     phone.page.wait_for_timeout(400)

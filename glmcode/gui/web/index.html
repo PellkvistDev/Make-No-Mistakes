@@ -380,6 +380,16 @@
 <div id="phoneapp-backdrop" class="backdrop" hidden>
   <div class="sheet glass-strong" role="dialog" aria-modal="true" aria-labelledby="phoneapp-title">
     <div class="sheet-head"><h2 id="phoneapp-title">Set up your phone</h2></div>
+    <!-- Two steps, in the order they are actually done, and you can move
+         between them. This used to open straight onto the pairing code with
+         one button to "just show the link" and no way back — so the common
+         path (install the app, THEN send the keys into it) meant closing and
+         reopening the sheet, and the pairing code's five-minute clock ran
+         down while you were still installing. -->
+    <div class="seg" id="phoneapp-step" role="radiogroup" aria-label="Set-up step">
+      <button data-v="install" role="radio" class="on">1 · Install the app</button>
+      <button data-v="keys" role="radio">2 · Send your keys</button>
+    </div>
     <p class="row-sub" id="phoneapp-hint">Scan with your phone's camera, then “Add to Home Screen”.</p>
     <div id="phoneapp-qr" class="qr-box" aria-label="QR code for the phone app"></div>
     <!-- The code is shown as TEXT and never encoded into the image: that is what
@@ -391,7 +401,6 @@
     <a id="phoneapp-url" class="qr-url mono" target="_blank" rel="noopener"></a>
     <p id="phoneapp-error" class="row-sub" style="color:var(--danger,#ff6b6b)" hidden></p>
     <div class="sheet-actions">
-      <button id="phoneapp-plain" class="btn btn-ghost">Just the link, no keys</button>
       <button id="phoneapp-copy" class="btn btn-ghost" hidden>Copy link</button>
       <button id="phoneapp-open" class="btn btn-ghost" hidden>Open in browser</button>
       <button id="phoneapp-close" class="btn btn-primary">Done</button>
