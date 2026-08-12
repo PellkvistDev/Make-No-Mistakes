@@ -9,7 +9,7 @@
  * to the model API and GitHub (cross-origin, and/or non-GET) bypass the SW
  * entirely and are never stored.
  */
-const CACHE = "mnm-shell-v5";   // bumped: forces a fresh shell onto phones that
+const CACHE = "mnm-shell-v6";   // bumped: forces a fresh shell onto phones that
                                 // are sitting on an HTTP-cached copy of the old one
 const SHELL = [
   "./index.html",
@@ -17,6 +17,12 @@ const SHELL = [
   "./agent-core.js",
   "./style.css",
   "./manifest.webmanifest",
+  // Precached so the home-screen icon survives being installed offline, and
+  // because a missing icon is not something the app can report.
+  "./icon-180.png",
+  "./icon-192.png",
+  "./icon-512.png",
+  "./icon-maskable-512.png",
   // Precached so pairing works on a phone that's offline — which is exactly
   // when you're setting one up. Only loaded when the scanner actually opens.
   "./vendor/jsQR.js",
