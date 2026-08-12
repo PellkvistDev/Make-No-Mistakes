@@ -1,6 +1,9 @@
 """Retry/backoff behavior of ZaiClient.chat and RateLimiter spacing."""
 
 import json
+import pathlib
+import shutil
+import subprocess
 import threading
 import types
 import time
@@ -353,6 +356,185 @@ def test_a_history_with_nothing_to_trim_is_passed_straight_through():
     c = _Capture("https://api.z.ai/api/paas/v4")
     c.chat(model="m", messages=history)
     assert c.payloads[0]["messages"] is history
+
+
+# --------------------------------------------------------------------- #
+# Parallel tool calls.
+#
+# Three calls came back as one, with their arguments concatenated:
+#   {"path":"a.png"}{"path":"b.png"}{"path":"schrodinger_results.png"}
+#   ERROR: could not parse tool arguments: Extra data: line 1 column 78
+# and then a 400 on the next request, because the assistant message left in
+# the history holds a tool call whose arguments are not JSON.
+#
+# The accumulator keyed slots on `index` and defaulted a missing one to 0.
+# z.ai numbers its deltas, so that held; Google's OpenAI-compatibility layer
+# does not send `index` at all when it issues calls in parallel, so all three
+# landed in slot 0 and appended to each other.
+
+def _names_and_args(res):
+    return [(t["function"]["name"], t["function"]["arguments"])
+            for t in res.tool_calls]
+
+
+def test_parallel_calls_without_an_index_stay_separate():
+    """Google's actual shape: distinct ids, no `index` anywhere."""
+    c = _Stream(GOOGLE, _sse(
+        [{"id": "c1", "function": {"name": "view_image",
+                                   "arguments": '{"path":"a.png"}'}}],
+        [{"id": "c2", "function": {"name": "view_image",
+                                   "arguments": '{"path":"b.png"}'}}],
+        [{"id": "c3", "function": {"name": "view_image",
+                                   "arguments": '{"path":"c.png"}'}}],
+    ))
+    res = c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    assert _names_and_args(res) == [
+        ("view_image", '{"path":"a.png"}'),
+        ("view_image", '{"path":"b.png"}'),
+        ("view_image", '{"path":"c.png"}'),
+    ]
+    assert [t["id"] for t in res.tool_calls] == ["c1", "c2", "c3"]
+    for t in res.tool_calls:                 # the actual failure downstream
+        json.loads(t["function"]["arguments"])
+
+
+def test_an_id_reopens_its_own_call_however_the_deltas_interleave():
+    """Arguments for two calls arriving alternately, identified only by id."""
+    c = _Stream(GOOGLE, _sse(
+        [{"id": "c1", "function": {"name": "read", "arguments": '{"p":'}}],
+        [{"id": "c2", "function": {"name": "grep", "arguments": '{"q":'}}],
+        [{"id": "c1", "function": {"arguments": '"a"}'}}],
+        [{"id": "c2", "function": {"arguments": '"b"}'}}],
+    ))
+    res = c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    assert _names_and_args(res) == [
+        ("read", '{"p":"a"}'), ("grep", '{"q":"b"}')]
+
+
+def test_an_index_still_groups_the_deltas_that_carry_one():
+    """z.ai's shape must not regress: one call, split across three deltas,
+    with the id repeated on each. Keying purely on arrival order would make
+    three calls out of it."""
+    c = _Stream("https://api.z.ai/api/paas/v4", _sse(
+        [{"index": 0, "id": "c1", "function": {"name": "read",
+                                               "arguments": '{"p"'}}],
+        [{"index": 0, "id": "c1", "function": {"arguments": ':"a.py"'}}],
+        [{"index": 0, "id": "c1", "function": {"arguments": '}'}}],
+    ))
+    res = c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    assert _names_and_args(res) == [("read", '{"p":"a.py"}')]
+
+
+def test_a_continuation_with_no_id_extends_the_call_it_follows():
+    """The id comes on the opening delta only and the arguments stream after
+    it bare -- so a delta with neither id nor index belongs to the call most
+    recently opened, not to the first one."""
+    c = _Stream(GOOGLE, _sse(
+        [{"id": "c1", "function": {"name": "read", "arguments": '{"p":"a"}'}}],
+        [{"id": "c2", "function": {"name": "grep", "arguments": '{"q":'}}],
+        [{"function": {"arguments": '"b"}'}}],
+    ))
+    res = c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    assert _names_and_args(res) == [
+        ("read", '{"p":"a"}'), ("grep", '{"q":"b"}')]
+
+
+_CORE_JS = pathlib.Path(__file__).resolve().parent.parent / "mobile" / "agent-core.js"
+needs_node = pytest.mark.skipif(
+    not (shutil.which("node") and _CORE_JS.is_file()),
+    reason="node or mobile/agent-core.js unavailable")
+
+# The phone runs its own accumulator against the same endpoints, and a chat
+# started on one device is continued on the other -- so it has to group deltas
+# the same way or the same three images come back as one broken call there.
+_PHONE_DRIVER = """
+const C = require(process.argv[1]);
+const lines = JSON.parse(process.argv[2]);
+const body = {
+  getReader() {
+    let i = 0;
+    const enc = new TextEncoder();
+    return { read: async () => i < lines.length
+      ? { done: false, value: enc.encode(lines[i++] + "\\n") }
+      : { done: true } };
+  },
+};
+const model = C.makeModel({
+  apiKey: "k", model: "m",
+  fetch: async () => ({ ok: true, body }),
+});
+model.chat([{ role: "user", content: "hi" }], [], () => {}).then((m) => {
+  console.log(JSON.stringify((m.tool_calls || []).map(
+    (t) => [t.function.name, t.function.arguments])));
+});
+"""
+
+
+def _phone_tool_calls(lines):
+    out = subprocess.run(["node", "-e", _PHONE_DRIVER, str(_CORE_JS),
+                          json.dumps(lines)],
+                         capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return [tuple(x) for x in json.loads(out.stdout)]
+
+
+@needs_node
+def test_the_phone_splits_parallel_calls_the_same_way():
+    got = _phone_tool_calls(_sse(
+        [{"id": "c1", "function": {"name": "view_image",
+                                   "arguments": '{"path":"a.png"}'}}],
+        [{"id": "c2", "function": {"name": "view_image",
+                                   "arguments": '{"path":"b.png"}'}}],
+        [{"id": "c3", "function": {"name": "view_image",
+                                   "arguments": '{"path":"c.png"}'}}],
+    ))
+    assert got == [("view_image", '{"path":"a.png"}'),
+                   ("view_image", '{"path":"b.png"}'),
+                   ("view_image", '{"path":"c.png"}')]
+
+
+@needs_node
+def test_the_phone_keeps_one_calls_fragments_together():
+    """The half that arrival order alone gets wrong: an id on the opening
+    delta and the arguments streaming after it bare is ONE call, not four."""
+    got = _phone_tool_calls(_sse(
+        [{"id": "c1", "function": {"name": "read"}}],
+        [{"function": {"arguments": '{"p"'}}],
+        [{"function": {"arguments": ':"a.py"'}}],
+        [{"function": {"arguments": '}'}}],
+    ))
+    assert got == [("read", '{"p":"a.py"}')]
+
+
+@needs_node
+def test_the_phone_still_groups_by_index_where_one_is_sent():
+    got = _phone_tool_calls(_sse(
+        [{"index": 0, "id": "c1", "function": {"name": "read",
+                                               "arguments": '{"p"'}}],
+        [{"index": 0, "id": "c1", "function": {"arguments": ':"a.py"}'}}],
+    ))
+    assert got == [("read", '{"p":"a.py"}')]
+
+
+def test_indexed_and_unindexed_calls_do_not_collide():
+    """A provider that numbers some calls and not others must not have the
+    unnumbered one land on top of a slot already taken."""
+    c = _Stream(GOOGLE, _sse(
+        [{"index": 0, "id": "c1", "function": {"name": "read",
+                                               "arguments": '{"p":"a"}'}}],
+        [{"index": 1, "id": "c2", "function": {"name": "grep",
+                                               "arguments": '{"q":"b"}'}}],
+        [{"index": 1, "id": "c3", "function": {"name": "list",
+                                               "arguments": '{"d":"."}'}}],
+    ))
+    res = c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+
+    assert sorted(_names_and_args(res)) == [
+        ("grep", '{"q":"b"}'), ("list", '{"d":"."}'), ("read", '{"p":"a"}')]
 
 
 # --------------------------------------------------------------------- #

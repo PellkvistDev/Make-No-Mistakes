@@ -1,7 +1,8 @@
 """z.ai (Zhipu) API client: OpenAI-compatible chat completions with SSE streaming.
 
 Handles:
-- streaming deltas (content, reasoning_content, tool_calls) with index-based merging
+- streaming deltas (content, reasoning_content, tool_calls) merged by call id,
+  falling back to index for providers that number their deltas
 - automatic retry with backoff on 429/5xx (the free tier is rate-limited to ~1 req/s)
 - vision requests (image_url content parts with base64 data URIs)
 """
@@ -9,6 +10,7 @@ Handles:
 from __future__ import annotations
 
 import base64
+import itertools
 import json
 import mimetypes
 import random
@@ -336,13 +338,42 @@ class ZaiClient:
                         on_content(content)
 
                 for tc in delta.get("tool_calls") or []:
-                    idx = tc.get("index", 0)
+                    # WHICH call this delta belongs to. `index` is the OpenAI
+                    # way and z.ai sends it; Google's compatibility layer omits
+                    # it for parallel calls, so defaulting to 0 dropped three
+                    # simultaneous calls into one slot and concatenated their
+                    # arguments into
+                    #   {"path":"a.png"}{"path":"b.png"}{"path":"c.png"}
+                    # -- one unparseable blob where three calls should have
+                    # been, and then a 400 on the next request because that
+                    # assistant message is malformed.
+                    #
+                    # An id identifies a call outright, so it wins when there
+                    # is one: a new id is a new call whatever the index says.
+                    # A delta with neither (a pure continuation) extends the
+                    # call most recently opened.
+                    tcid = tc.get("id") or ""
+                    if tcid:
+                        idx = next((k for k, v in tool_calls.items()
+                                    if v["id"] == tcid), None)
+                        if idx is None:
+                            idx = tc.get("index")
+                            if idx is None or idx in tool_calls:
+                                # A free slot, not len(): the keys are whatever
+                                # the provider numbered them, so they can be
+                                # sparse and len() can land on a taken one.
+                                idx = next(k for k in itertools.count()
+                                           if k not in tool_calls)
+                    else:
+                        idx = tc.get("index")
+                        if idx is None:
+                            idx = max(tool_calls) if tool_calls else 0
                     slot = tool_calls.setdefault(idx, {
                         "id": "", "type": "function",
                         "function": {"name": "", "arguments": ""},
                     })
-                    if tc.get("id"):
-                        slot["id"] = tc["id"]
+                    if tcid:
+                        slot["id"] = tcid
                     if tc.get("type"):
                         slot["type"] = tc["type"]
                     fn = tc.get("function") or {}

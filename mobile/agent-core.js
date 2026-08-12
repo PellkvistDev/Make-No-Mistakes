@@ -733,15 +733,39 @@
     const baseMs = opts.retryBaseMs || 2000;
     const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
     // Fold one streamed delta into the message being assembled. Tool calls
-    // arrive in fragments keyed by index (name first, then the arguments JSON
-    // a few characters at a time), so they're accumulated rather than replaced.
+    // arrive in fragments (name first, then the arguments JSON a few
+    // characters at a time), so they're accumulated rather than replaced;
+    // which call a fragment belongs to is worked out below.
     function applyDelta(msg, d, onDelta) {
       if (!d) return;
       if (d.content) { msg.content += d.content; if (onDelta) onDelta(d.content); }
       if (!d.tool_calls) return;
       msg.tool_calls = msg.tool_calls || [];
       for (const tc of d.tool_calls) {
-        const i = tc.index != null ? tc.index : msg.tool_calls.length;
+        // WHICH call this delta belongs to. `index` is the OpenAI way and
+        // z.ai sends it, but Google's compatibility layer omits it entirely
+        // when it issues calls in parallel -- and then arrival order alone
+        // splits one call's streamed arguments across several slots, while
+        // defaulting to 0 merges several calls into one and concatenates
+        // their arguments into {"path":"a.png"}{"path":"b.png"}, which is
+        // not JSON and takes the whole turn down with it.
+        //
+        // An id names a call outright, so it wins wherever there is one: a
+        // new id is a new call whatever the index says. A delta carrying
+        // neither is a continuation, and extends the call most recently
+        // opened. The desktop client keys these the same way on purpose.
+        let i;
+        if (tc.id) {
+          i = msg.tool_calls.findIndex((s) => s && s.id === tc.id);
+          if (i < 0) {
+            i = tc.index;
+            if (i == null || msg.tool_calls[i]) i = msg.tool_calls.length;
+          }
+        } else if (tc.index != null) {
+          i = tc.index;
+        } else {
+          i = msg.tool_calls.length ? msg.tool_calls.length - 1 : 0;
+        }
         if (!msg.tool_calls[i]) msg.tool_calls[i] = { id: "", type: "function", function: { name: "", arguments: "" } };
         const slot = msg.tool_calls[i];
         if (tc.id) slot.id = tc.id;
