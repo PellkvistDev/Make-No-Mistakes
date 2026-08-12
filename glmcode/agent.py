@@ -305,7 +305,7 @@ class Agent:
 
     def rebuild_system_prompt(self) -> None:
         # Cached separately from the live message so refreshing the context-
-        # usage note (see _refresh_context_note) doesn't need to re-run
+        # usage note (see _messages_for_call) doesn't need to re-run
         # build_system_prompt's git subprocess calls on every model call.
         if self.conversational:
             self._base_system_prompt = (
@@ -327,7 +327,11 @@ class Agent:
             # grep them for anything compacted out of context or said in a
             # past chat.
             self._base_system_prompt += self.transcript.prompt_note()
-        sys_msg = {"role": "system", "content": self._with_usage_note(self._base_system_prompt)}
+        # The system message holds ONLY the stable prompt. The context-usage
+        # figure changes every turn and used to be appended here -- to the very
+        # first message of every request -- which meant no two requests ever
+        # shared a prefix. See _messages_for_call.
+        sys_msg = {"role": "system", "content": self._base_system_prompt}
         if self.messages and self.messages[0].get("role") == "system":
             self.messages[0] = sys_msg
         else:
@@ -354,21 +358,39 @@ class Agent:
             f"- {reply_line}"
         )
 
-    def _with_usage_note(self, base: str) -> str:
+    def _usage_note(self) -> str:
         est = estimate_tokens(self.messages, self._chars_per_token) if self.messages else 0
         limit = self.cfg.context_limit_tokens
         return (
-            f"{base}\n\n# Context usage\n"
+            "# Context usage\n"
             f"Estimated ~{est:,} of {limit:,} tokens used (rough estimate; auto-compact "
             f"triggers automatically above this if you don't act first). See the "
             f"compact_context tool in Tool usage policy."
         )
 
-    def _refresh_context_note(self) -> None:
-        """Cheap per-call refresh of just the usage note (no subprocess calls),
-        so the model always sees an accurate, current figure."""
-        if self.messages and self.messages[0].get("role") == "system":
-            self.messages[0]["content"] = self._with_usage_note(self._base_system_prompt)
+    def _messages_for_call(self) -> list:
+        """The history, plus the current context-usage figure at the END.
+
+        The figure changes every turn, and it used to be appended to the system
+        message. That is the first thing in every request, so every request had
+        a different prefix from the last -- and a provider's prefix cache can
+        only match an identical run of leading tokens. Nothing after byte zero
+        could ever hit it.
+
+        This app re-sends everything on each turn (chat completions is
+        stateless), and its floor is ~12,400 tokens before the conversation
+        even starts -- 5,000 of system prompt and 7,400 of tool schemas. Paying
+        full price for that on every request, when Gemini discounts a cached
+        prefix by 90%, was a self-inflicted cost.
+
+        Moving it to the end keeps the model equally informed -- arguably more,
+        since it is the most recent thing it reads -- while system prompt,
+        tools and every completed turn form an append-only prefix, which is the
+        shape a prefix cache wants. Appended to a COPY: self.messages is what
+        gets saved and synced, and a per-turn note does not belong in it.
+        """
+        note = {"role": "system", "content": self._usage_note()}
+        return list(self.messages) + [note]
 
     def set_mode(self, mode: str) -> None:
         self.cfg.mode = mode
@@ -1362,12 +1384,11 @@ class Agent:
         return self.client
 
     def _call_model(self, model: str):
-        self._refresh_context_note()
         self.events.stream_start()
         try:
             return self._client_for(model).chat(
                 model=model,
-                messages=self.messages,
+                messages=self._messages_for_call(),
                 tools=self._tools_for_call(),
                 temperature=self.cfg.temperature,
                 max_tokens=self.cfg.max_tokens,
