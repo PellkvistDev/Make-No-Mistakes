@@ -1300,6 +1300,63 @@
     "have run anything.\n\n" +
     "Keep answers to a few sentences unless asked for more. The user cannot skim you.";
 
+
+  // --- the APIs this app knows how to reach --------------------------------
+  //
+  // The same catalogue as glmcode/providers.py, trimmed to what a phone needs:
+  // where to point, what to call the model, and where the key comes from. The
+  // desktop grew this and the phone never got it, so its setup screen still
+  // asked for a "z.ai / model API key" and offered a base-URL menu with two
+  // z.ai entries in it -- meaning a phone set up by hand could not reach
+  // anything else, whatever the rest of the app supported.
+  //
+  // Duplicated deliberately and pinned by a test: this file is loaded by a
+  // page with no Python behind it, and the alternative -- fetching the
+  // catalogue from somewhere -- would need a network before you have a key.
+  // tests/test_phone_presets.py compares the two.
+  //
+  // Local providers are absent on purpose. Ollama on a desktop is not
+  // reachable from a phone, so offering it here is a menu entry that fails on
+  // selection with a connection error and nothing explaining why -- the same
+  // reason pairing drops them (see providers_for_phone).
+  const SETUP_PRESETS = [
+    {
+      key: "zai",
+      label: "Z.AI",
+      baseUrl: "https://api.z.ai/api/paas/v4",
+      model: "glm-4.7-flash",
+      models: ["glm-4.7-flash"],
+      keyUrl: "https://z.ai/manage-apikey/apikey-list",
+      note: "GLM coding models. Free tier, no card.",
+    },
+    {
+      key: "google",
+      label: "Google AI Studio",
+      baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+      model: "gemini-3.5-flash-lite",
+      models: ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite",
+               "gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash"],
+      keyUrl: "https://aistudio.google.com/apikey",
+      // The one thing about this option someone might mind and would
+      // otherwise only discover afterwards. This app sends source code.
+      note: "Gemini, and the only one that can do voice. On the free tier "
+        + "Google may train on your prompts.",
+    },
+    {
+      key: "custom",
+      label: "Other",
+      baseUrl: "",
+      model: "",
+      models: [],
+      keyUrl: "",
+      note: "Any OpenAI-compatible endpoint.",
+    },
+  ];
+
+  function setupPreset(key) {
+    return SETUP_PRESETS.find((p) => p.key === key) || null;
+  }
+
   const CoreAPI = {
     encryptVault, decryptVault, deriveKey, PBKDF2_ITERS,
     aesEncrypt, aesDecrypt, exportRawKey, importRawKey,
@@ -1314,6 +1371,7 @@
     handoffNote, applyHandoff, HANDOFF_MARKER, repoStateWarning,
     healInterruptedTurn, INTERRUPTED_TOOL,
     mergeProviders, normalizeBase,
+    SETUP_PRESETS, setupPreset,
     liveWsUrl, liveSetup, liveFunctionDeclarations, liveToolResponse,
     liveTextTurn, liveAudioChunk, liveAudioStreamEnd,
     livePcm16, liveB64, liveBytes,

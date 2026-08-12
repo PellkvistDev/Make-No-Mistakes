@@ -48,7 +48,11 @@ def test_scanning_fills_in_the_keys_from_the_desktop(paired):
         "() => document.getElementById('in-model-key').value !== ''", timeout=15000)
     assert p.input_value("#in-model-key") == "sk-from-desktop"
     assert p.input_value("#in-gh-token") == "github_pat_from_desktop"
-    assert p.input_value("#in-model") == "glm-4.7"
+    # From the MENU, not the free-text box. A payload whose base URL matches a
+    # known API selects that API, so the model belongs in its model menu -- and
+    # one the menu does not list (like this) is added rather than dropped,
+    # since it is what the desktop is actually using.
+    assert p.input_value("#in-model-pick") == "glm-4.7"
     assert paired.errors == []
 
 

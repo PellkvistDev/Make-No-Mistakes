@@ -397,14 +397,79 @@
   }
 
   // ================================================================ SETUP
+  // Which API, chosen first, because it decides the endpoint, the model names
+  // and where the key comes from. Drawn from the shared catalogue rather than
+  // written into the markup, so the phone cannot drift from the desktop about
+  // what exists (tests/test_phone_presets.py pins the two).
+  let setupPresetKey = "";
+
+  function renderSetupPresets() {
+    const box = $("setup-presets");
+    if (!box) return;
+    box.innerHTML = "";
+    for (const p of AC.SETUP_PRESETS) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "api-preset" + (p.key === setupPresetKey ? " on" : "");
+      b.textContent = p.label;
+      b.addEventListener("click", () => chooseSetupPreset(p.key));
+      box.appendChild(b);
+    }
+  }
+
+  function chooseSetupPreset(key) {
+    const p = AC.setupPreset(key);
+    if (!p) return;
+    setupPresetKey = key;
+    const custom = key === "custom";
+    $("setup-preset-note").textContent = p.note || "";
+    // Typed in by hand: the endpoint and the model are the whole point, so
+    // they become fields rather than a menu of things this app happens to know.
+    $("setup-url-field").hidden = !custom;
+    $("in-model-pick").hidden = custom;
+    $("in-model").hidden = !custom;
+    if (custom) {
+      // Cleared, not left as a starting point. Switching away from a preset
+      // used to keep its URL in the now-visible box, so you could type your
+      // own model while still pointing at the preset's endpoint -- and the
+      // screen looked like it was asking you to fill in something it had
+      // already decided.
+      $("in-base-url").value = "";
+      $("in-model").value = "";
+    } else {
+      $("in-base-url").value = p.baseUrl;
+      $("in-model-pick").innerHTML = p.models
+        .map((m) => `<option${m === p.model ? " selected" : ""}>${m}</option>`).join("");
+    }
+    const link = $("setup-key-link");
+    // Hidden rather than left pointing nowhere: "get one at the provider's
+    // console" is not help when the app does not know which console.
+    link.parentElement.hidden = !p.keyUrl;
+    if (p.keyUrl) {
+      link.href = p.keyUrl;
+      link.textContent = p.label;
+    }
+    renderSetupPresets();
+  }
+
+  // What the model box actually holds, whichever of the two is showing.
+  function setupModelValue() {
+    return (setupPresetKey === "custom"
+      ? $("in-model").value : $("in-model-pick").value || "").trim();
+  }
+
   $("btn-save-setup").addEventListener("click", async () => {
     const err = $("setup-error"); err.textContent = "";
     const modelKey = $("in-model-key").value.trim();
-    const model = $("in-model").value.trim() || "glm-4.7-flash";
-    const baseUrl = $("in-base-url").value;
+    const model = setupModelValue();
+    const baseUrl = $("in-base-url").value.trim().replace(/\/+$/, "");
     const githubToken = $("in-gh-token").value.trim();
     const pin = $("in-pin").value, pin2 = $("in-pin2").value;
     if (!modelKey || !githubToken) return (err.textContent = "Model key and GitHub token are both required.");
+    // Said here rather than failing on the first message with an error about
+    // the key, which is what an empty endpoint produces.
+    if (!baseUrl) return (err.textContent = "Pick an API, or paste a base URL.");
+    if (!model) return (err.textContent = "Pick or type a model.");
     if (pin.length < 4) return (err.textContent = "PIN must be at least 4 characters.");
     if (pin !== pin2) return (err.textContent = "PINs don't match.");
     try {
@@ -2758,10 +2823,26 @@
         }
         if (data.modelKey) $("in-model-key").value = data.modelKey;
         if (data.githubToken) $("in-gh-token").value = data.githubToken;
-        if (data.model) $("in-model").value = data.model;
         if (data.baseUrl) {
-          const sel = $("in-base-url");
-          if ([...sel.options].some((o) => o.value === data.baseUrl)) sel.value = data.baseUrl;
+          // Select the matching preset where there is one, so the model menu
+          // and the key link follow; otherwise it is a hand-typed endpoint and
+          // the fields for one are what should be showing.
+          const known = AC.SETUP_PRESETS.find(
+            (p) => p.baseUrl && AC.normalizeBase(p.baseUrl) === AC.normalizeBase(data.baseUrl));
+          chooseSetupPreset(known ? known.key : "custom");
+          $("in-base-url").value = data.baseUrl;
+        }
+        if (data.model) {
+          if (setupPresetKey === "custom") $("in-model").value = data.model;
+          else {
+            const sel = $("in-model-pick");
+            // A model the menu does not list is still the one the desktop is
+            // using, so it is added rather than quietly ignored.
+            if (![...sel.options].some((o) => o.value === data.model)) {
+              sel.insertAdjacentHTML("afterbegin", `<option>${data.model}</option>`);
+            }
+            sel.value = data.model;
+          }
         }
         // Sync needs the vault key, which doesn't exist until a PIN is set —
         // so hold it and turn sync on once the vault is unlocked.
@@ -2963,6 +3044,9 @@
   async function boot() {
     applyBg(loadBg());
     renderBgPicker($("setup-bg"));
+    // Something chosen from the start: an empty picker leaves the key box
+    // asking for a key with no indication of whose, and no endpoint at all.
+    chooseSetupPreset(setupPresetKey || AC.SETUP_PRESETS[0].key);
     registerSW();
     const blob = loadVault();
     const rawKey = localStorage.getItem(KEEPKEY_KEY);
