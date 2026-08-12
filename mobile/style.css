@@ -707,3 +707,21 @@ pre.code, pre.tool-out, .preview {
    feature that ships and then makes itself invisible cannot be told apart
    from one that never arrived. */
 .voice-btn.unavailable { opacity: 0.35; }
+
+/* ---- which API, at setup ---------------------------------------------- */
+/* Chips rather than a dropdown: there are three, the choice decides what the
+   rest of the screen asks for, and a closed <select> hides the fact that
+   there is a choice at all -- which is how the phone spent this long looking
+   like a z.ai-only app. */
+.api-presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 4px; }
+.api-preset {
+  flex: 0 0 auto; padding: 9px 14px; border-radius: 999px;
+  border: 1px solid var(--stroke, #2a3347); background: rgba(255, 255, 255, 0.04);
+  color: var(--text, #e8ecf5); font-size: 14px; font-weight: 600;
+  /* 44px is the smallest thing a thumb hits reliably. */
+  min-height: 44px;
+}
+.api-preset.on {
+  border-color: var(--accent, #7aa2ff); color: var(--accent, #7aa2ff);
+  background: rgba(122, 162, 255, 0.12);
+}

@@ -66,7 +66,7 @@
     <section id="screen-setup" class="screen" hidden>
       <div class="pane">
         <h1 class="brand">Make&nbsp;No&nbsp;Mistakes</h1>
-        <p class="sub">Set up your phone workspace. Your keys are encrypted on this device with a PIN and never sent anywhere but the two services below.</p>
+        <p class="sub">Set up your phone workspace. Your keys are encrypted on this device with a PIN and never sent anywhere but the API you pick and GitHub.</p>
 
         <!-- Scanning happens HERE, inside the app, on purpose. Following a
              QR link opens the browser instead, and on iOS a home-screen app
@@ -77,20 +77,30 @@
         </button>
         <p class="hint scan-or">or fill it in yourself</p>
 
+        <!-- Which API, first: it decides the endpoint, the model names and
+             where the key comes from. This screen used to ask for a "z.ai /
+             model API key" and offer a base-URL menu with two z.ai entries in
+             it, so a phone set up by hand could not reach anything else --
+             including the one API that can do voice. -->
+        <div class="field">
+          <span>Which API</span>
+          <div id="setup-presets" class="api-presets"></div>
+          <small class="hint" id="setup-preset-note"></small>
+        </div>
+
         <label class="field">
-          <span>z.ai / model API key</span>
+          <span>Model API key</span>
           <input id="in-model-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="paste your model key" />
+          <small class="hint">Get one at <a id="setup-key-link" href="#" target="_blank" rel="noopener noreferrer">the provider's console</a>.</small>
         </label>
         <label class="field">
           <span>Model</span>
-          <input id="in-model" type="text" autocomplete="off" spellcheck="false" placeholder="glm-4.7-flash" value="glm-4.7-flash" />
+          <select id="in-model-pick"></select>
+          <input id="in-model" type="text" autocomplete="off" spellcheck="false" placeholder="model id" hidden />
         </label>
-        <label class="field">
+        <label class="field" id="setup-url-field" hidden>
           <span>Model API base URL</span>
-          <select id="in-base-url">
-            <option value="https://api.z.ai/api/paas/v4">api.z.ai (international)</option>
-            <option value="https://open.bigmodel.cn/api/paas/v4">open.bigmodel.cn (mainland)</option>
-          </select>
+          <input id="in-base-url" type="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/v1" />
         </label>
 
         <label class="field">
