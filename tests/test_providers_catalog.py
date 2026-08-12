@@ -14,10 +14,20 @@ from glmcode import providers
 
 
 def _cfg(**kw):
-    c = cfgmod.Config()
-    for k, v in kw.items():
-        setattr(c, k, v)
-    return c
+    # Through the constructor, not by assignment afterwards: a Config folds the
+    # setup provider into its provider list on construction, so a base_url set
+    # later would describe an endpoint no row exists for.
+    return cfgmod.Config(**kw)
+
+
+def _setup_row(cfg):
+    """The provider row setup created -- an ordinary row like any other now.
+
+    It used to be fabricated on demand by builtin_provider() out of the loose
+    cfg.base_url / cfg.model / cfg.vision_model fields, which is exactly what
+    made it a different kind of object from every other provider.
+    """
+    return cfgmod.all_providers(cfg)[0]
 
 
 # ---- the presets themselves ------------------------------------------------
@@ -170,10 +180,13 @@ def test_the_config_file_key_is_still_the_last_resort(monkeypatch):
 
 def test_the_primary_provider_carries_its_preset(monkeypatch):
     monkeypatch.setenv("GOOGLE_API_KEY", "g")
-    prov = cfgmod.builtin_provider(_cfg(provider_preset="google"))
+    prov = _setup_row(_cfg(provider_preset="google"))
     assert prov["preset"] == "google"
-    assert prov["api_key"] == "g"
-    assert prov["builtin"] is True
+    # The key is not baked into the row -- the row names the variable it lives
+    # in, and provider_key reads it. So a row can be stored, synced or shown
+    # without carrying a credential around inside it.
+    assert prov["env_var"] == "GOOGLE_API_KEY"
+    assert cfgmod.provider_key(prov) == "g"
 
 
 # ---- first-run setup -------------------------------------------------------
@@ -362,7 +375,7 @@ def test_the_builtin_provider_offers_every_model_on_its_key():
     cfg = _cfg(provider_preset="google",
                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
                model="gemini-2.5-flash", vision_model="gemini-2.5-flash")
-    models = cfgmod.builtin_provider(cfg)["models"]
+    models = _setup_row(cfg)["models"]
     # More than one, and exactly what the catalogue offers -- named by asking
     # the catalogue rather than by writing model names into the assertion.
     assert len(models) > 1
@@ -375,7 +388,7 @@ def test_the_vision_model_is_not_offered_as_something_to_code_with():
     invite -- which is what the old slice(0, 1) was really protecting."""
     cfg = _cfg(provider_preset="zai", base_url="https://api.z.ai/api/paas/v4",
                model="glm-4.7-flash", vision_model="glm-4.6v-flash")
-    models = cfgmod.builtin_provider(cfg)["models"]
+    models = _setup_row(cfg)["models"]
     assert models == ["glm-4.7-flash"]
 
 
@@ -385,7 +398,7 @@ def test_a_model_set_by_hand_stays_selectable():
     cfg = _cfg(provider_preset="google",
                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
                model="gemini-3.0-experimental")
-    models = cfgmod.builtin_provider(cfg)["models"]
+    models = _setup_row(cfg)["models"]
     assert models[0] == "gemini-3.0-experimental"
     # ...alongside, not instead of, what the catalogue recommends.
     assert set(models[1:]) & set(providers.chat_models(cfg.base_url))
@@ -394,7 +407,7 @@ def test_a_model_set_by_hand_stays_selectable():
 def test_an_unknown_endpoint_offers_what_it_was_configured_with():
     cfg = _cfg(provider_preset="custom", base_url="https://example.test/v1",
                model="some-model")
-    assert cfgmod.builtin_provider(cfg)["models"] == ["some-model"]
+    assert _setup_row(cfg)["models"] == ["some-model"]
 
 
 def test_setup_offers_the_same_models_the_picker_will():
@@ -436,9 +449,9 @@ def test_the_newest_models_are_preferred_over_the_retired_ones():
 def test_the_live_list_beats_the_catalogue():
     cfg = _cfg(provider_preset="google",
                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
-               model="gemini-2.5-flash")
-    cfg.available_models = ["gemini-3-flash", "gemini-3-pro"]
-    models = cfgmod.builtin_provider(cfg)["models"]
+               model="gemini-2.5-flash",
+               available_models=["gemini-3-flash", "gemini-3-pro"])
+    models = _setup_row(cfg)["models"]
     assert "gemini-3-pro" in models
     assert "gemini-2.5-pro" not in models, "catalogue outranked the provider"
 
@@ -447,7 +460,7 @@ def test_the_catalogue_is_used_until_the_provider_has_been_asked():
     cfg = _cfg(provider_preset="google",
                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
                model="gemini-2.5-flash")
-    assert cfgmod.builtin_provider(cfg)["models"] == providers.shortlist(
+    assert _setup_row(cfg)["models"] == providers.shortlist(
         providers.chat_models(cfg.base_url))
 
 
@@ -507,9 +520,9 @@ def test_show_all_still_reaches_everything_chatlike():
     be entitled to a preview, and hiding it would be the worse failure."""
     cfg = _cfg(provider_preset="google",
                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
-               model="gemini-3.5-flash")
-    cfg.available_models = ["gemini-3.5-flash", "gemini-3.5-flash-preview-05-20"]
-    row = cfgmod.builtin_provider(cfg)
+               model="gemini-3.5-flash",
+               available_models=["gemini-3.5-flash", "gemini-3.5-flash-preview-05-20"])
+    row = _setup_row(cfg)
     assert row["models"] == ["gemini-3.5-flash"]
     assert "gemini-3.5-flash-preview-05-20" in row["all_models"]
 
@@ -524,9 +537,9 @@ def test_the_model_in_use_is_never_shortlisted_away():
     """Being on a preview is a good reason to see it in its own picker."""
     cfg = _cfg(provider_preset="google",
                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
-               model="gemini-3.5-flash-preview-05-20")
-    cfg.available_models = ["gemini-3.5-flash", "gemini-3.5-flash-preview-05-20"]
-    assert cfg.model in cfgmod.builtin_provider(cfg)["models"]
+               model="gemini-3.5-flash-preview-05-20",
+               available_models=["gemini-3.5-flash", "gemini-3.5-flash-preview-05-20"])
+    assert cfg.model in _setup_row(cfg)["models"]
 
 
 def test_stability_is_judged_by_shape_not_by_a_list_of_names():

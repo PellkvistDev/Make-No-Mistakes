@@ -444,6 +444,18 @@ def is_multimodal(base_url: str) -> bool:
     return bool(p and p.get("multimodal"))
 
 
+def vision_model_for(base_url: str) -> str:
+    """This endpoint's dedicated image model, if it has one.
+
+    Separate from is_multimodal and not a fallback for it: z.ai's chat models
+    cannot see, but the same key serves glm-4.6v-flash, which can. An endpoint
+    with neither has no way to read an image and should say so rather than be
+    handed one.
+    """
+    p = preset_from_base_url(base_url)
+    return (p or {}).get("vision_model", "") or ""
+
+
 def supports(base_url: str, extension: str) -> bool:
     """Does this endpoint understand a given non-standard request field?
 

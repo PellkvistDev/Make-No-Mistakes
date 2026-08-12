@@ -270,7 +270,7 @@ class Agent:
         # here as (name, data_uri) and injected after the tool batch, mirroring
         # steering. Empty in "describe" mode (the default).
         self._pending_images: list[tuple[str, str]] = []
-        self._routed_model_note: str | None = None  # de-dupe the routing notice
+        self._flattened_note = 0    # de-dupe the "images not visible" notice
         # MCP: an optional McpManager whose external tools are appended to the
         # schema and dispatched via mcp.call. Shared process-wide (servers are
         # external processes); permission-gated like any non-readonly tool.
@@ -390,7 +390,54 @@ class Agent:
         gets saved and synced, and a per-turn note does not belong in it.
         """
         note = {"role": "system", "content": self._usage_note()}
-        return list(self.messages) + [note]
+        return self._readable(self.messages) + [note]
+
+    def _readable(self, messages: list) -> list:
+        """The history with anything this chat's model cannot receive taken out.
+
+        Only images, and only when the model in use cannot see them. A chat can
+        change model mid-conversation, so a history built while Gemini was
+        answering can contain inline image parts by the time GLM is -- and an
+        endpoint handed a content part it does not implement rejects the whole
+        request, which would make switching model a one-way door.
+
+        The images are replaced by their filenames rather than dropped, because
+        the file is still there: the model can call view_image on it and get a
+        description back through whichever model does read images. Done on a
+        copy -- self.messages is what gets saved and synced, and the picture
+        should come back if the chat moves to a model that can see it again.
+        """
+        if self._images_go_direct():
+            return list(messages)
+        out, changed = [], 0
+        for m in messages:
+            c = m.get("content")
+            if not isinstance(c, list) or not any(
+                    part.get("type") == "image_url" for part in c):
+                out.append(m)
+                continue
+            changed += 1
+            parts = []
+            for part in c:
+                if part.get("type") != "image_url":
+                    parts.append(part)
+                    continue
+                # No filename on the part itself. A content part carries only
+                # the fields the schema defines and Google rejects a request
+                # over an unknown one, so the names ride in the text part next
+                # to the images instead (see attach_images).
+                parts.append({"type": "text", "text":
+                              "[An image was attached here. This model cannot "
+                              "see it — call view_image on the path named "
+                              "alongside to have it read.]"})
+            out.append({**m, "content": parts})
+        if changed and changed != self._flattened_note:
+            self._flattened_note = changed
+            self.events.info(
+                f"{changed} earlier message{'' if changed == 1 else 's'} with "
+                f"images: this model cannot see them, so they are listed by "
+                f"name — view_image reads them.")
+        return out
 
     def set_mode(self, mode: str) -> None:
         self.cfg.mode = mode
@@ -425,15 +472,26 @@ class Agent:
     # ------------------------------------------------------------------ #
     # Images
 
+    def _chat_base_url(self) -> str:
+        """The endpoint THIS chat is talking to.
+
+        Not cfg.base_url. A chat carries its own client once a model is picked,
+        and reading the config here is how image handling kept being decided
+        for the provider chosen at setup rather than the one in use.
+        """
+        # getattr on self as well as on the client: rebuild_system_prompt calls
+        # this during __init__, before the client is necessarily assigned.
+        client = getattr(self, "client", None)
+        return getattr(client, "base_url", "") or self.cfg.base_url
+
     def _images_go_direct(self) -> bool:
-        """Should images be sent to the chat model itself?
+        """Can THIS chat's model be handed an image?
 
         "auto" -- the default -- asks the provider rather than the user. Every
         Gemini model reads images natively, so narrating one to it through a
         second model was a wasted call AND a worse answer: the coding model
         only ever saw somebody else's prose about the picture. It also made the
-        agent call view_image on an image the user had just attached, which is
-        the tool call you saw declined.
+        agent call view_image on an image the user had just attached.
 
         "describe" and "direct" remain, because auto cannot know what a
         hand-typed endpoint or a local model can do -- and being wrong either
@@ -442,11 +500,48 @@ class Agent:
         route = self.cfg.vision_route
         if route in ("direct", "describe"):
             return route == "direct"
-        # getattr on self as well as on the client: rebuild_system_prompt calls
-        # this during __init__, before the client is necessarily assigned.
-        client = getattr(self, "client", None)
-        base = getattr(client, "base_url", "") or self.cfg.base_url
-        return providers.is_multimodal(base)
+        return providers.is_multimodal(self._chat_base_url())
+
+    def _vision_model(self) -> str:
+        """Which model reads images for this chat, or "" if none can.
+
+        Resolved against the chat's OWN provider first (see
+        config.vision_target). It used to be cfg.vision_model flat, which
+        belonged to the provider chosen at setup -- so a chat moved to z.ai had
+        its images read by Gemini, and then, because the turn followed the
+        image, had every remaining message answered by Gemini too.
+        """
+        prov, model = self._vision_provider_and_model()
+        return model
+
+    def _vision_provider_and_model(self) -> tuple:
+        from .config import all_providers, vision_target
+        base = self._chat_base_url().rstrip("/")
+        chat_prov = next((p for p in all_providers(self.cfg)
+                          if p.get("base_url") == base), None)
+        return vision_target(self.cfg, chat_prov,
+                             self.model_override or self.cfg.model)
+
+    def _vision_client_and_model(self) -> tuple:
+        """A client for the model that reads images, and its name.
+
+        The client is worked out here rather than handed in. The GUI used to
+        assign `agent.vision_client` pointing at the setup provider whenever a
+        chat moved to another API -- which is the same mistake as the routing
+        above, one layer down: it hardwired "images are read over there" into
+        every chat that had chosen otherwise.
+        """
+        from .config import provider_key
+        prov, model = self._vision_provider_and_model()
+        if not prov or not model:
+            return None, ""
+        base = (prov.get("base_url") or "").rstrip("/")
+        if base == self._chat_base_url().rstrip("/"):
+            return self.client, model   # same endpoint: same client, same key
+        cached = self.vision_client
+        if cached is None or getattr(cached, "base_url", "").rstrip("/") != base:
+            self.vision_client = ZaiClient(provider_key(prov), base)
+        return self.vision_client, model
 
     def attach_images(self, text: str, image_paths: list[Path]) -> dict:
         """Build the user message for a turn that includes images.
@@ -461,12 +556,30 @@ class Agent:
                 {"type": "image_url", "image_url": {"url": self._encode(p)}}
                 for p in image_paths
             ]
-            content.append({"type": "text", "text": text or f"(user attached: {names})"})
+            # The names go in even when the user typed something. They are the
+            # only record of WHICH files these are once the pictures themselves
+            # are taken out again -- which happens the moment this chat moves
+            # to a model that cannot see (see _readable).
+            content.append({"type": "text",
+                            "text": f"{text}\n\n[Attached: {names}]" if text
+                                    else f"(user attached: {names})"})
             return {"role": "user", "content": content}
 
-        with self.events.status(f"analyzing {names} with {self.cfg.vision_model}..."):
-            analysis = self._client_for(self.cfg.vision_model).analyze_images(
-                self.cfg.vision_model,
+        client, vmodel = self._vision_client_and_model()
+        if client is None:
+            # No configured API can read an image. Said plainly rather than
+            # papered over: the alternative is a turn that silently pretends
+            # the attachment was not there.
+            self.events.warn(
+                f"no vision model configured — {names} could not be read. "
+                "Pick one in Settings → Models, or switch this chat to a "
+                "model that reads images.")
+            return {"role": "user",
+                    "content": f"{text}\n\n[The user attached {names}, but no "
+                               "model available to this chat can read images.]"}
+        with self.events.status(f"analyzing {names} with {vmodel}..."):
+            analysis = client.analyze_images(
+                vmodel,
                 VISION_ANALYSIS_PROMPT.format(user_text=text or "(no message)"),
                 image_paths,
             )
@@ -556,27 +669,29 @@ class Agent:
         return False
 
     def _model_for_turn(self) -> str:
-        """Which model runs this step. Normally the chat's model, but images
-        in the context force a routing decision:
+        """Which model runs this step: the chat's model. Always.
 
-        - "direct" mode with a custom (BYOM) model: keep the chat model -- the
-          user set direct because their model is multimodal and should see the
-          image itself.
-        - otherwise (describe mode, or the built-in free model which can't see
-          images on its coding model): route to the GLM vision model.
+        It used to depend on whether an image was anywhere in the history, and
+        both halves of that were wrong.
+
+        Sticky: _payload_has_images scans the WHOLE conversation, so one
+        attachment on message three moved message thirty as well. There is no
+        point at which it wears off.
+
+        Wrong destination: the fallback was cfg.vision_model, which belonged to
+        the provider chosen at setup. Look at an image with Gemini, switch the
+        chat to GLM, and every following turn went back to Gemini -- announcing
+        itself as "images in context -> using gemini-...", which reads like a
+        feature and is a chat quietly refusing to change model.
+
+        And wrong in scope even when it picked right: an image in the history
+        is a reason to make the image readable, never a reason to hand the
+        conversation to another model. That part is done where it belongs --
+        images are embedded for a model that can see them (attach_images) and
+        described into text for one that cannot, at the moment they arrive.
+        A model switch afterwards changes nothing that has already happened.
         """
-        base = self.model_override or self.cfg.model
-        if self._payload_has_images():
-            if self.model_override and self._images_go_direct():
-                target = base
-            else:
-                target = self.cfg.vision_model
-        else:
-            target = base
-        if self._payload_has_images() and target != self._routed_model_note:
-            self.events.info(f"images in context -> using {target}")
-            self._routed_model_note = target
-        return target
+        return self.model_override or self.cfg.model
 
     def _inject_pending_images(self) -> None:
         """Flush images the model asked to view in direct mode into the
@@ -646,10 +761,15 @@ class Agent:
         focus = (f"What the agent needs to know: {question.strip()}" if question and question.strip()
                  else "No specific focus was given; describe the image exhaustively.")
         prompt = VIEW_IMAGE_PROMPT.format(focus=focus)
-        with self.events.status(f"looking at {p.name} with {self.cfg.vision_model}..."):
+        client, vmodel = self._vision_client_and_model()
+        if client is None:
+            raise ToolError(
+                f"Cannot read {p.name}: no model available to this chat can "
+                "see images. Choose a vision model in Settings → Models, or "
+                "switch this chat to a model that reads images itself.")
+        with self.events.status(f"looking at {p.name} with {vmodel}..."):
             try:
-                result = self._client_for(self.cfg.vision_model).analyze_images(
-                    self.cfg.vision_model, prompt, [p])
+                result = client.analyze_images(vmodel, prompt, [p])
             except ValueError as e:  # e.g. encode_image_data_uri's size-limit check
                 raise ToolError(str(e))
         return result.strip() or "(vision model returned no description)"
@@ -1375,12 +1495,16 @@ class Agent:
         return self.tool_schemas + extra if extra else self.tool_schemas
 
     def _client_for(self, model: str) -> ZaiClient:
-        """The client to use for a given model id: vision calls go through
-        the dedicated vision client when one is set (custom providers can't
-        serve the built-in vision model); everything else uses the chat's
-        own client."""
-        if self.vision_client is not None and model == self.cfg.vision_model:
-            return self.vision_client
+        """The client for a chat call: this chat's own, always.
+
+        It used to divert to `vision_client` whenever the model id happened to
+        equal cfg.vision_model -- a string comparison standing in for "is this
+        an image call". On a Gemini install cfg.vision_model IS cfg.model, so
+        ordinary coding turns matched it and were answered by whichever
+        endpoint the GUI had last pointed vision at. Image calls now ask for
+        their client by name (_vision_client_and_model) instead of being
+        recognised by one.
+        """
         return self.client
 
     def _call_model(self, model: str):
@@ -2168,9 +2292,12 @@ class Agent:
         """Summarize the conversation and restart the context from the summary."""
         if len(self.messages) < 4:
             return "Nothing to compact yet."
-        transcript = self.messages[1:]  # skip system prompt
-        compact_model = (self.cfg.vision_model if self._payload_has_images()
-                         else (self.model_override or self.cfg.model))
+        transcript = self._readable(self.messages[1:])  # skip system prompt
+        # The chat's model, like every other call. It used to switch to
+        # cfg.vision_model whenever an image was anywhere in the history, so
+        # summarising a long conversation could be done by a provider the chat
+        # had left -- and billed to a quota the user was not watching.
+        compact_model = self.model_override or self.cfg.model
         with self.events.status("compacting conversation..."):
             result = self._client_for(compact_model).chat(
                 model=compact_model,

@@ -74,16 +74,23 @@ def providers_for_phone(providers: list) -> list:
     entry the phone cannot authenticate is the same dead end.
     """
     from . import providers as _providers
+    from .config import provider_key
     out = []
     for p in providers or []:
         base = (p.get("base_url") or "").strip()
         if not base or _providers.is_local(base):
             continue
-        if not (p.get("api_key") or "").strip():
+        # Through provider_key, not p["api_key"]. A provider's key normally
+        # lives in an environment variable now and the field is only the
+        # fallback for when writing that variable was blocked -- so reading the
+        # field alone would quietly pair over an empty key for every API that
+        # was set up the ordinary way.
+        key = provider_key(p).strip()
+        if not key:
             continue
         out.append({"name": p.get("name") or base,
                     "baseUrl": base,
-                    "key": p["api_key"],
+                    "key": key,
                     "models": list(p.get("models") or [])})
     return out
 

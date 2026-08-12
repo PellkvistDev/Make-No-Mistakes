@@ -1546,22 +1546,21 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
   display: flex; align-items: center; gap: 8px; padding: 6px 8px;
   border: 1px solid var(--stroke-soft); border-radius: 8px; font-size: 12px;
 }
-.api-row { cursor: pointer; transition: border-color 0.15s, background 0.15s; }
+/* Not selectable. These rows are the APIs you have, not a choice between
+   them -- the model picker above the composer is the one place that chooses,
+   and it already lists every model from every row here. */
+.api-row { transition: border-color 0.15s, background 0.15s; }
 .api-row:hover { background: rgba(255, 255, 255, 0.04); }
-.api-row.selected {
-  cursor: default; border-color: var(--accent, #7aa2ff);
-  background: rgba(122, 162, 255, 0.08);
+/* What the row IS used for, said in the row rather than by its position: the
+   list used to mean "first = the one new chats use" and nothing showed it. */
+.api-badge {
+  flex: none; margin-left: 7px; padding: 1px 6px; border-radius: 999px;
+  font-size: 10px; letter-spacing: 0.02em; text-transform: uppercase;
+  color: var(--accent, #7aa2ff); border: 1px solid currentColor; opacity: 0.85;
 }
-.api-radio {
-  flex: none; width: 13px; height: 13px; border-radius: 50%;
-  border: 1.5px solid var(--text-faint); box-sizing: border-box;
-}
-.api-row.selected .api-radio {
-  border-color: var(--accent, #7aa2ff);
-  background: radial-gradient(circle, var(--accent, #7aa2ff) 0 3.5px, transparent 4px);
-}
-.api-model-select { flex: none; max-width: 190px; font-size: 11.5px; }
+.api-badge-soft { color: var(--text-faint); }
 .api-actions { margin: 6px 0 10px; }
+#api-defaults { margin-top: 10px; }
 
 /* MCP servers editor */
 #mcp-editor {

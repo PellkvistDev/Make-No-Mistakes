@@ -97,71 +97,231 @@ PERMISSION_MODES = ("ask", "autoedit", "yolo")
 BUILTIN_PROVIDER_NAME = "z.ai (free)"   # legacy label; only for old configs
 
 
-def builtin_provider_name(cfg: "Config") -> str:
-    """What to call the primary provider, based on what it actually is."""
+def provider_label(base_url: str, preset_key: str = "") -> str:
+    """What to call a provider, based on what it actually is."""
     from . import providers as _providers
-    found = (_providers.preset(cfg.provider_preset)
-             or _providers.preset_from_base_url(cfg.base_url))
+    found = (_providers.preset(preset_key)
+             or _providers.preset_from_base_url(base_url))
     if found:
         return found["label"]
     # Typed in by hand: name it after the host rather than a vendor it is not.
-    host = (cfg.base_url or "").split("//")[-1].split("/")[0]
+    host = (base_url or "").split("//")[-1].split("/")[0]
     return host or "Your API"
 
 
-def builtin_provider(cfg: "Config") -> dict:
+def builtin_provider_name(cfg: "Config") -> str:
+    """Legacy name of the provider chosen at setup.
+
+    Only for reading configs and sessions written while there was such a thing
+    as a primary provider. New code asks for `default_provider(cfg)`.
+    """
+    return provider_label(cfg.base_url, cfg.provider_preset)
+
+
+# ---------------------------------------------------------------------- #
+# Providers: ONE list, every entry the same kind of thing.
+#
+# It was not always. The provider picked at setup lived in cfg.base_url,
+# cfg.model, cfg.vision_model and cfg.provider_preset, with its key in an
+# environment variable; every other API lived in cfg.providers as a dict with
+# its key in this file. Nothing ever decided that -- z.ai was hardwired in
+# before a second provider was possible, and the list got added around it.
+#
+# The seam showed everywhere a person could touch it:
+#   - the first row could only have its key replaced, while name, URL and
+#     models were all editable on the others (save_provider short-circuited)
+#   - the first row had no delete button, because delete_provider filtered
+#     cfg.providers and the first row was not in it
+#   - Settings had to offer a provider CHOICE, because "select the primary"
+#     and "select a custom one" were different operations -- a second, rival
+#     place to choose, next to a model picker that already listed everything
+#
+# So the setup provider is folded into the list on load and there is no
+# primary afterwards. What remains is two pointers, each of them just a name:
+# which model new chats start on, and which model reads images.
+
+def _norm_models(entry: dict) -> None:
+    """Fill in a provider's model lists so every row answers the same way.
+
+    `models` is what to show by default and `all_models` is everything the
+    endpoint listed. Rows added by hand only ever had `models`, so the UI had
+    to guess which of the two it was looking at.
+    """
     from . import providers as _providers
-    # Everything this endpoint can reach, not just the one chosen at setup.
-    # It used to report [model, vision_model], so a preset offering three
-    # models produced a picker with one entry and the rest were unreachable
-    # without adding the same provider again by hand.
-    # What the endpoint actually serves wins over what this app was told to
-    # expect. Falls back to the catalogue when nobody has asked it yet.
-    #
-    # Shortlisted, because a provider's listing is not a list of what your key
-    # can use: Google publishes previews, experiments, dated snapshots and
-    # separately-licensed open models on the same endpoint, several of which
-    # 404 when called. Forty entries with no way to tell them apart is a worse
-    # menu than the stale one. The rest stay reachable under "show all".
-    everything = list(cfg.available_models) or _providers.chat_models(cfg.base_url)
-    models = _providers.shortlist(everything)
-    if cfg.model and cfg.model not in models:
-        # A model set by hand, or one the catalogue has since dropped: it is
-        # in use, so it has to stay selectable.
-        models = [cfg.model] + models
-    return {"name": builtin_provider_name(cfg), "base_url": cfg.base_url,
-            "api_key": cfg.resolve_api_key(),
-            "models": models or [cfg.model],
-            # Everything the provider listed, for "show all". Narrowing the
-            # default view must never narrow the choice.
-            "all_models": everything or [cfg.model],
-            "vision_model": cfg.vision_model, "builtin": True,
-            "preset": cfg.provider_preset or ""}
+    every = [m for m in (entry.get("all_models") or entry.get("models") or []) if m]
+    if not every:
+        every = _providers.chat_models(entry.get("base_url", ""))
+    shown = [m for m in (entry.get("models") or []) if m] or _providers.shortlist(every)
+    entry["all_models"] = every or list(shown)
+    entry["models"] = shown or list(every)
+
+
+def normalize_provider(entry: dict) -> dict:
+    """A provider dict with every field present, whatever wrote it."""
+    from . import providers as _providers
+    out = dict(entry or {})
+    out["base_url"] = (out.get("base_url") or "").rstrip("/")
+    known = (_providers.preset(out.get("preset") or "")
+             or _providers.preset_from_base_url(out["base_url"]))
+    out["preset"] = out.get("preset") or (known or {}).get("key", "")
+    out["name"] = out.get("name") or provider_label(out["base_url"], out["preset"])
+    # Where this provider's key lives. Per-provider and not one shared name:
+    # configuring a second API must not overwrite the first one's key, and
+    # reading a hosted key for a server running on this machine is how a key
+    # ends up somewhere it was never meant to go.
+    if "env_var" not in out:
+        out["env_var"] = _providers.env_var_for(out["preset"]) if out["preset"] else ""
+    out.setdefault("api_key", "")
+    _norm_models(out)
+    return out
+
+
+def provider_key(entry: dict) -> str:
+    """This provider's API key: its own environment variable first, then
+    whatever was stored with it."""
+    var = (entry or {}).get("env_var") or ""
+    if var:
+        found = os.environ.get(var, "").strip()
+        if found:
+            return found
+    return (entry or {}).get("api_key", "") or ""
 
 
 def all_providers(cfg: "Config") -> list:
-    return [builtin_provider(cfg)] + list(cfg.providers)
+    return [normalize_provider(p) for p in (cfg.providers or [])]
 
 
 def find_provider(cfg: "Config", name: str) -> dict | None:
+    if not name:
+        return None
     for p in all_providers(cfg):
         if p.get("name") == name:
             return p
-    # Chats saved before the primary provider was named after what it actually
-    # is still refer to it as "z.ai (free)". Resolve that to the primary rather
+    # Chats saved before the setup provider was named after what it actually is
+    # still refer to it as "z.ai (free)", and one typed in by hand is named
+    # after its host ("localhost:11434") until the day it becomes a preset and
+    # gains a label. Resolve both against the entry they now live in, rather
     # than reporting a provider that no longer exists -- those chats would
     # otherwise silently fall back and change model mid-conversation.
-    if name == BUILTIN_PROVIDER_NAME:
-        return builtin_provider(cfg)
-    # Same problem, one step later: a provider typed in by hand is named after
-    # its host ("localhost:11434"), and gains a proper label the day it becomes
-    # a preset. Chats saved in between still refer to it by host. Matching that
-    # against the primary's own host resolves them, and does so for any future
-    # preset that adopts a URL people were already typing.
-    host = (cfg.base_url or "").split("//")[-1].split("/")[0]
-    if host and name == host:
-        return builtin_provider(cfg)
+    legacy = (cfg.base_url or "").rstrip("/")
+    host = legacy.split("//")[-1].split("/")[0]
+    if name == BUILTIN_PROVIDER_NAME or (host and name == host):
+        for p in all_providers(cfg):
+            if p.get("base_url") == legacy:
+                return p
     return None
+
+
+def default_provider(cfg: "Config") -> dict | None:
+    """Which API new chats start on."""
+    return (find_provider(cfg, cfg.default_provider)
+            or (all_providers(cfg) or [None])[0])
+
+
+def default_model(cfg: "Config") -> str:
+    """Which model new chats start on."""
+    prov = default_provider(cfg)
+    if not prov:
+        return cfg.model
+    if cfg.model and cfg.model in (prov.get("all_models") or []):
+        return cfg.model
+    # The saved default is not something this API serves -- it was retired, or
+    # the default moved to another API. Anything that works beats a name that
+    # 404s on the first message.
+    return cfg.model or (prov.get("models") or [""])[0]
+
+
+def vision_target(cfg: "Config", chat_provider: dict | None = None,
+                  chat_model: str = "") -> tuple:
+    """(provider, model) for reading images, or (None, "").
+
+    Explicit beats automatic: a model named in Settings is used and nothing
+    second-guesses it. That setting exists because the automatic answer used to
+    be the whole story, and it was reached from the provider picked at setup --
+    so a chat switched to another API had its images, and then its entire turn,
+    handed back to the setup provider's model. Nothing about "I chose GLM for
+    this chat" implies "read my images with Gemini".
+
+    Automatic, in order: the chat's own model if its API reads images itself
+    (nothing to route anywhere); failing that its API's dedicated vision model;
+    failing that any configured API that can do either. (None, "") when nothing
+    can, which is a real answer and not a reason to guess.
+    """
+    from . import providers as _providers
+    named = find_provider(cfg, cfg.vision_provider)
+    if named and cfg.vision_model:
+        return named, cfg.vision_model
+    chat_provider = chat_provider or default_provider(cfg)
+    order = ([chat_provider] if chat_provider else []) + [
+        p for p in all_providers(cfg) if p != chat_provider]
+    for p in order:
+        if not p:
+            continue
+        base = p.get("base_url", "")
+        if _providers.is_multimodal(base):
+            model = (chat_model if p is chat_provider and chat_model
+                     else (p.get("models") or [""])[0])
+            if model:
+                return p, model
+        own = _providers.vision_model_for(base)
+        if own:
+            return p, own
+    return None, ""
+
+
+def _migrate_primary_into_providers(cfg: "Config") -> None:
+    """Fold the setup provider into the provider list, once.
+
+    Everything about it was already provider-shaped; it was only ever stored
+    apart. Deliberately keyed on base_url rather than name, because the name
+    has changed at least twice ("z.ai (free)", then the preset's label, then
+    the host for hand-typed ones) and matching on it would add a duplicate row
+    for the same endpoint.
+    """
+    base = (cfg.base_url or "").rstrip("/")
+    if not base:
+        return
+    for p in cfg.providers:
+        if (p.get("base_url") or "").rstrip("/") == base:
+            return                      # already migrated
+    entry = normalize_provider({
+        "name": builtin_provider_name(cfg),
+        "base_url": base,
+        "preset": cfg.provider_preset or "",
+        # cfg.api_key is the "the environment write was blocked" fallback, and
+        # stays exactly that: provider_key reads the variable first.
+        "api_key": cfg.api_key or "",
+        "all_models": list(cfg.available_models),
+    })
+    if cfg.model and cfg.model not in entry["models"]:
+        # In use, so it stays selectable whatever any catalogue says.
+        entry["models"] = [cfg.model] + entry["models"]
+        if cfg.model not in entry["all_models"]:
+            entry["all_models"] = [cfg.model] + entry["all_models"]
+    # First, because it is the one the person set up and expects to see at the
+    # top -- ordering is presentation now, not meaning.
+    cfg.providers.insert(0, entry)
+    if not cfg.default_provider:
+        cfg.default_provider = entry["name"]
+
+
+def _migrate_vision_pointer(cfg: "Config") -> None:
+    """Drop a vision model nobody chose.
+
+    cfg.vision_model looks like a setting and never was one: setup wrote
+    `preset["vision_model"] or model` into it and no screen could change it.
+    Carrying that forward as an explicit pin would recreate the bug this
+    rework is for -- on a Google install it equals the chat model, so pinning
+    it says "read every image with Gemini" and a chat switched to z.ai has its
+    images sent back to Google, which is exactly what it must stop doing.
+
+    So an unowned value becomes `auto`, which now resolves per chat. Anything
+    with an owner was set deliberately, on the screen that exists for it, and
+    is left alone.
+    """
+    if cfg.vision_provider:
+        return
+    cfg.vision_model = ""
 
 
 @dataclass
@@ -174,6 +334,15 @@ class Config:
     # by hand). Only ever a label and a set of instructions: the client treats
     # every provider the same, and this changes nothing about how it is called.
     provider_preset: str = ""
+    # Which API new chats start on, by name. Replaces "the primary provider",
+    # which was not a choice anybody made -- it was wherever the setup screen
+    # happened to write, and the only row that could not be edited or removed.
+    default_provider: str = ""
+    # Which API serves cfg.vision_model. "" means work it out (see
+    # vision_target). The model name alone used to be the whole setting, and it
+    # implicitly meant "on the setup provider" -- which is how a chat moved to
+    # z.ai had its images, and then its whole turn, sent back to Gemini.
+    vision_provider: str = ""
     # Has this install been through setup? Deliberately NOT inferred from
     # "can a key be found anywhere", which is what the first-run check used to
     # ask. The key is persisted with `setx`, i.e. into HKCU\Environment in the
@@ -276,6 +445,18 @@ class Config:
     phone_app_url: str = "https://pellkvistdev.github.io/Make-No-Mistakes/"
 
     extra: dict = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Not only in load_config. A Config is built directly by the CLI, by
+        # tests, and by anything that wants defaults, and every one of those
+        # would otherwise see a provider list missing the provider the app is
+        # actually configured to use. Idempotent: it matches on base_url and
+        # returns immediately once the row is there.
+        _migrate_primary_into_providers(self)
+        # Keeps one invariant true everywhere: a vision model is only ever set
+        # together with the API that serves it. A bare name is a leftover from
+        # when there was only one API it could have meant.
+        _migrate_vision_pointer(self)
 
     def provider_env_var(self) -> str:
         """Which environment variable holds the primary provider's key.
@@ -404,6 +585,10 @@ def load_config() -> Config:
     if "setup_done" not in data:
         cfg.setup_done = CONFIG_FILE.exists()
     _retire_stale_model(cfg)
+    # Before anything reads cfg.providers: until this runs the list is missing
+    # the provider most installs actually use.
+    _migrate_primary_into_providers(cfg)
+    _migrate_vision_pointer(cfg)
     if cfg.mode not in PERMISSION_MODES:
         cfg.mode = "ask"
     # Configs written before thinking_mode existed only had the boolean

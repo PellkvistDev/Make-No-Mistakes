@@ -190,6 +190,27 @@ def test_a_provider_with_no_key_is_not_sent():
     assert got == []
 
 
+def test_a_key_that_lives_in_an_environment_variable_is_still_sent(monkeypatch):
+    """Where a key normally lives now. Reading the api_key field alone would
+    pair over nothing for every API set up the ordinary way -- the field is
+    only the fallback for a machine where writing the variable was blocked."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "sk-from-env")
+    got = pairing.providers_for_phone([
+        {"name": "Google AI Studio", "base_url": "https://g.test/v1",
+         "env_var": "GOOGLE_API_KEY", "api_key": "", "models": ["m"]},
+    ])
+    assert [p["key"] for p in got] == ["sk-from-env"]
+
+
+def test_the_stored_key_is_used_when_the_variable_is_empty(monkeypatch):
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    got = pairing.providers_for_phone([
+        {"name": "Google AI Studio", "base_url": "https://g.test/v1",
+         "env_var": "GOOGLE_API_KEY", "api_key": "sk-stored", "models": ["m"]},
+    ])
+    assert [p["key"] for p in got] == ["sk-stored"]
+
+
 def test_providers_ride_along_in_the_sealed_payload():
     provs = pairing.providers_for_phone(
         [_prov("Google", "https://generativelanguage.googleapis.com/v1beta/openai", "sk-g")])

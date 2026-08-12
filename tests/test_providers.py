@@ -7,9 +7,9 @@ import types
 
 import glmcode.config as config
 from glmcode.config import (BUILTIN_PROVIDER_NAME, Config, all_providers,
-                            builtin_provider_name,
-                            builtin_provider, find_provider, load_config,
-                            save_config)
+                            builtin_provider_name, default_provider,
+                            find_provider, load_config, provider_key,
+                            save_config, vision_target)
 from glmcode.sessions import SessionStore
 
 from conftest import FakeResult, tool_call
@@ -31,12 +31,16 @@ def make_api(monkeypatch):
     return api
 
 
+def _row(api, name):
+    return next(p for p in api._cfg.providers if p["name"] == name)
+
+
 def test_save_provider_adds_then_edits_in_place(monkeypatch):
     api = make_api(monkeypatch)
     res = api.save_provider("", "OpenRouter", "https://openrouter.ai/api/v1/",
                             "sk-x", "m1, m2")
     assert "error" not in res
-    p = api._cfg.providers[0]
+    p = _row(api, "OpenRouter")
     assert p["base_url"] == "https://openrouter.ai/api/v1"  # trailing / stripped
     assert p["models"] == ["m1", "m2"]
 
@@ -45,8 +49,8 @@ def test_save_provider_adds_then_edits_in_place(monkeypatch):
     res = api.save_provider("OpenRouter", "OR", "https://openrouter.ai/api/v1",
                             "", "m1")
     assert "error" not in res
-    p = api._cfg.providers[0]
-    assert (p["name"], p["api_key"], p["models"]) == ("OR", "sk-x", ["m1"])
+    p = _row(api, "OR")
+    assert (p["api_key"], p["models"]) == ("sk-x", ["m1"])
 
 
 def test_save_provider_validation(monkeypatch):
@@ -60,7 +64,7 @@ def test_save_provider_validation(monkeypatch):
     assert "already exists" in api.save_provider("B", "A", "https://b/v1", "", "m")["error"]
 
 
-def test_saving_builtin_row_sets_env_key(monkeypatch):
+def test_the_setup_row_takes_a_key_like_any_other(monkeypatch):
     api = make_api(monkeypatch)
     persisted = {}
 
@@ -77,45 +81,99 @@ def test_saving_builtin_row_sets_env_key(monkeypatch):
     assert persisted == {"ZAI_API_KEY": "zk-123"}
     assert api._cfg.api_key == "zk-123"
     assert res["persisted_env"] is True
-    # no custom provider row was created for the builtin
-    assert api._cfg.providers == []
-    # and an empty key is refused
-    assert "error" in api.save_provider(BUILTIN_PROVIDER_NAME,
-                                        BUILTIN_PROVIDER_NAME, "", "", "")
 
 
-def test_saving_the_primary_row_uses_that_providers_own_env_var(monkeypatch):
+def test_the_setup_row_can_also_have_its_url_and_models_edited(monkeypatch):
+    """It could not. save_provider recognised this one row and returned after
+    storing the key, so the name, URL and model list someone had just typed
+    were silently dropped -- the only row in the app that behaved that way."""
+    api = make_api(monkeypatch)
+    monkeypatch.setattr(gui_app, "persist_env_var", lambda n, v: True)
+    before = default_provider(api._cfg)["name"]
+
+    res = api.save_provider(before, "My Gateway", "https://gw.example/v1",
+                            "", "a, b")
+    assert "error" not in res
+    row = _row(api, "My Gateway")
+    assert (row["base_url"], row["models"]) == ("https://gw.example/v1", ["a", "b"])
+    # The rename carries the pointers with it rather than leaving them
+    # dangling at a name that no longer exists.
+    assert api._cfg.default_provider == "My Gateway"
+
+
+def test_saving_a_preset_row_uses_that_providers_own_env_var(monkeypatch):
     """Configuring Google must not overwrite a z.ai key, and vice versa."""
     api = make_api(monkeypatch)
-    api._cfg.provider_preset = "google"
-    api._cfg.base_url = "https://generativelanguage.googleapis.com/v1beta/openai"
+    api._cfg = Config(
+        provider_preset="google",
+        base_url="https://generativelanguage.googleapis.com/v1beta/openai")
     persisted = {}
     monkeypatch.setattr(gui_app, "persist_env_var",
                         lambda n, v: persisted.setdefault(n, v) or True)
     res = api.save_provider("Google AI Studio", "Google AI Studio", "", "g-key", "")
     assert "error" not in res
     assert persisted == {"GOOGLE_API_KEY": "g-key"}
-    assert api._cfg.providers == [], "the primary provider is not a custom row"
 
 
-def test_builtin_provider_always_first():
+def test_every_row_can_be_deleted_including_the_first(monkeypatch):
+    """There used to be one that could not, and not by decision: it lived
+    outside cfg.providers, so the delete could not see it and the UI drew no
+    button for it."""
+    api = make_api(monkeypatch)
+    api.save_provider("", "OpenRouter", "https://openrouter.ai/api/v1", "k", "m1")
+    first = api._cfg.providers[0]["name"]
+
+    res = api.delete_provider(first)
+    assert "error" not in res
+    assert [p["name"] for p in api._cfg.providers] == ["OpenRouter"]
+    # And the default moves to something that still exists.
+    assert api._cfg.default_provider == "OpenRouter"
+    assert default_provider(api._cfg)["name"] == "OpenRouter"
+
+
+def test_deleting_the_setup_row_does_not_resurrect_it(monkeypatch):
+    """The legacy fields describe the same endpoint, and a Config heals itself
+    from them -- so leaving them behind would put the row back on next launch,
+    which looks exactly like the delete button not working."""
+    api = make_api(monkeypatch)
+    api.save_provider("", "OpenRouter", "https://openrouter.ai/api/v1", "k", "m1")
+    api.delete_provider(api._cfg.providers[0]["name"])
+
+    reloaded = Config(**{k: getattr(api._cfg, k) for k in
+                         ("base_url", "provider_preset", "api_key",
+                          "model", "providers", "default_provider")})
+    assert [p["name"] for p in reloaded.providers] == ["OpenRouter"]
+
+
+def test_deleting_the_last_api_sends_you_back_to_setup(monkeypatch):
+    api = make_api(monkeypatch)
+    res = api.delete_provider(api._cfg.providers[0]["name"])
+    assert api._cfg.providers == []
+    assert api._cfg.setup_done is False
+    assert res["needsKey"] is True
+
+
+def test_the_setup_provider_is_an_ordinary_row():
     cfg = Config()
     provs = all_providers(cfg)
     # Named after what it actually is, rather than a vendor label that used to
     # be printed whatever the base URL pointed at.
     assert provs[0]["name"] == builtin_provider_name(cfg)
-    assert provs[0]["builtin"] is True
     assert cfg.model in provs[0]["models"]
+    # No flag marking it as a different kind of thing. `builtin` was that flag,
+    # and every branch on it was a place this row behaved unlike the others.
+    assert "builtin" not in provs[0]
+    assert provs[0]["env_var"] == "ZAI_API_KEY"
 
 
 def test_find_provider():
     cfg = Config(providers=[{"name": "OpenRouter", "base_url": "https://x/v1",
                              "api_key": "k", "models": ["m1"]}])
     assert find_provider(cfg, "OpenRouter")["base_url"] == "https://x/v1"
-    assert find_provider(cfg, builtin_provider_name(cfg))["builtin"] is True
-    # Chats saved before presets name the primary provider the old way; they
+    assert find_provider(cfg, builtin_provider_name(cfg)) is not None
+    # Chats saved before presets name the setup provider the old way; they
     # must keep resolving, or they would quietly switch model on next open.
-    assert find_provider(cfg, BUILTIN_PROVIDER_NAME)["builtin"] is True
+    assert find_provider(cfg, BUILTIN_PROVIDER_NAME)["base_url"] == cfg.base_url
     assert find_provider(cfg, "nope") is None
 
 
@@ -157,14 +215,41 @@ def test_agent_uses_model_override(scripted_agent):
     assert seen["model"] == "custom/model-x"
 
 
-def test_client_for_routes_vision_to_vision_client(scripted_agent):
+def test_chat_calls_never_leave_the_chats_own_client(scripted_agent):
+    """_client_for used to divert to `vision_client` whenever the model id
+    happened to equal cfg.vision_model -- a string comparison standing in for
+    "is this an image call". On a Gemini install cfg.vision_model IS cfg.model,
+    so ordinary coding turns matched it and were answered by whichever endpoint
+    vision had last been pointed at."""
     agent = scripted_agent()
-    other = object()
-    agent.vision_client = other
-    assert agent._client_for(agent.cfg.vision_model) is other
-    assert agent._client_for("anything-else") is agent.client
-    agent.vision_client = None
-    assert agent._client_for(agent.cfg.vision_model) is agent.client
+    agent.vision_client = object()
+    for model in (agent.cfg.model, "anything-else", ""):
+        assert agent._client_for(model) is agent.client
+
+
+def test_the_image_model_is_resolved_from_the_chats_own_api(scripted_agent):
+    """The reported bug, at its source. A chat on z.ai must read images with
+    z.ai's vision model, not with whatever the setup provider uses."""
+    agent = scripted_agent()
+    agent.client.base_url = "https://api.z.ai/api/paas/v4"   # this chat's API
+    client, model = agent._vision_client_and_model()
+    assert model == "glm-4.6v-flash"
+    # Same endpoint, so the same client and the same key -- no second one, and
+    # in particular not one aimed at the provider chosen at setup.
+    assert client is agent.client
+
+
+def test_a_pinned_vision_model_wins_over_the_automatic_answer(scripted_agent):
+    agent = scripted_agent()
+    agent.cfg.providers.append({"name": "Vision Co", "base_url": "https://v/v1",
+                                "api_key": "vk", "models": ["sees-things"]})
+    agent.cfg.vision_provider = "Vision Co"
+    agent.cfg.vision_model = "sees-things"
+
+    client, model = agent._vision_client_and_model()
+    assert model == "sees-things"
+    assert client.base_url == "https://v/v1"
+    assert client is not agent.client
 
 
 def test_thinking_only_sent_to_builtin_not_byom(scripted_agent):
