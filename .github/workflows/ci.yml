@@ -32,7 +32,12 @@ jobs:
       # it: every test of the sync store's encryption, the secret store, and
       # the pairing wire format is gated on it being importable, and a gated
       # test that never runs is indistinguishable from one that passes.
-      - run: pip install requests pytest cryptography
+      # segno for the same reason as cryptography: the pairing tests assert how
+      # many modules the QR comes out at, because that number is what decides
+      # whether a phone camera can read it and a field added to the payload is
+      # how it quietly creeps back up. Without segno those tests skip, and a
+      # skipped assertion is indistinguishable from a passing one.
+      - run: pip install requests pytest cryptography segno
       - run: python -m pytest tests/ -q
       # The phone's logic layer: crypto, the sync store, context budgeting,
       # the agent loop. It had never run here, so every green check on every
@@ -57,6 +62,13 @@ jobs:
       # cryptography because the pairing tests seal a token with the desktop's
       # own code and open it in the real phone app -- that is what pins the two
       # halves of the wire format together.
-      - run: pip install pytest playwright cryptography
+      #
+      # requests and segno are not optional here either, and the reason is
+      # worth stating: those pairing tests reach glmcode.pairing through
+      # importorskip, so for want of requests they were SKIPPING in this job,
+      # silently, while the comment above claimed they ran. segno draws the QR
+      # the scanner tests play through the fake camera. A skipped test and a
+      # passing one look identical in a green check.
+      - run: pip install pytest playwright cryptography requests segno
       - run: python -m playwright install --with-deps chromium
       - run: python -m pytest tests/mobile_ui tests/desktop_ui -q
