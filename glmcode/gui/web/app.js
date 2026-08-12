@@ -3524,6 +3524,23 @@ function syncSettingsUI() {
     b.classList.toggle("on", b.dataset.v === settings.vision_route);
     b.setAttribute("aria-checked", b.dataset.v === settings.vision_route);
   });
+  const eng = settings.voice_engine || "local";
+  document.querySelectorAll("#voice-engine-seg button").forEach((b) => {
+    b.classList.toggle("on", b.dataset.v === eng);
+    b.setAttribute("aria-checked", b.dataset.v === eng);
+    // Said on the control rather than discovered on the first attempt: only
+    // some APIs implement the speech-to-speech protocol at all, and this app
+    // lets each chat sit on a different one.
+    if (b.dataset.v === "live") b.disabled = !settings.live_available;
+  });
+  const note = $("voice-engine-note");
+  if (note) {
+    note.textContent = !settings.live_available
+      ? "Speech to speech needs a Google AI Studio key — add one under Models & tools."
+      : eng === "live"
+        ? "Native audio, with interruption. Uses your Google quota."
+        : "Runs entirely on this PC. No key, no network, no quota.";
+  }
   const tm = settings.thinking_mode || "medium";
   document.querySelectorAll("#seg-think button").forEach((b) => {
     b.classList.toggle("on", b.dataset.v === tm);
@@ -3754,6 +3771,15 @@ document.querySelectorAll("#seg-vision button").forEach((b) =>
   b.addEventListener("click", async () => {
     settings = await api().set_setting("vision_route", b.dataset.v);
     syncSettingsUI();
+  }));
+document.querySelectorAll("#voice-engine-seg button").forEach((b) =>
+  b.addEventListener("click", async () => {
+    settings = await api().set_setting("voice_engine", b.dataset.v);
+    syncSettingsUI();
+    // Switching engines mid-session would leave one holding the microphone
+    // the other is about to ask for, so the change lands on the next session.
+    if (voice.active) toast("Voice engine changes on your next voice session.",
+      "info", 3500);
   }));
 document.querySelectorAll("#seg-think button").forEach((b) =>
   b.addEventListener("click", async () => {
@@ -5293,6 +5319,17 @@ async function startVoice(viaWake = false) {
   src.connect(voice.analyser);
   onTtsIdle = onVoiceTtsIdle;
   startWaveform();
+  // The live engine takes over from here: the model does its own endpointing
+  // and its own barge-in, so none of the machinery below -- the noise-floor
+  // calibration, the energy VAD, the recorder -- has anything to decide.
+  // Everything above it stays, because the overlay, the mic and the worker
+  // cards are the same either way.
+  if (liveEngineOn()) {
+    if (await startLiveVoice()) return;
+    // Falling through is deliberate. A missing key or an API that has no live
+    // model is a reason to talk locally, not a reason to have no voice.
+    toast("Falling back to the local voice engine.", "info", 4000);
+  }
   // Calibrate to the room: sample ambient energy briefly and seed the noise
   // floor from it, so the very first utterance already has sane thresholds.
   if (!voice.ptt) { setVoiceStatus("Calibrating to the room…"); setVoiceOrb("thinking"); }
@@ -5325,6 +5362,7 @@ async function calibrateNoiseFloor() {
 function stopVoice() {
   if (!voice.active && !voice.stream) return;
   voice.active = false;
+  stopLiveVoice();
   onTtsIdle = null;
   resetTtsPlayback();
   stopThinkCue();
@@ -6124,3 +6162,254 @@ function bootSafely() {
 
 if (window.pywebview && window.pywebview.api) bootSafely();
 else window.addEventListener("pywebviewready", bootSafely);
+
+/* ---- speech to speech (Gemini Live) ------------------------------------ *
+ *
+ * The other voice engine. Local voice is four hops -- record, Whisper, a text
+ * model, Kokoro -- and two of them exist only to get sound in and out of a
+ * model that cannot hear. This one is a single WebSocket to a model that can.
+ *
+ * The socket is HERE and not in Python on purpose. The mic and the speakers
+ * are already in this page, and the pywebview bridge is the app's narrowest
+ * pipe (WebEvents batches its traffic for exactly that reason) -- pushing
+ * 16kHz PCM through it in both directions would be the worst use of it
+ * available. What crosses the bridge is the session setup once at the start,
+ * and the tool calls, which are rare and small.
+ */
+const liveVoice = {
+  ws: null, ctx: null, node: null, stream: null,
+  playAt: 0, sources: [], handle: "", closing: false, reconnects: 0,
+  said: "", heard: "",
+};
+
+const LIVE_MAX_RECONNECTS = 5;
+
+function liveB64(bytes) {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
+}
+
+function liveBytes(b64) {
+  const s = atob(b64);
+  const a = new Uint8Array(s.length);
+  for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+  return a;
+}
+
+/* Float32 at whatever the device gave us -> Int16 at 16kHz, which is the only
+ * thing the API takes. Nearest-neighbour rather than a real resampler: the
+ * input is speech through a phone-grade mic, and the model resamples anyway --
+ * the reason to do it here at all is bandwidth, not fidelity. */
+function livePcm16(samples, fromRate) {
+  const ratio = fromRate / 16000;
+  const out = new Int16Array(Math.floor(samples.length / ratio));
+  for (let i = 0; i < out.length; i++) {
+    const v = Math.max(-1, Math.min(1, samples[Math.floor(i * ratio)] || 0));
+    out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+  }
+  return new Uint8Array(out.buffer);
+}
+
+function liveSend(obj) {
+  const ws = liveVoice.ws;
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+/* Everything the model has queued to say, dropped on the floor. Called when
+ * the server reports an interruption: the user has started talking over it,
+ * and continuing to play the old answer is the single most obviously broken
+ * thing a voice assistant can do. */
+function liveStopPlayback() {
+  for (const s of liveVoice.sources) { try { s.stop(); } catch (e) { /* ended */ } }
+  liveVoice.sources = [];
+  liveVoice.playAt = 0;
+}
+
+function livePlay(bytes) {
+  const ctx = liveVoice.ctx;
+  if (!ctx) return;
+  const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+  // 24kHz out, against 16kHz in. Two different numbers, and using one for both
+  // is a chipmunk or a drawl depending which way round you get it wrong.
+  const buf = ctx.createBuffer(1, pcm.length, 24000);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  // Scheduled end-to-end rather than played on arrival: chunks land in bursts,
+  // and starting each one "now" overlaps them into noise.
+  const now = ctx.currentTime;
+  liveVoice.playAt = Math.max(liveVoice.playAt, now + 0.05);
+  src.start(liveVoice.playAt);
+  liveVoice.playAt += buf.duration;
+  liveVoice.sources.push(src);
+  src.onended = () => {
+    liveVoice.sources = liveVoice.sources.filter((s) => s !== src);
+    if (!liveVoice.sources.length && voice.active) setVoiceOrb("idle");
+  };
+}
+
+async function liveHandleToolCalls(calls) {
+  // Answered as a batch: the model is blocked on all of them at once, so
+  // replying one at a time would stall it for as long as the slowest.
+  const out = await Promise.all((calls || []).map(async (c) => {
+    let res;
+    try { res = await api().live_voice_tool(c.name, c.args || {}); }
+    catch (e) { res = { output: "ERROR: " + String(e) }; }
+    return { id: c.id, name: c.name, output: (res && res.output) || "" };
+  }));
+  liveSend({ toolResponse: { functionResponses: out.map((r) => ({
+    id: r.id, name: r.name, response: { output: r.output } })) } });
+}
+
+function liveOnMessage(payload) {
+  const sc = payload.serverContent;
+  if (payload.toolCall) liveHandleToolCalls(payload.toolCall.functionCalls);
+  // The handle that makes a dropped socket a non-event. Stored every time it
+  // is offered, because the disconnect never announces itself in advance.
+  if (payload.sessionResumptionUpdate && payload.sessionResumptionUpdate.resumable) {
+    liveVoice.handle = payload.sessionResumptionUpdate.newHandle || liveVoice.handle;
+  }
+  // "Your connection is about to end" -- sent BEFORE it does, which is the
+  // only warning there is. A session outlives its socket by design here.
+  if (payload.goAway) liveReconnect();
+  if (!sc) return;
+  if (sc.interrupted) liveStopPlayback();
+  if (sc.inputTranscription && sc.inputTranscription.text) {
+    liveVoice.heard += sc.inputTranscription.text;
+    $("voice-caption").textContent = liveVoice.heard;
+  }
+  if (sc.outputTranscription && sc.outputTranscription.text) {
+    liveVoice.said += sc.outputTranscription.text;
+  }
+  // One event can carry several parts at once -- audio and a transcript
+  // together -- so every part is looked at rather than the first one.
+  for (const part of (sc.modelTurn && sc.modelTurn.parts) || []) {
+    const d = part.inlineData;
+    if (d && d.data && (d.mimeType || "").startsWith("audio/")) {
+      setVoiceOrb("speaking");
+      livePlay(liveBytes(d.data));
+    }
+  }
+  if (sc.turnComplete) {
+    const heard = liveVoice.heard.trim();
+    const said = liveVoice.said.trim();
+    liveVoice.heard = liveVoice.said = "";
+    if (heard || said) {
+      // Nothing about a live session lands in this app by itself: the model
+      // holds the conversation. Both halves go back so the chat's transcript
+      // and the delegator's own history stay true.
+      try { api().live_voice_turn(heard, said); } catch (e) { /* ignore */ }
+      appendVoiceTurn(heard, said);
+    }
+  }
+}
+
+function appendVoiceTurn(heard, said) {
+  const box = $("voice-caption");
+  if (!box) return;
+  box.textContent = said || heard || "";
+}
+
+async function liveReconnect() {
+  if (liveVoice.closing || !voice.active) return;
+  if (liveVoice.reconnects >= LIVE_MAX_RECONNECTS) {
+    toast("Voice kept losing its connection — switched off.", "error", 6000);
+    stopVoice();
+    return;
+  }
+  liveVoice.reconnects += 1;
+  try { liveVoice.ws.close(); } catch (e) { /* already gone */ }
+  await liveOpenSocket();
+}
+
+async function liveOpenSocket() {
+  let cfg;
+  try { cfg = await api().live_voice_config(); } catch (e) { cfg = { error: String(e) }; }
+  if (!cfg || cfg.error) {
+    toast(cfg && cfg.error ? cfg.error : "Couldn't start live voice.", "error", 6000);
+    return false;
+  }
+  const setup = cfg.setup;
+  if (liveVoice.handle) setup.setup.sessionResumption = { handle: liveVoice.handle };
+  return new Promise((resolve) => {
+    let ws;
+    try { ws = new WebSocket(cfg.url); } catch (e) {
+      toast("Couldn't open the voice connection.", "error", 6000);
+      resolve(false); return;
+    }
+    ws.binaryType = "arraybuffer";
+    liveVoice.ws = ws;
+    ws.onopen = () => { ws.send(JSON.stringify(setup)); resolve(true); };
+    ws.onmessage = async (ev) => {
+      let text = ev.data;
+      // The server answers over a text frame or a Blob depending on the
+      // runtime; both carry the same JSON.
+      if (text instanceof Blob) text = await text.text();
+      else if (text instanceof ArrayBuffer) text = new TextDecoder().decode(text);
+      let payload;
+      try { payload = JSON.parse(text); } catch (e) { return; }
+      try { liveOnMessage(payload); } catch (e) { console.error("live", e); }
+    };
+    ws.onerror = () => { /* onclose always follows; handled there */ };
+    ws.onclose = () => {
+      if (liveVoice.closing || !voice.active) return;
+      // Closed without a goAway: a genuine drop rather than the scheduled
+      // rotation, and the same repair either way.
+      liveReconnect();
+    };
+  });
+}
+
+async function startLiveVoice() {
+  liveVoice.closing = false;
+  liveVoice.reconnects = 0;
+  liveVoice.handle = "";
+  liveVoice.said = liveVoice.heard = "";
+  if (!(await liveOpenSocket())) return false;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  liveVoice.ctx = new Ctx();
+  const src = liveVoice.ctx.createMediaStreamSource(voice.stream);
+  const rate = liveVoice.ctx.sampleRate;
+  // ScriptProcessor rather than an AudioWorklet: a worklet needs a separate
+  // module file fetched by URL, and this page is loaded from disk under a
+  // strict CSP. Deprecated, universally supported, and the work per block is
+  // a downsample -- not enough to be worth the extra moving part.
+  const node = liveVoice.ctx.createScriptProcessor(4096, 1, 1);
+  node.onaudioprocess = (e) => {
+    if (!voice.active || voice.muted) return;
+    const pcm = livePcm16(e.inputBuffer.getChannelData(0), rate);
+    liveSend({ realtimeInput: { audio: {
+      data: liveB64(pcm), mimeType: "audio/pcm;rate=16000" } } });
+  };
+  src.connect(node);
+  // Into a muted gain node, not the speakers: a ScriptProcessor only runs
+  // while it is connected to something, and connecting it to the output would
+  // play the microphone back into the room.
+  const sink = liveVoice.ctx.createGain();
+  sink.gain.value = 0;
+  node.connect(sink);
+  sink.connect(liveVoice.ctx.destination);
+  liveVoice.node = node;
+  setVoiceStatus("Listening — just talk.");
+  setVoiceOrb("idle");
+  return true;
+}
+
+function stopLiveVoice() {
+  liveVoice.closing = true;
+  liveStopPlayback();
+  // Tells the server to flush what it is holding. Without it the tail of the
+  // last sentence sits in its buffer and is simply lost.
+  try { liveSend({ realtimeInput: { audioStreamEnd: true } }); } catch (e) { /* closed */ }
+  try { if (liveVoice.node) liveVoice.node.disconnect(); } catch (e) { /* ignore */ }
+  try { if (liveVoice.ws) liveVoice.ws.close(); } catch (e) { /* ignore */ }
+  if (liveVoice.ctx) { try { liveVoice.ctx.close(); } catch (e) { /* ignore */ } }
+  liveVoice.ws = liveVoice.ctx = liveVoice.node = null;
+}
+
+function liveEngineOn() {
+  return !!(settings && settings.voice_engine === "live");
+}

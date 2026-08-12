@@ -551,6 +551,24 @@
     </section>
 
     <section data-tab="voice">
+      <h3>Voice conversation</h3>
+      <div class="row">
+        <div class="row-text"><label for="voice-engine-seg">Engine</label>
+          <span class="row-sub" id="voice-engine-note"></span></div>
+      </div>
+      <div class="seg" id="voice-engine-seg" role="radiogroup" aria-label="Voice engine">
+        <button data-v="local" role="radio">On this PC</button>
+        <button data-v="live" role="radio">Speech to speech</button>
+      </div>
+      <p class="row-sub"><strong>On this PC</strong> (default): Whisper hears you and Kokoro
+         answers, both running locally — no key, no network, no quota, and nothing
+         leaves the machine. <strong>Speech to speech</strong> sends the audio to a model
+         that hears and speaks natively, which is faster and lets you interrupt it
+         mid-sentence — but it needs a Google key on this chat, a connection, and it
+         counts against your quota.</p>
+    </section>
+
+    <section data-tab="voice">
       <h3>Voice</h3>
       <p class="row-sub">Toggle read-aloud from the speaker icon in the title bar. Runs locally —
          no API cost.</p>

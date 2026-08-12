@@ -142,6 +142,18 @@ PRESETS = [
         # recommended, and this is the difference.
         "retired_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite",
                            "gemini-2.5-pro", "gemini-3.1-pro"],
+        # Speech to speech, over a WebSocket, on a different protocol from
+        # everything else in this file -- so it is named separately rather than
+        # listed among the chat models. Putting it in `models` would offer it
+        # in the model picker, where choosing it would produce a chat that
+        # 400s: /chat/completions does not serve it.
+        #
+        # Deliberately the pinned preview id. There are two live models and
+        # they are not interchangeable (gemini-3.5-live-translate-preview is a
+        # translator), and this one replaced
+        # gemini-2.5-flash-native-audio-preview-12-2025, whose name says
+        # nothing about being the same thing.
+        "live_model": "gemini-3.1-flash-live-preview",
         # Gemini 3 returns a thought_signature on every tool call and requires
         # it back on each following request. Declared as an extension so it is
         # sent here and stripped for everyone else, exactly like z.ai's
@@ -454,6 +466,18 @@ def vision_model_for(base_url: str) -> str:
     """
     p = preset_from_base_url(base_url)
     return (p or {}).get("vision_model", "") or ""
+
+
+def live_model_for(base_url: str) -> str:
+    """This endpoint's speech-to-speech model, or "" if it has none.
+
+    Separate from the chat models on purpose: it is not reachable over
+    /chat/completions at all. The Live API is a WebSocket carrying raw PCM in
+    both directions, so an endpoint either implements that protocol or it does
+    not -- there is no partial support to fall back to.
+    """
+    p = preset_from_base_url(base_url)
+    return (p or {}).get("live_model", "") or ""
 
 
 def supports(base_url: str, extension: str) -> bool:

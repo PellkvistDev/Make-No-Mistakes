@@ -24,6 +24,7 @@ import webview
 
 from .. import __version__
 from ..agent import Agent
+from ..errors import ToolError
 from ..api import IMAGE_EXTENSIONS, ZaiClient
 from ..backup import BackupRepo
 from .. import backup as backup_module
@@ -36,6 +37,7 @@ from ..config import (BUILTIN_PROVIDER_NAME, CONFIG_DIR, PERMISSION_MODES, Confi
                       provider_key as cfg_provider_key)
 from ..events import AgentEvents
 from .. import githubsync
+from .. import live
 from .. import pairing
 from .. import qrcode_util
 from .. import syncstore
@@ -44,7 +46,7 @@ from ..notify import APP_NAME, notify
 from ..prompts import EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT
 from ..sessions import SessionStore, new_id, to_display
 from ..transcript import Transcript, search_sessions
-from ..tools import (configure_search,
+from ..tools import (CONVERSATIONAL_SCHEMAS, configure_search,
                      resolve_mentions as tools_resolve_mentions,
                      build_text_file_context as tools_build_text_file_context,
                      search_project_files as tools_search_project_files)
@@ -1191,6 +1193,12 @@ class Api:
             "cwd": str(Path.cwd()) if self.session_id else "",
             "background_custom": bool(c.background_path),
             "read_aloud": c.read_aloud, "tts_engine": c.tts_engine,
+            "voice_engine": c.voice_engine, "live_voice": c.live_voice,
+            # Whether the API this chat is on can do speech to speech at all,
+            # so Settings can say so instead of offering a switch that fails
+            # the first time it is used.
+            "live_available": bool(live.available(
+                (default_provider(c) or {}).get("base_url", ""))),
             "tts_voice": c.tts_voice, "piper_voice": c.piper_voice, "tts_speed": c.tts_speed,
             "stt_model": c.stt_model, "stt_language": c.stt_language,
             "voice_sensitivity": c.voice_sensitivity,
@@ -1230,6 +1238,10 @@ class Api:
             setattr(c, key, value.strip())
             if key == "model" and self._agent:
                 self._agent.rebuild_system_prompt()
+        elif key == "voice_engine" and value in ("local", "live"):
+            c.voice_engine = value
+        elif key == "live_voice" and isinstance(value, str) and value.strip():
+            c.live_voice = value.strip()[:40]
         elif key == "tts_engine" and value in ("kokoro", "piper"):
             c.tts_engine = value
         elif key == "tts_voice" and isinstance(value, str) and value.strip():
@@ -3458,6 +3470,97 @@ class Api:
         # (their approve/deny card is going away), so they don't hang.
         if cs.convo_agent is not None:
             cs.convo_agent.deny_pending_worker_permissions("voice mode was closed")
+        return {"ok": True}
+
+    # -- speech to speech (Gemini Live) ---------------------------------- #
+
+    def live_voice_config(self):
+        """Everything the page needs to open a live session, or why it can't.
+
+        The socket is opened by the page and not here on purpose: the mic and
+        the speakers are already there, and pywebview's bridge is the app's
+        narrowest pipe -- WebEvents batches its traffic for exactly that
+        reason. Streaming 16kHz PCM through it in both directions would be the
+        worst thing this app could ask of it.
+
+        So what crosses the bridge is this: once, at the start, the address and
+        the shape of the session. The audio never does.
+        """
+        cs = self._active
+        if cs is None:
+            return {"error": "no active chat — start a New Chat first"}
+        prov = find_provider(self._cfg, self.session_provider) \
+            or default_provider(self._cfg)
+        if prov is None:
+            return {"error": "no API configured"}
+        model = live.available(prov["base_url"])
+        if not model:
+            # Named, rather than "unsupported". Which API a chat is on is a
+            # per-chat choice now, so the fix is a specific one.
+            return {"error": f"{prov['name']} has no speech-to-speech model. "
+                             "Switch this chat to Google AI Studio for voice, "
+                             "or use the local voice engine in Settings."}
+        key = cfg_provider_key(prov)
+        if not key:
+            return {"error": f"no API key for {prov['name']}"}
+        convo = self._ensure_convo(cs)
+        lang = "" if self._cfg.voice_reply_language == "match" else "en-US"
+        return {
+            "ok": True,
+            "url": live.ws_url(key),
+            "setup": live.setup_message(
+                model, convo.system_prompt_text(), CONVERSATIONAL_SCHEMAS,
+                voice=self._cfg.live_voice, language=lang),
+            "model": model,
+            "inputRate": live.INPUT_SAMPLE_RATE,
+            "outputRate": live.OUTPUT_SAMPLE_RATE,
+            "voice_sid": self._voice_sid(cs.sid),
+        }
+
+    def live_voice_tool(self, name: str, args: dict):
+        """Run one tool the live model asked for, and report what happened.
+
+        Synchronous, because the Live API's function calling is: the model is
+        stopped mid-conversation until this returns. That would be a bad trade
+        for a voice assistant, except that these particular tools are already
+        built to return instantly -- dispatch_worker exists so the assistant
+        never goes quiet while real work happens, which is the same property
+        this protocol requires. The constraint and the design agree.
+
+        Never raises. A tool that fails is a thing the model should hear about
+        and talk about, not a dropped socket.
+        """
+        cs = self._active
+        if cs is None or cs.convo_agent is None:
+            return {"output": "ERROR: this chat is no longer open."}
+        try:
+            return {"output": cs.convo_agent._run_tool(name, dict(args or {}))}
+        except ToolError as e:
+            return {"output": f"ERROR: {e}"}
+        except Exception as e:
+            return {"output": f"ERROR: unexpected {type(e).__name__}: {e}"}
+
+    def live_voice_turn(self, user_text: str, reply_text: str):
+        """Record a completed spoken exchange.
+
+        The model keeps the conversation on its side, so nothing about a live
+        session lands in this app by itself. Both halves come back as
+        transcriptions and are written to the chat's searchable transcript --
+        the same log the local engine writes, so a coding chat can read what
+        was said out loud whichever engine said it.
+        """
+        cs = self._active
+        if cs is None:
+            return {"ok": False}
+        convo = cs.convo_agent
+        if convo is not None:
+            # Kept in the agent's own history too, so switching back to the
+            # local engine mid-conversation continues rather than restarts.
+            if user_text:
+                convo.messages.append({"role": "user", "content": user_text})
+            if reply_text:
+                convo.messages.append({"role": "assistant", "content": reply_text})
+        self._persist_voice_turn(cs, user_text or "")
         return {"ok": True}
 
     def _prewarm_speech(self) -> None:
