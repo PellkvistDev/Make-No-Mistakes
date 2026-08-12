@@ -137,6 +137,48 @@ being recorded is unsendable until repaired. On the desktop it runs inside
 `chat_to_session`, so every route in is covered — including the manual pull
 button, which could always land such a history and fail on its first request.
 
+## The pairing QR is read by a camera, and that constrains what goes in it
+
+`glmcode/pairing.py` seals and `mobile/agent-core.js` opens, and the layout is a
+version byte, two fixed-length fields and a compression scheme. Nothing in
+either file can tell you whether the other agrees; a mismatch surfaces as "that
+pairing link is damaged" on a phone with the working copy on the other machine.
+`tests/test_pairing.py` drives the phone's copy under Node against a real
+desktop seal, both directions.
+
+Two things about that payload are not free to change:
+
+- **It is deflated before encryption** (wire version 2). The payload is a
+  photograph's worth of detail: a realistic one — two APIs with their model
+  lists, a GitHub PAT, a sync passphrase — was a 113-module QR, and a camera has
+  to resolve every module of it off a laptop screen. Compressed it is 73. Base
+  URLs and model names repeat heavily; the keys are random and do not compress
+  at all. Version 1 is still *read*, so a phone that updated ahead of its
+  desktop can still pair. Adding a field to the payload spends this margin —
+  `tests/test_pairing.py` and `tests/test_pair_qr.py` assert the module count
+  for that reason.
+- **The QR holds the bare token, with no URL around it.** It used to hold a
+  link, and that was the bug behind "the code won't scan": the phone's *Camera*
+  app read it perfectly, opened Safari, and paired Safari's storage — which for
+  an app installed to the home screen is not the app's. The keys arrived
+  somewhere that was not the app, and the app still had none. A bare token
+  cannot be opened by anything, so scanning it with the wrong app does nothing,
+  which is the better failure. The URL belongs in the install code, one step
+  earlier in the same sheet.
+
+The other half was the scanner. `getUserMedia` asked for no resolution at all
+(browsers hand back 640×480) and the decode frame was capped at 720px, which is
+about 1.7 pixels per module — unreadable by anything. It now asks for 1920×1080
+and caps at 1440. **Keep a cap**: jsQR is plain JavaScript costing per pixel, so
+a full 1920×1080 frame drops the scan rate to a crawl on the device this is for.
+
+`tests/mobile_ui/test_scan_pairing.py` plays a real sealed QR through a fake
+camera as an actual video track. What it cannot test is whether a real phone
+reads it: canvas frames are perfectly sharp, square-on and noiseless, and jsQR
+reads about two pixels per module from those while a lens does not. So the
+margin is asserted where it is a fact — the pixels the decoder is handed —
+rather than by trusting a synthetic decode.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by

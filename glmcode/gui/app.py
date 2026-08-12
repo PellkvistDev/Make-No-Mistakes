@@ -2382,13 +2382,19 @@ class Api:
 
         The alternative people actually reach for is mailing themselves a
         GitHub PAT or leaning on a cloud clipboard, which hands the raw secret
-        to a third party. This goes screen -> camera instead: generated offline,
-        carried in the URL fragment browsers never transmit.
+        to a third party. This goes screen -> camera instead, generated offline,
+        and never touches a network at all.
 
         The code is returned separately and deliberately NOT encoded in the
         image, so a screenshot or photo of the QR alone is useless. The link
         isn't returned at all -- there is no safe way to paste it around, so the
         UI shouldn't offer one.
+
+        What the image holds is the bare token, with no URL wrapped around it.
+        A URL here is worse than useless: the phone's own Camera app reads it,
+        opens Safari, and pairs *Safari's* storage -- which for an app installed
+        to the home screen is not the app's. And the URL is already on screen a
+        step earlier, in the install code, which is where it belongs.
         """
         url = (self._cfg.phone_app_url or "").strip()
         if not url:
@@ -2409,14 +2415,19 @@ class Api:
             sync_passphrase=passphrase,
             providers=phone_providers,
         )
-        if len(payload) <= 2:   # only v + exp: nothing worth sending
+        # Asked of the SECRETS, not of the payload's size. A default model name
+        # is always set, so a length check passed on a desktop with no keys at
+        # all -- and minted a code whose entire contents was the string
+        # "glm-4.7-flash". The phone would pair, believe itself configured, and
+        # fail on the first message with an error about the key.
+        if not any((cfg_provider_key(default), token_gh, passphrase, phone_providers)):
             return {"error": "Nothing to send yet — add your model key first."}
         code = pairing.make_code()
         try:
-            link = pairing.pair_url(url, pairing.seal(payload, code))
             # Level L: the redundancy that helps a printed code survive a scuff
             # is wasted on a screen, and dropping it keeps the modules readable.
-            svg = qrcode_util.qr_svg(link, error="l", scale=5, border=2)
+            svg = qrcode_util.qr_svg(pairing.seal(payload, code),
+                                     error="l", scale=5, border=2)
         except Exception as e:
             return {"error": f"Couldn't build the pairing code: {e}"}
         return {"code": code, "svg": svg, "ttl": pairing.PAIR_TTL_SECONDS,

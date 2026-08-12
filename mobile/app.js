@@ -2859,14 +2859,14 @@
     }
   }
 
-  // A token can also arrive in the URL, from following the QR link in a
-  // browser. That works, but on iOS a home-screen app has its own storage, so
-  // anything paired that way stays in the browser and never reaches the
-  // installed app — which is why the in-app scanner exists and is offered first.
+  // A token can also arrive in the URL, from a pairing link made before the QR
+  // stopped carrying one. That route is why it stopped: on iOS a home-screen
+  // app has its own storage, so anything paired through the browser stays in
+  // the browser and never reaches the installed app. Still read, because such
+  // links exist; not made any more.
   async function consumePairLink() {
-    const m = /[#&]pair=([A-Za-z0-9_-]+)/.exec(location.hash || "");
-    if (!m) return;
-    const token = m[1];
+    const token = AC.pairTokenFrom(location.hash || "");
+    if (!token) return;
     // Out of the URL before anything else, so it can't linger in history or a
     // bookmark. Keeping it would also mean re-pairing on every launch.
     history.replaceState(null, "", location.pathname + location.search);
@@ -2910,8 +2910,21 @@
     back.hidden = false;
     let stream;
     try {
+      // Resolution is asked for, and that is half the reason this code would
+      // not scan. Requesting none leaves the browser free to hand back
+      // 640x480; the pairing QR was 113 modules, so held at a comfortable
+      // distance from a laptop screen it landed around 1.7 pixels per module,
+      // which no decoder can read. The install QR beside it is 37 modules,
+      // which is why that one always scanned and this one never did. (The
+      // other half was the payload, now deflated: see glmcode/pairing.py.)
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: { ideal: "environment" } }, audio: false });
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: false,
+      });
     } catch (e) {
       back.hidden = true;
       toast(e && e.name === "NotAllowedError"
@@ -2954,9 +2967,16 @@
       if (!busy && video.videoWidth) {
         busy = true;
         try {
-          // Cap the working size: a 4K frame costs far more to scan than it
-          // adds in detail, and the phone has to do this every frame.
-          const scale = Math.min(1, 720 / video.videoWidth);
+          // Cap the working size, but not below what the code needs. 720 was
+          // cheap and fine for a 37-module install code; against a pairing
+          // code it threw away exactly the detail being looked for. The cap
+          // stays, though -- jsQR is plain JavaScript costing per pixel, and a
+          // full 1920x1080 frame every animation frame is a crawl on a phone.
+          // The native detector is given the frame untouched: it is
+          // implemented below the page and handles a full-size image far
+          // better than it handles a starved one.
+          const cap = detector ? video.videoWidth : 1440;
+          const scale = Math.min(1, cap / video.videoWidth);
           canvas.width = Math.round(video.videoWidth * scale);
           canvas.height = Math.round(video.videoHeight * scale);
           ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
@@ -2975,8 +2995,8 @@
             }
           } catch (e) { text = ""; }
           if (text) {
-            const m = /[#&]pair=([A-Za-z0-9_-]+)/.exec(text);
-            if (m) { stop(); haptic(20); await applyPairToken(m[1]); return; }
+            const token = AC.pairTokenFrom(text);
+            if (token) { stop(); haptic(20); await applyPairToken(token); return; }
             // A QR that isn't ours: say so rather than looking broken.
             status.textContent = "That's a QR code, but not a set-up code from your computer.";
           }

@@ -40,6 +40,11 @@ def test_persist_env_var_survives_setx_missing(monkeypatch):
     monkeypatch.setattr(gui_app.subprocess, "run",
                         lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError()))
     monkeypatch.setattr(gui_app.sys, "platform", "win32")
+    # Through monkeypatch so it is put back. What is under test here is a
+    # function whose whole job is writing to os.environ, and without this the
+    # write outlives the test: ZAI_API_KEY stays "k" for the rest of the run,
+    # and any later test that resolves a z.ai key gets that instead of its own.
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
     assert gui_app.persist_env_var("ZAI_API_KEY", "k") is False
     assert os.environ["ZAI_API_KEY"] == "k"
 
