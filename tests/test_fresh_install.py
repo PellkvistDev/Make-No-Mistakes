@@ -412,7 +412,6 @@ def test_the_agents_prompt_names_the_model_it_will_actually_call(tmp_path):
     ag.messages = []
     ag.cfg = config_mod.Config(model="gemini-2.5-flash")
     ag.model_override = "gemini-3.6-flash"
-    ag._with_usage_note = lambda s: s
 
     ag.rebuild_system_prompt()
     prompt = ag.messages[0]["content"]
@@ -430,7 +429,6 @@ def test_with_no_override_the_prompt_names_the_default():
     ag.messages = []
     ag.cfg = config_mod.Config(model="glm-4.7-flash")
     ag.model_override = None
-    ag._with_usage_note = lambda s: s
 
     ag.rebuild_system_prompt()
     assert "glm-4.7-flash" in ag.messages[0]["content"]
@@ -504,8 +502,7 @@ def test_the_note_follows_the_route_the_agent_actually_took(tmp_path):
         ag.cfg = config_mod.Config(model="m", vision_route="auto", base_url=base)
         ag.client = types.SimpleNamespace(base_url=base)
         ag.model_override = None
-        ag._with_usage_note = lambda s: s
-
+    
         ag.rebuild_system_prompt()
         has_note = "do not call view_image" in \
             ag.messages[0]["content"].lower().replace("\n", " ")
@@ -559,3 +556,73 @@ def test_a_hand_typed_provider_is_never_second_guessed(tmp_path, monkeypatch):
         "provider_preset": "custom", "model": "whatever-i-typed",
         "base_url": "https://example.test/v1"})
     assert cfg.model == "whatever-i-typed"
+
+
+# ------------------------------------------- the prefix a cache can match
+#
+# Chat completions is stateless: every turn re-sends the whole conversation.
+# This app's floor is ~12,400 tokens before any conversation exists (5,000 of
+# system prompt, 7,400 of tool schemas), and providers discount a repeated
+# prefix heavily -- Gemini by 90%. None of that could ever apply, because the
+# context-usage figure was appended to the SYSTEM message, so the first bytes
+# of every request differed from the last.
+
+def _agent_with_history(tmp_path, msgs):
+    from glmcode.agent import Agent
+    ag = Agent.__new__(Agent)
+    ag.conversational = False
+    ag.workdir = tmp_path
+    ag.transcript = None
+    ag.messages = []
+    ag.cfg = config_mod.Config(model="m")
+    ag.model_override = None
+    ag.client = types.SimpleNamespace(base_url="")
+    ag._chars_per_token = 4.0
+    ag.rebuild_system_prompt()
+    ag.messages.extend(msgs)
+    return ag
+
+
+def test_the_system_message_is_identical_between_turns(tmp_path):
+    """The whole point. A prefix cache matches an identical run of leading
+    tokens; a system message that changes every turn means nothing after byte
+    zero can ever hit."""
+    ag = _agent_with_history(tmp_path, [])
+    first = ag._messages_for_call()[0]["content"]
+
+    ag.messages.append({"role": "user", "content": "x" * 5000})
+    second = ag._messages_for_call()[0]["content"]
+    assert first == second
+
+
+def test_the_conversation_prefix_only_ever_grows(tmp_path):
+    """Append-only is the shape a cache wants: turn two must start with
+    everything turn one sent."""
+    ag = _agent_with_history(tmp_path, [{"role": "user", "content": "hello"}])
+    before = [m["content"] for m in ag._messages_for_call()[:-1]]
+
+    ag.messages.append({"role": "assistant", "content": "hi"})
+    after = [m["content"] for m in ag._messages_for_call()[:-1]]
+    assert after[:len(before)] == before
+
+
+def test_the_model_still_sees_a_current_usage_figure(tmp_path):
+    """Moved, not dropped -- and it has to still be accurate, or auto-compact
+    is being decided on a stale number."""
+    ag = _agent_with_history(tmp_path, [])
+    small = ag._messages_for_call()[-1]["content"]
+    assert "Context usage" in small
+
+    ag.messages.append({"role": "user", "content": "x" * 40000})
+    big = ag._messages_for_call()[-1]["content"]
+    assert big != small, "the figure did not move with the conversation"
+
+
+def test_the_note_is_not_written_into_the_saved_history(tmp_path):
+    """self.messages is what gets persisted and synced between devices. A
+    per-turn note accumulating in it would be saved, re-sent, and re-appended."""
+    ag = _agent_with_history(tmp_path, [{"role": "user", "content": "hi"}])
+    before = list(ag.messages)
+    ag._messages_for_call()
+    ag._messages_for_call()
+    assert ag.messages == before
