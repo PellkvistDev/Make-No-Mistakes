@@ -386,6 +386,17 @@
                 phone, computer, or any device. GitHub only ever sees ciphertext.</span></div>
             <input id="set-sync" type="checkbox" class="toggle" />
           </div>
+          <div class="setting-block">
+            <!-- The other half of pairing. Scanning used to be reachable only
+                 from the first-run screen, so an API added on the computer
+                 after setup had no way to reach this phone at all -- which is
+                 the one thing pairing exists to do. -->
+            <button id="btn-scan-again" class="ghost" type="button" style="width:100%">
+              Scan a code from your computer
+            </button>
+            <p class="setting-hint">Sends over any APIs and keys you have added
+               since — merged with what is here, never replacing it.</p>
+          </div>
           <div class="setting-block" id="set-sync-pass-row" hidden>
             <button id="btn-change-syncpass" class="ghost" type="button" style="width:100%">Change sync passphrase</button>
           </div>

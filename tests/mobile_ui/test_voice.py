@@ -14,6 +14,10 @@ as a bare console error with no request in the network tab.
 import re
 from pathlib import Path
 
+import pytest
+
+pairing = pytest.importorskip("glmcode.pairing")
+
 MOBILE = Path(__file__).resolve().parents[2] / "mobile"
 
 LIVE_BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -221,3 +225,88 @@ def test_diagnostics_name_the_apis_without_leaking_their_keys(phone):
     assert rows["apis"] == "Z.AI, Google AI Studio (no key)"
     # These get copied to a clipboard and pasted into a chat.
     assert "zk-secret" not in str(rows)
+
+
+# ---- pairing again, after setup ----------------------------------------- #
+#
+# The whole point of pairing: "if I add an API later I just scan a QR code and
+# everything gets on the phone too." It did not work, in two independent ways.
+# The scanner was reachable only from the first-run screen, so there was no way
+# to start one; and applyPairToken applied the keys by writing into the setup
+# form's inputs -- which live on a screen you never see again -- so a re-pair
+# would have merged the provider list, dropped the keys, and told you to pick a
+# PIN you already had.
+
+def test_the_scanner_is_reachable_after_setup(phone):
+    _with(phone, [])
+    phone.page.evaluate("() => document.getElementById('btn-chat-settings').click()")
+    phone.page.wait_for_timeout(300)
+    assert phone.page.eval_on_selector(
+        "#btn-scan-again", "e => e.offsetParent !== null"), \
+        "no way to scan again means an API added later can never arrive"
+
+
+def _pair_again(phone, app_url, **payload):
+    """A real sealed pairing token arriving at a phone that is already set up.
+
+    Through the URL route with the real desktop sealer, like the rest of the
+    pairing suite -- not by calling into the app's internals, which is how you
+    end up testing a function nothing reaches.
+    """
+    code = pairing.make_code()
+    token = pairing.seal(pairing.build_payload(**payload), code)
+    phone.page.on("dialog", lambda d: d.accept(code))
+    phone.open_at(pairing.pair_url(app_url, token))
+    # Locked after the reload: the vault cannot be rewritten without the PIN,
+    # so the token waits rather than being applied to nothing.
+    phone.page.wait_for_selector("#screen-unlock:not([hidden])", timeout=15000)
+    phone.page.fill("#in-unlock-pin", "1234")
+    phone.page.click("#btn-unlock")
+    phone.page.wait_for_timeout(1200)
+    return phone
+
+
+def _vault(phone):
+    return phone.page.evaluate(
+        """async () => AgentCore.decryptVault(
+             JSON.parse(localStorage.getItem('mnm.vault.v1')), '1234')""")
+
+
+def test_a_later_pairing_is_kept_rather_than_replacing_everything(phone, app_url):
+    """It used to offer to ERASE the vault and start over -- the only
+    post-setup route there was, which made pairing a thing that worked once."""
+    _with(phone, [])
+    _pair_again(phone, app_url, model_key="key-from-desktop")
+    v = _vault(phone)
+    assert v["modelKey"] == "key-from-desktop"
+    # And what the desktop did not send is still here: an absent field means
+    # "I did not send one", never "drop yours".
+    assert v["githubToken"] == "ghtoken"
+
+
+def test_apis_added_later_arrive_and_merge(phone, app_url):
+    """The thing pairing is for: add an API on the computer, scan, and use it
+    here -- without losing one that was added on the phone."""
+    _with(phone, [{"name": "Local Thing", "baseUrl": "https://mine.test/v1",
+                   "key": "mk", "models": ["m"]}])
+    _pair_again(phone, app_url, providers=[
+        {"name": "Google AI Studio", "baseUrl": LIVE_BASE, "key": "gk",
+         "models": ["gemini-3.6-flash"]}])
+    names = phone.page.evaluate(
+        """() => JSON.parse(localStorage.getItem('mnm.providers') || '[]')
+                   .map(p => p.name)""")
+    assert "Google AI Studio" in names
+    assert "Local Thing" in names, "an API added on the phone must survive"
+
+
+def test_the_voice_button_lights_up_once_the_key_arrives(phone, app_url):
+    """End to end, and the reported complaint: no Google key, so no voice --
+    until pairing sends one over, which it now can."""
+    _with(phone, [])
+    assert phone.page.eval_on_selector(
+        "#btn-voice", "e => e.classList.contains('unavailable')") is True
+    _pair_again(phone, app_url, providers=[
+        {"name": "Google AI Studio", "baseUrl": LIVE_BASE, "key": "gk",
+         "models": ["gemini-3.6-flash"]}])
+    assert phone.page.eval_on_selector(
+        "#btn-voice", "e => e.classList.contains('unavailable')") is False
