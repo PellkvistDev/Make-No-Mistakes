@@ -396,6 +396,13 @@ class Config:
     browser_keep_logins: bool = False  # control_chrome: persistent agent profile (logins survive restarts)
     browser_provider: str = ""       # control_chrome: dedicated Browser Agent provider ("" = same as chat)
     browser_model: str = ""          # control_chrome: dedicated Browser Agent model ("" = same as chat)
+    # How voice mode runs. "local" is the default and stays it: Whisper and
+    # Kokoro work offline, cost nothing, and send no audio anywhere, which is a
+    # real feature and not just the older way. "live" hands the whole
+    # conversation to a speech-to-speech model over a WebSocket -- lower
+    # latency and real barge-in, but it needs a key, a network, and quota.
+    voice_engine: str = "local"      # local | live
+    live_voice: str = "Puck"         # prebuilt Live API voice name
     tts_engine: str = "kokoro"       # text-to-speech engine: "kokoro" or "piper"
     tts_voice: str = "af_heart"      # Kokoro voice name
     piper_voice: str = "en_US-amy-medium"  # Piper voice id (used when tts_engine == "piper")

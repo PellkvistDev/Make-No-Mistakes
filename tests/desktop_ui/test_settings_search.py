@@ -74,7 +74,8 @@ def test_matching_a_heading_brings_back_the_whole_group(desktop):
     """Typing "voice" should hand over the Voice settings, not the two rows
     that happen to repeat the word."""
     _open(desktop)
-    assert _search(desktop, "voice") == ["Voice/Voice", "Voice/Dictation"]
+    assert _search(desktop, "voice") == [
+        "Voice/Voice conversation", "Voice/Voice", "Voice/Dictation"]
     rows = desktop.page.evaluate(
         """() => [...document.querySelectorAll('section[data-tab="voice"] .row')]
              .filter(r => r.offsetParent !== null).length""")

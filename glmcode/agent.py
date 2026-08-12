@@ -1619,66 +1619,7 @@ class Agent:
 
             set_call_token(run_token)
             try:
-                if name == DISPATCH_WORKER_TOOL:
-                    output = self._dispatch_worker(args.get("name", ""),
-                                                   args.get("task", ""))
-                elif name == CHECK_WORKERS_TOOL:
-                    output = self._check_workers()
-                elif name == STEER_WORKER_TOOL:
-                    output = self._steer_worker_tool(args.get("worker", ""),
-                                                     args.get("message", ""))
-                elif name == STOP_WORKER_TOOL:
-                    output = self._stop_worker_tool(args.get("worker", ""))
-                elif name == WORKER_CHANGES_TOOL:
-                    output = self._worker_changes_tool(args.get("worker", ""))
-                elif name == REVERT_WORKER_TOOL:
-                    output = self._revert_worker_tool(args.get("worker", ""))
-                elif name == SUBAGENT_TOOL:
-                    if not self.allow_subagents:
-                        raise ToolError("sub-agents cannot spawn further sub-agents")
-                    output = self._run_subagents(args.get("agents", []))
-                elif name == CONTROL_CHROME_TOOL:
-                    output = self._control_chrome_tool(
-                        args.get("goal", ""), args.get("start_url", ""))
-                elif name in BROWSER_ACTION_TOOLS:
-                    output = self._browser_action(name, args)
-                elif name == VIEW_IMAGE_TOOL:
-                    output = self._view_image(args.get("path", ""), args.get("question", ""))
-                elif name == GENERATE_IMAGE_TOOL:
-                    output = self._generate_image(args.get("prompt", ""), args.get("path", ""),
-                                                  args.get("steps", 1))
-                elif name == SHOW_IMAGE_TOOL:
-                    output = self._show_image_tool(args.get("path", ""), args.get("caption", ""))
-                elif name == SHOW_HTTP_CAT_TOOL:
-                    output = self._show_http_cat_tool(args.get("status_code", 0))
-                elif name == PREVIEW_PAGE_TOOL:
-                    output = self._preview_page_tool(args.get("url", ""), args.get("wait_seconds", 2.0))
-                elif name == CHECK_PAGE_TOOL:
-                    output = self._check_page_tool(args.get("url", ""), args.get("wait_seconds", 2.5))
-                elif name == COMPACT_CONTEXT_TOOL:
-                    output = self._compact_context_tool(args.get("reason", ""), assistant_idx)
-                elif name == SPEAK_TOOL:
-                    output = self._speak_tool(args.get("text", ""), args.get("path", ""),
-                                              args.get("voice", ""), args.get("speed"))
-                elif name == REMEMBER_TOOL:
-                    output = execute_tool(name, args)
-                    # Reflect the new memory in THIS conversation immediately,
-                    # not just in future sessions (which pick it up naturally
-                    # since it's read from disk on every fresh Agent init).
-                    self.rebuild_system_prompt()
-                elif name == REVIEW_CHANGES_TOOL:
-                    output = self._review_changes_tool()
-                elif name == "todo_write":
-                    # Handled here (not via the module-global in tools.py) so
-                    # each chat keeps its OWN checklist -- parallel chats
-                    # otherwise scribble over one shared list.
-                    self.todos = clean_todo_items(args.get("todos", []))
-                    done = sum(1 for t in self.todos if t["status"] == "completed")
-                    output = f"Todo list updated: {done}/{len(self.todos)} completed."
-                elif self.mcp is not None and self.mcp.owns(name):
-                    output = self.mcp.call(name, args)
-                else:
-                    output = execute_tool(name, args)
+                output = self._run_tool(name, args, assistant_idx)
                 if name in EDIT_TOOLS:
                     self._turn_wrote_files = True
                     self._refine_pass_changed = True  # a review pass that edits keeps Max going
@@ -1693,6 +1634,89 @@ class Agent:
 
             if name == "todo_write":
                 self.events.todos(self.todos)
+
+    def system_prompt_text(self) -> str:
+        """The stable system prompt, without the per-turn context note.
+
+        Named rather than reached for as _base_system_prompt, because a live
+        session takes it once at setup and never again -- so it has to be the
+        part that does not change, and a caller should not have to know which
+        attribute that happens to be.
+        """
+        return self._base_system_prompt
+
+    def _run_tool(self, name: str, args: dict, assistant_idx: int = -1) -> str:
+        """Run ONE tool and return what it produced.
+
+        Split out of the turn loop so a caller that is not a turn loop can use
+        it. Speech-to-speech is one: the Live API holds the conversation on its
+        own side and hands back a function call with no message history to
+        append a reply to, so the part that runs the tool had to stop being
+        welded to the part that records the answer (see gui/app.py's
+        live_voice_tool). Raises ToolError; the caller decides what a failure
+        looks like in its own protocol.
+        """
+        if name == DISPATCH_WORKER_TOOL:
+            output = self._dispatch_worker(args.get("name", ""),
+                                           args.get("task", ""))
+        elif name == CHECK_WORKERS_TOOL:
+            output = self._check_workers()
+        elif name == STEER_WORKER_TOOL:
+            output = self._steer_worker_tool(args.get("worker", ""),
+                                             args.get("message", ""))
+        elif name == STOP_WORKER_TOOL:
+            output = self._stop_worker_tool(args.get("worker", ""))
+        elif name == WORKER_CHANGES_TOOL:
+            output = self._worker_changes_tool(args.get("worker", ""))
+        elif name == REVERT_WORKER_TOOL:
+            output = self._revert_worker_tool(args.get("worker", ""))
+        elif name == SUBAGENT_TOOL:
+            if not self.allow_subagents:
+                raise ToolError("sub-agents cannot spawn further sub-agents")
+            output = self._run_subagents(args.get("agents", []))
+        elif name == CONTROL_CHROME_TOOL:
+            output = self._control_chrome_tool(
+                args.get("goal", ""), args.get("start_url", ""))
+        elif name in BROWSER_ACTION_TOOLS:
+            output = self._browser_action(name, args)
+        elif name == VIEW_IMAGE_TOOL:
+            output = self._view_image(args.get("path", ""), args.get("question", ""))
+        elif name == GENERATE_IMAGE_TOOL:
+            output = self._generate_image(args.get("prompt", ""), args.get("path", ""),
+                                          args.get("steps", 1))
+        elif name == SHOW_IMAGE_TOOL:
+            output = self._show_image_tool(args.get("path", ""), args.get("caption", ""))
+        elif name == SHOW_HTTP_CAT_TOOL:
+            output = self._show_http_cat_tool(args.get("status_code", 0))
+        elif name == PREVIEW_PAGE_TOOL:
+            output = self._preview_page_tool(args.get("url", ""), args.get("wait_seconds", 2.0))
+        elif name == CHECK_PAGE_TOOL:
+            output = self._check_page_tool(args.get("url", ""), args.get("wait_seconds", 2.5))
+        elif name == COMPACT_CONTEXT_TOOL:
+            output = self._compact_context_tool(args.get("reason", ""), assistant_idx)
+        elif name == SPEAK_TOOL:
+            output = self._speak_tool(args.get("text", ""), args.get("path", ""),
+                                      args.get("voice", ""), args.get("speed"))
+        elif name == REMEMBER_TOOL:
+            output = execute_tool(name, args)
+            # Reflect the new memory in THIS conversation immediately,
+            # not just in future sessions (which pick it up naturally
+            # since it's read from disk on every fresh Agent init).
+            self.rebuild_system_prompt()
+        elif name == REVIEW_CHANGES_TOOL:
+            output = self._review_changes_tool()
+        elif name == "todo_write":
+            # Handled here (not via the module-global in tools.py) so
+            # each chat keeps its OWN checklist -- parallel chats
+            # otherwise scribble over one shared list.
+            self.todos = clean_todo_items(args.get("todos", []))
+            done = sum(1 for t in self.todos if t["status"] == "completed")
+            output = f"Todo list updated: {done}/{len(self.todos)} completed."
+        elif self.mcp is not None and self.mcp.owns(name):
+            output = self.mcp.call(name, args)
+        else:
+            output = execute_tool(name, args)
+        return output
 
     def _tool_reply(self, tc: dict, content: str, error: bool = False,
                     name: str = "", args: dict | None = None) -> None:
