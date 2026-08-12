@@ -133,15 +133,7 @@ def setup_message(model: str, system_prompt: str, schemas: list,
     conversation reconnects at least once by design, and without this each
     reconnect would start a stranger who has never met you.
     """
-    cfg: dict = {
-        "responseModalities": ["AUDIO"],
-        # Asked for explicitly. The session returns audio, so without this the
-        # words are never available as text -- and this app writes every voice
-        # turn into the chat's searchable transcript, which is the thing that
-        # lets a coding chat know what was said out loud.
-        "outputAudioTranscription": {},
-        "inputAudioTranscription": {},
-    }
+    cfg: dict = {"responseModalities": ["AUDIO"]}
     if voice:
         cfg["speechConfig"] = {
             "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}},
@@ -155,6 +147,19 @@ def setup_message(model: str, system_prompt: str, schemas: list,
     setup: dict = {
         "model": f"models/{model}",
         "generationConfig": cfg,
+        # SIBLINGS of generationConfig, not fields inside it. BidiGenerateContentSetup
+        # keeps only the generation parameters -- modalities, speech, sampling --
+        # under generationConfig; transcription, tools, system instruction,
+        # resumption and compression are all top-level. Nested, they are unknown
+        # fields, and the server does not ignore an unknown field: it rejects the
+        # setup and closes the socket. From the app that looked like the
+        # connection dropping, five times, which is what it reported.
+        #
+        # Asked for explicitly because a session returns AUDIO or TEXT and never
+        # both -- without these the words are never available as text at all, and
+        # every voice turn goes into the chat's searchable transcript.
+        "outputAudioTranscription": {},
+        "inputAudioTranscription": {},
         "systemInstruction": {"parts": [{"text": system_prompt}]},
         # Extends a session past its token ceiling by summarising the oldest
         # turns instead of ending the call mid-sentence at fifteen minutes.

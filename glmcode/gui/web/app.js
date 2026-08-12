@@ -4051,10 +4051,33 @@ function resetPhoneSheet() {
   $("phoneapp-url").removeAttribute("href");
 }
 
+// Which step the sheet is on. Not a mode you can get stuck in: both are one
+// click away from each other, which the old "Just the link, no keys" button
+// was not -- it swapped the QR and offered no way back.
+let phoneStep = "install";
+
+function setPhoneStep(step) {
+  phoneStep = step;
+  for (const b of document.querySelectorAll("#phoneapp-step button")) {
+    b.classList.toggle("on", b.dataset.v === step);
+    b.setAttribute("aria-checked", String(b.dataset.v === step));
+  }
+  return step === "keys" ? showPairingCode() : showPlainLink();
+}
+
 async function openPhoneApp() {
   resetPhoneSheet();
   $("phoneapp-backdrop").hidden = false;
-  $("phoneapp-plain").hidden = false;
+  // Opens on INSTALL, and that is not just ordering. Minting the pairing code
+  // here would start its five-minute clock while you are still installing the
+  // app -- so the code you finally scan has often already expired, which reads
+  // as pairing being broken. The code is now minted when you ask for it.
+  setPhoneStep("install");
+}
+
+// Step 2. The keys, sealed, for scanning INSIDE the installed app.
+async function showPairingCode() {
+  resetPhoneSheet();
   $("phoneapp-copy").hidden = true;
   $("phoneapp-open").hidden = true;
   $("phoneapp-hint").textContent = "Building a one-time pairing code…";
@@ -4062,15 +4085,17 @@ async function openPhoneApp() {
   try { res = await api().get_pair_phone(); }
   catch (e) { res = { error: "Couldn't reach the app." }; }
   if (res.error) {
-    // Can't pair (no URL set, no keys yet, no crypto) — say why, and fall back
-    // to the plain link so the phone is still installable.
+    // Can't pair (no URL set, no keys yet, no crypto) -- say why, and leave
+    // step 1 one click away rather than silently swapping to it.
     $("phoneapp-error").textContent = res.error;
     $("phoneapp-error").hidden = false;
-    return showPlainLink();
+    $("phoneapp-hint").textContent = "You can still install the app from step 1 "
+      + "and type your keys in by hand.";
+    return;
   }
   // The SVG is generated locally by our own code (segno), not user/model input.
   $("phoneapp-qr").innerHTML = res.svg;
-  // A pairing QR has far finer modules than a plain URL — it needs the room.
+  // A pairing QR has far finer modules than a plain URL -- it needs the room.
   $("phoneapp-qr").classList.add("pairing");
   $("phoneapp-code-wrap").hidden = false;
   $("phoneapp-code").textContent = res.code;
@@ -4079,39 +4104,47 @@ async function openPhoneApp() {
   if (inc.model_key) parts.push("model key");
   if (inc.github) parts.push("GitHub token");
   if (inc.sync) parts.push("shared chats");
+  if (inc.providers) parts.push(inc.providers + " API" + (inc.providers === 1 ? "" : "s"));
   $("phoneapp-includes").textContent =
-    `Scan, then type this code on the phone. Sends: ${parts.join(", ") || "nothing yet"}. ` +
+    `Sends: ${parts.join(", ") || "nothing yet"}. ` +
     `The code isn't in the image, so a photo of the QR on its own is useless.`;
   // Count the window down, then make it stop working rather than sit there
-  // looking valid — the phone refuses a stale payload anyway.
+  // looking valid -- the phone refuses a stale payload anyway.
   let left = res.ttl || 300;
   const hint = $("phoneapp-hint");
   const tick = () => {
     if (left <= 0) {
       clearInterval(pairTimer); pairTimer = 0;
       resetPhoneSheet();
-      $("phoneapp-hint").textContent = "That code expired. Close and reopen for a new one.";
+      // Re-minting is a click, not a close-and-reopen.
+      $("phoneapp-hint").textContent = "That code expired. Click “2 · Send your keys” for a new one.";
       return;
     }
-    hint.textContent = `Scan with your phone's camera. Expires in ${Math.floor(left / 60)}:` +
-                       String(left % 60).padStart(2, "0");
+    // Says WHERE to scan it. Scanning this with the camera puts the keys in
+    // Safari, and an installed iOS app has its own storage -- so they never
+    // reach the app you just installed, which looks like pairing silently
+    // doing nothing.
+    hint.textContent = "In the app on your phone: Settings → “Scan a code from "
+      + `your computer”. Expires in ${Math.floor(left / 60)}:`
+      + String(left % 60).padStart(2, "0");
     left -= 1;
   };
   tick();
   pairTimer = setInterval(tick, 1000);
 }
 
-// The install link with no secrets in it — for typing keys in by hand.
+// Step 1. The install link, with no secrets in it.
 async function showPlainLink() {
   clearInterval(pairTimer); pairTimer = 0;
   $("phoneapp-code-wrap").hidden = true;
-  // A plain URL QR is far coarser than a pairing one — back to the normal size.
+  $("phoneapp-error").hidden = true;
+  // A plain URL QR is far coarser than a pairing one -- back to the normal size.
   $("phoneapp-qr").classList.remove("pairing");
-  $("phoneapp-plain").hidden = true;
   $("phoneapp-copy").hidden = false;
   $("phoneapp-open").hidden = false;
   $("phoneapp-hint").textContent =
-    "Install only — you'll type your keys in on the phone. Scan, then “Add to Home Screen”.";
+    "Scan with your phone's camera, then “Add to Home Screen”. Open the app "
+    + "you just installed before doing step 2.";
   const urlEl = $("phoneapp-url");
   urlEl.textContent = "loading…";
   let res;
@@ -4123,8 +4156,10 @@ async function showPlainLink() {
   else if (res.error) { $("phoneapp-error").textContent = res.error; $("phoneapp-error").hidden = false; }
 }
 
+for (const b of document.querySelectorAll("#phoneapp-step button")) {
+  b.addEventListener("click", () => setPhoneStep(b.dataset.v));
+}
 $("gh-get-app").addEventListener("click", openPhoneApp);
-$("phoneapp-plain").addEventListener("click", showPlainLink);
 
 // --- Cross-device chat sync (shared encrypted store with the phone app) ---
 // The passphrase is typed here and handed straight to the backend, which
@@ -6179,7 +6214,7 @@ else window.addEventListener("pywebviewready", bootSafely);
 const liveVoice = {
   ws: null, ctx: null, node: null, stream: null,
   playAt: 0, sources: [], handle: "", closing: false, reconnects: 0,
-  said: "", heard: "",
+  established: false, said: "", heard: "",
 };
 
 const LIVE_MAX_RECONNECTS = 5;
@@ -6265,6 +6300,13 @@ async function liveHandleToolCalls(calls) {
 }
 
 function liveOnMessage(payload) {
+  // The server's first message on a good setup. Its arrival is the only
+  // difference between "the session is up" and "the socket opened and was
+  // then hung up on", and those two need opposite responses to a close.
+  if (payload.setupComplete) {
+    liveVoice.established = true;
+    liveVoice.reconnects = 0;   // this connection worked; the budget resets
+  }
   const sc = payload.serverContent;
   if (payload.toolCall) liveHandleToolCalls(payload.toolCall.functionCalls);
   // The handle that makes a dropped socket a non-event. Stored every time it
@@ -6354,9 +6396,26 @@ async function liveOpenSocket() {
       try { liveOnMessage(payload); } catch (e) { console.error("live", e); }
     };
     ws.onerror = () => { /* onclose always follows; handled there */ };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (liveVoice.closing || !voice.active) return;
-      // Closed without a goAway: a genuine drop rather than the scheduled
+      // The code and the reason, which the server DOES send and this used to
+      // throw away. A rejected setup closes with the field it objected to in
+      // ev.reason; discarding it left "kept losing its connection" as the only
+      // thing the app could say about a message it had built wrong itself.
+      const why = (ev && ev.reason ? ev.reason : "").trim();
+      const code = ev ? ev.code : 0;
+      console.error("live: socket closed", code, why);
+      if (!liveVoice.established) {
+        // Closed before the session ever opened. Retrying cannot help: the
+        // same setup will be rejected the same way, so five attempts only
+        // delay the message and bury the reason under a timeout.
+        toast(why ? `Voice couldn't start: ${why}` :
+          `Voice couldn't start (the server closed the connection, code ${code}).`,
+          "error", 9000);
+        stopVoice();
+        return;
+      }
+      // Closed after it was working: a genuine drop or the scheduled socket
       // rotation, and the same repair either way.
       liveReconnect();
     };
@@ -6366,6 +6425,7 @@ async function liveOpenSocket() {
 async function startLiveVoice() {
   liveVoice.closing = false;
   liveVoice.reconnects = 0;
+  liveVoice.established = false;
   liveVoice.handle = "";
   liveVoice.said = liveVoice.heard = "";
   if (!(await liveOpenSocket())) return false;

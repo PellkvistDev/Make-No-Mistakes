@@ -1219,14 +1219,7 @@
 
   function liveSetup(model, systemPrompt, schemas, opts) {
     opts = opts || {};
-    const gen = {
-      responseModalities: ["AUDIO"],
-      // Asked for explicitly. A session returns AUDIO or TEXT and never both,
-      // so without this there is no text at all -- and the phone writes every
-      // turn into the synced chat, which is what lets the desktop pick it up.
-      outputAudioTranscription: {},
-      inputAudioTranscription: {},
-    };
+    const gen = { responseModalities: ["AUDIO"] };
     if (opts.voice) {
       gen.speechConfig = { voiceConfig: { prebuiltVoiceConfig: { voiceName: opts.voice } } };
     }
@@ -1236,6 +1229,12 @@
     const setup = {
       model: "models/" + model,
       generationConfig: gen,
+      // SIBLINGS of generationConfig, not fields inside it: that block holds
+      // only generation parameters. Nested, these are unknown fields, and the
+      // server rejects the setup and closes the socket rather than ignoring
+      // them -- which reads from here as the connection dropping.
+      outputAudioTranscription: {},
+      inputAudioTranscription: {},
       systemInstruction: { parts: [{ text: systemPrompt }] },
       contextWindowCompression: { slidingWindow: {} },
       sessionResumption: opts.resumeHandle ? { handle: opts.resumeHandle } : {},

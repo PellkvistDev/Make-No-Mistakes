@@ -1194,11 +1194,14 @@ class Api:
             "background_custom": bool(c.background_path),
             "read_aloud": c.read_aloud, "tts_engine": c.tts_engine,
             "voice_engine": c.voice_engine, "live_voice": c.live_voice,
-            # Whether the API this chat is on can do speech to speech at all,
-            # so Settings can say so instead of offering a switch that fails
-            # the first time it is used.
-            "live_available": bool(live.available(
-                (default_provider(c) or {}).get("base_url", ""))),
+            # Whether ANY configured API can do speech to speech. This setting
+            # is global while the API a chat runs on is per-chat, so asking
+            # about one particular provider would grey the switch out for
+            # someone who has a live-capable key and simply isn't using it in
+            # the chat that happens to be open. Starting a session in a chat
+            # that cannot do it says so by name at that point.
+            "live_available": any(
+                live.available(p.get("base_url", "")) for p in all_providers(c)),
             "tts_voice": c.tts_voice, "piper_voice": c.piper_voice, "tts_speed": c.tts_speed,
             "stt_model": c.stt_model, "stt_language": c.stt_language,
             "voice_sensitivity": c.voice_sensitivity,

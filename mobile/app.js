@@ -445,6 +445,14 @@
   // sidebar); without sync there's no hub to show, so it's the repo picker.
   async function finishUnlock(secrets, key, pin, salt) {
     session = { secrets, cryptoKey: key, pin: pin || null, vaultSalt: salt || null };
+    // A pairing that arrived while this device was locked. Applied now that
+    // there is a vault key to re-seal with, and before the session model is
+    // built below so it picks up whatever key just arrived.
+    if (pendingPairToken) {
+      const token = pendingPairToken;
+      pendingPairToken = "";
+      try { await applyPairToken(token); } catch (e) { /* said in there */ }
+    }
     session.model = newModel(getModelName());
     armIdle();
     if (keepSignedIn()) { try { localStorage.setItem(KEEPKEY_KEY, await AC.exportRawKey(key)); } catch {} }
@@ -2438,6 +2446,20 @@
     const build = (document.querySelector('meta[name="mnm-build"]') || {}).content || "?";
     const rows = [
       ["build", build],
+      // What this bundle CONTAINS, asked of the code itself.
+      //
+      // The stamp above lives in index.html and proves only that index.html is
+      // current -- app.js and agent-core.js are separate files that arrive
+      // separately, and a report of "the build id is right but nothing else
+      // changed" cannot be answered by a number that only describes one of the
+      // three. So each capability is probed where it actually lives.
+      ["core", typeof AC.LIVE_MODEL === "string" ? "voice-capable" : "older"],
+      ["app", typeof startVoice === "function" ? "voice-capable" : "older"],
+      // And whether the feature can RUN, which is a different question again:
+      // shipped, deployed and gated off looks identical to never arrived.
+      ["voice", voiceAvailable() ? "ready" : voiceUnavailableReason()],
+      ["apis", getProviders().map((p) => (p.name || "?")
+        + (p.key ? "" : " (no key)")).join(", ") || "none"],
       ["standalone", String(!!(window.matchMedia("(display-mode: standalone)").matches ||
                                navigator.standalone))],
       ["platform", navigator.platform || "?"],
@@ -2701,6 +2723,9 @@
   // bar. The pairing code is NOT in the link; it's the six characters shown on
   // the computer, which is what makes a captured QR useless on its own.
   let pendingSyncPass = "";
+  // A pairing token that arrived while the app was locked (see
+  // consumePairLink), held until there is a PIN to re-seal the vault with.
+  let pendingPairToken = "";
 
   // Ask for the code and fill the setup form in. Shared by both ways a token
   // can arrive: scanned in-app (the good path) or carried in the URL.
@@ -2715,17 +2740,28 @@
       if (code === null) { toast("Set-up cancelled — you can still type your keys in."); return false; }
       try {
         const data = await AC.openPairToken(token, code);
+        // Merged, never replaced: scanning again is how an API added on the
+        // desktop gets here, and it must not delete one added on the phone.
+        if (data.providers && data.providers.length) {
+          setProviders(AC.mergeProviders(getProviders(), data.providers));
+          renderProviderPicker();
+        }
+        // Which of the two pairings this is. Before setup there is no vault to
+        // write to, so the keys go into the form and the PIN seals them a
+        // moment later. AFTER setup that form does not exist -- its inputs are
+        // on a screen you never see again -- so filling them in dropped the
+        // keys on the floor and then said "now pick a PIN", which is why an
+        // API added later never actually arrived here.
+        if (session && session.secrets) {
+          await adoptPairedSecrets(data);
+          return true;
+        }
         if (data.modelKey) $("in-model-key").value = data.modelKey;
         if (data.githubToken) $("in-gh-token").value = data.githubToken;
         if (data.model) $("in-model").value = data.model;
         if (data.baseUrl) {
           const sel = $("in-base-url");
           if ([...sel.options].some((o) => o.value === data.baseUrl)) sel.value = data.baseUrl;
-        }
-        // Merged, never replaced: scanning again is how an API added on the
-        // desktop gets here, and it must not delete one added on the phone.
-        if (data.providers && data.providers.length) {
-          setProviders(AC.mergeProviders(getProviders(), data.providers));
         }
         // Sync needs the vault key, which doesn't exist until a PIN is set —
         // so hold it and turn sync on once the vault is unlocked.
@@ -2753,13 +2789,17 @@
     // Out of the URL before anything else, so it can't linger in history or a
     // bookmark. Keeping it would also mean re-pairing on every launch.
     history.replaceState(null, "", location.pathname + location.search);
-    if (loadVault()) {
-      // Previously this did nothing at all here, so scanning just showed the
-      // PIN prompt with no explanation. Ask instead of silently ignoring.
-      if (!confirm("This device already has keys set up.\n\n" +
-                   "Replace them with the ones from your computer?")) return;
-      clearVault(); clearSession(); localStorage.removeItem(KEEPKEY_KEY);
-      show("screen-setup");
+    if (loadVault() && !(session && session.secrets)) {
+      // Set up, but locked: the vault cannot be written without the PIN, so
+      // the token waits for it rather than being applied to nothing.
+      //
+      // This used to offer to ERASE the vault and start over, which was the
+      // only post-setup pairing route there was -- so "I added an API on the
+      // computer, send it over" meant re-entering every key by hand, and
+      // pairing's whole purpose only worked once, on a new phone.
+      pendingPairToken = token;
+      toast("Unlock with your PIN and the keys from your computer will be added.");
+      return;
     }
     await applyPairToken(token);
   }
@@ -2871,7 +2911,52 @@
     raf = requestAnimationFrame(frame);
   }
 
+  // Re-sealing the vault with keys that arrived after setup.
+  //
+  // Only the fields the desktop actually sent are touched: a pairing payload
+  // carries whatever that computer had, and an absent GitHub token means "I
+  // did not send one", never "delete the one you have".
+  async function adoptPairedSecrets(data) {
+    const before = session.secrets;
+    const next = Object.assign({}, before);
+    for (const k of ["modelKey", "githubToken", "model", "baseUrl"]) {
+      if (data[k]) next[k] = data[k];
+    }
+    if (Object.keys(next).some((k) => next[k] !== before[k])) {
+      // Both copies have to move. The in-memory one is what this session
+      // uses; the stored one is what the next unlock reads -- writing only
+      // one means the new key works until you close the app.
+      session.secrets = next;
+      if (session.pin) {
+        try {
+          storeVault(await AC.encryptVault(next, session.pin));
+        } catch (e) {
+          toast("Keys updated for now, but not saved — unlock with your PIN and scan again.");
+        }
+      } else {
+        // Unlocked from a remembered key rather than a typed PIN, so there is
+        // nothing to re-encrypt under. Said out loud rather than silently
+        // losing the new key on the next launch.
+        toast("Keys updated for now. Lock and unlock with your PIN to save them.");
+      }
+      session.model = newModel(getModelName());
+    }
+    if (data.syncPass) {
+      try {
+        await storeSyncPass(data.syncPass);
+        localStorage.setItem("mnm.sync", "1");
+      } catch (e) { /* sync stays off; the keys still arrived */ }
+    }
+    refreshVoiceButton();
+    haptic(14);
+    const n = (data.providers || []).length;
+    toast(n ? "Updated from your computer — " + n + " API" + (n === 1 ? "" : "s") + "."
+            : "Updated from your computer.");
+    return true;
+  }
+
   $("btn-scan-setup").addEventListener("click", startScan);
+  $("btn-scan-again").addEventListener("click", startScan);
   $("scan-cancel").addEventListener("click", () => { if (scanStop) scanStop(); });
 
   // ================================================================ BOOT
@@ -2915,7 +3000,7 @@
   const voice = {
     ws: null, ctx: null, node: null, stream: null, on: false,
     playAt: 0, sources: [], handle: "", closing: false, tries: 0,
-    said: "", heard: "", muted: false,
+    established: false, said: "", heard: "", muted: false,
   };
   const VOICE_MAX_TRIES = 5;
   // The tools a spoken session gets: everything that reads, plus the one that
@@ -3006,6 +3091,12 @@
   }
 
   function voiceOnMessage(payload) {
+    // The only thing that distinguishes "the session is up" from "the socket
+    // opened and was then hung up on", which need opposite responses.
+    if (payload.setupComplete) {
+      voice.established = true;
+      voice.tries = 0;          // this connection worked; the budget resets
+    }
     if (payload.toolCall) voiceRunTools(payload.toolCall.functionCalls);
     if (payload.sessionResumptionUpdate && payload.sessionResumptionUpdate.resumable) {
       voice.handle = payload.sessionResumptionUpdate.newHandle || voice.handle;
@@ -3087,19 +3178,37 @@
         try { payload = JSON.parse(text); } catch (e) { return; }
         try { voiceOnMessage(payload); } catch (e) { /* one bad frame is not the session */ }
       };
-      ws.onclose = () => { if (!voice.closing && voice.on) voiceReconnect(); };
+      ws.onclose = (ev) => {
+        if (voice.closing || !voice.on) return;
+        // The code and reason the server sends, which this used to discard --
+        // a rejected setup names the field it objected to in ev.reason, and
+        // throwing that away leaves "kept losing the connection" as the only
+        // thing the app can say about a message it built wrong itself.
+        const why = (ev && ev.reason ? ev.reason : "").trim();
+        if (!voice.established) {
+          // Closed before the session opened. Retrying cannot help: the same
+          // setup is rejected the same way every time.
+          voiceSetStatus(why ? "Couldn't start: " + why : "Couldn't start.");
+          setTimeout(stopVoice, 3500);
+          return;
+        }
+        voiceReconnect();
+      };
     });
   }
 
   async function startVoice() {
     if (voice.on) return;
     if (!voiceAvailable()) {
-      toast("Voice needs a Google AI Studio key — pair with your computer or add one in Settings.");
+      // The specific missing piece, not a generic sentence covering four
+      // different causes that each need a different thing done about them.
+      toast(voiceUnavailableReason());
       return;
     }
     voice.on = true;
     voice.closing = false;
     voice.tries = 0;
+    voice.established = false;
     voice.handle = "";
     voice.said = voice.heard = "";
     voice.muted = false;
@@ -3163,9 +3272,45 @@
     $("voice-backdrop").hidden = true;
   }
 
+  // Shown whether or not it can work, and dimmed when it cannot.
+  //
+  // It used to hide itself, and that was a mistake worth naming: a feature
+  // that ships, deploys correctly and then makes itself invisible is
+  // indistinguishable from a feature that never arrived -- which is exactly
+  // how it was reported ("the build id is correct but nothing else"). An
+  // absence answers no questions. A dimmed button that says why answers the
+  // only one that matters.
   function refreshVoiceButton() {
     const b = $("btn-voice");
-    if (b) b.hidden = !voiceAvailable();
+    if (!b) return;
+    b.hidden = false;
+    const ok = voiceAvailable();
+    b.classList.toggle("unavailable", !ok);
+    b.title = ok ? "Talk to it" : "Talking needs a Google AI Studio key";
+  }
+
+  // Why talking is not possible, in the words of whatever is missing. Only
+  // reached on a tap, so the phone is never lecturing about a key you may not
+  // want.
+  function voiceUnavailableReason() {
+    if (!window.WebSocket) return "This browser can't open the connection it needs.";
+    if (!navigator.mediaDevices) {
+      // The usual cause by far: getUserMedia does not exist outside a secure
+      // context, and "it worked on my laptop over localhost" is how that gets
+      // missed -- localhost is treated as secure and a LAN address is not.
+      return "The microphone isn't available here. This page has to be served "
+        + "over https for a browser to allow it at all.";
+    }
+    if (!(window.AudioContext || window.webkitAudioContext)) return "No audio support.";
+    const google = getProviders().filter((p) => AC.normalizeBase(p.baseUrl || "")
+      .includes("generativelanguage.googleapis.com"));
+    if (!google.length) {
+      return "Talking needs a Google AI Studio key, and this phone doesn't have "
+        + "one. Add Google on your computer, then scan the pairing QR again "
+        + "(Settings → Phone) to send it over.";
+    }
+    return "Google is set up here but without a key. Re-scan the pairing QR "
+      + "from your computer to send it over.";
   }
 
 })();

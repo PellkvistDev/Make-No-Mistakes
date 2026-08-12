@@ -703,3 +703,7 @@ pre.code, pre.tool-out, .preview {
 .voice-actions { display: flex; gap: 10px; justify-content: center; margin-top: 22px; }
 .voice-actions .btn { min-width: 104px; }
 .voice-btn { font-size: 17px; }
+/* Present but not usable. Hiding it entirely was the old behaviour, and a
+   feature that ships and then makes itself invisible cannot be told apart
+   from one that never arrived. */
+.voice-btn.unavailable { opacity: 0.35; }

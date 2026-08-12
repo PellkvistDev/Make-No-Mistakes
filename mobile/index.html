@@ -46,8 +46,15 @@
        was lost to that guess. -->
   <meta name="mnm-build" content="dev" />
   <link rel="manifest" href="manifest.webmanifest" />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Cpath d='M8 21l4-10 4 7 4-7 4 10' fill='none' stroke='%237aa2ff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
-  <link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230b0d10'/%3E%3Cpath d='M8 21l4-10 4 7 4-7 4 10' fill='none' stroke='%237aa2ff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E" />
+  <!-- The same icon the desktop app uses, so one app does not look like two.
+       PNG and not SVG, deliberately: iOS ignores an SVG apple-touch-icon
+       entirely and falls back to a screenshot of the page, which is why the
+       home-screen icon never matched.
+       Full-bleed squares, also deliberately: iOS and Android mask the icon
+       into their own shape, so a pre-rounded one gets rounded twice and shows
+       the app's dark corners through the gap. -->
+  <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="./icon-180.png" />
   <link rel="stylesheet" href="style.css" />
   <title>Make No Mistakes</title>
 </head>
@@ -385,6 +392,17 @@
                 repository — protected by a sync passphrase, so you can pick up any of them on your
                 phone, computer, or any device. GitHub only ever sees ciphertext.</span></div>
             <input id="set-sync" type="checkbox" class="toggle" />
+          </div>
+          <div class="setting-block">
+            <!-- The other half of pairing. Scanning used to be reachable only
+                 from the first-run screen, so an API added on the computer
+                 after setup had no way to reach this phone at all -- which is
+                 the one thing pairing exists to do. -->
+            <button id="btn-scan-again" class="ghost" type="button" style="width:100%">
+              Scan a code from your computer
+            </button>
+            <p class="setting-hint">Sends over any APIs and keys you have added
+               since — merged with what is here, never replacing it.</p>
           </div>
           <div class="setting-block" id="set-sync-pass-row" hidden>
             <button id="btn-change-syncpass" class="ghost" type="button" style="width:100%">Change sync passphrase</button>
