@@ -2438,6 +2438,20 @@
     const build = (document.querySelector('meta[name="mnm-build"]') || {}).content || "?";
     const rows = [
       ["build", build],
+      // What this bundle CONTAINS, asked of the code itself.
+      //
+      // The stamp above lives in index.html and proves only that index.html is
+      // current -- app.js and agent-core.js are separate files that arrive
+      // separately, and a report of "the build id is right but nothing else
+      // changed" cannot be answered by a number that only describes one of the
+      // three. So each capability is probed where it actually lives.
+      ["core", typeof AC.LIVE_MODEL === "string" ? "voice-capable" : "older"],
+      ["app", typeof startVoice === "function" ? "voice-capable" : "older"],
+      // And whether the feature can RUN, which is a different question again:
+      // shipped, deployed and gated off looks identical to never arrived.
+      ["voice", voiceAvailable() ? "ready" : voiceUnavailableReason()],
+      ["apis", getProviders().map((p) => (p.name || "?")
+        + (p.key ? "" : " (no key)")).join(", ") || "none"],
       ["standalone", String(!!(window.matchMedia("(display-mode: standalone)").matches ||
                                navigator.standalone))],
       ["platform", navigator.platform || "?"],
@@ -3115,7 +3129,9 @@
   async function startVoice() {
     if (voice.on) return;
     if (!voiceAvailable()) {
-      toast("Voice needs a Google AI Studio key — pair with your computer or add one in Settings.");
+      // The specific missing piece, not a generic sentence covering four
+      // different causes that each need a different thing done about them.
+      toast(voiceUnavailableReason());
       return;
     }
     voice.on = true;
@@ -3185,9 +3201,45 @@
     $("voice-backdrop").hidden = true;
   }
 
+  // Shown whether or not it can work, and dimmed when it cannot.
+  //
+  // It used to hide itself, and that was a mistake worth naming: a feature
+  // that ships, deploys correctly and then makes itself invisible is
+  // indistinguishable from a feature that never arrived -- which is exactly
+  // how it was reported ("the build id is correct but nothing else"). An
+  // absence answers no questions. A dimmed button that says why answers the
+  // only one that matters.
   function refreshVoiceButton() {
     const b = $("btn-voice");
-    if (b) b.hidden = !voiceAvailable();
+    if (!b) return;
+    b.hidden = false;
+    const ok = voiceAvailable();
+    b.classList.toggle("unavailable", !ok);
+    b.title = ok ? "Talk to it" : "Talking needs a Google AI Studio key";
+  }
+
+  // Why talking is not possible, in the words of whatever is missing. Only
+  // reached on a tap, so the phone is never lecturing about a key you may not
+  // want.
+  function voiceUnavailableReason() {
+    if (!window.WebSocket) return "This browser can't open the connection it needs.";
+    if (!navigator.mediaDevices) {
+      // The usual cause by far: getUserMedia does not exist outside a secure
+      // context, and "it worked on my laptop over localhost" is how that gets
+      // missed -- localhost is treated as secure and a LAN address is not.
+      return "The microphone isn't available here. This page has to be served "
+        + "over https for a browser to allow it at all.";
+    }
+    if (!(window.AudioContext || window.webkitAudioContext)) return "No audio support.";
+    const google = getProviders().filter((p) => AC.normalizeBase(p.baseUrl || "")
+      .includes("generativelanguage.googleapis.com"));
+    if (!google.length) {
+      return "Talking needs a Google AI Studio key, and this phone doesn't have "
+        + "one. Add Google on your computer, then scan the pairing QR again "
+        + "(Settings → Phone) to send it over.";
+    }
+    return "Google is set up here but without a key. Re-scan the pairing QR "
+      + "from your computer to send it over.";
   }
 
 })();
