@@ -349,16 +349,18 @@
           </div>
 
           <div class="setting-block">
-            <label class="setting-label" for="set-model">Model</label>
-            <input id="set-model" class="setting-input" list="model-list" spellcheck="false" autocapitalize="off" placeholder="glm-4.7-flash" />
-            <datalist id="model-list">
-              <option value="glm-4.7-flash"></option>
-              <option value="glm-4.6v-flash"></option>
-              <option value="glm-4.6"></option>
-              <option value="glm-4.5"></option>
-              <option value="glm-4.5-air"></option>
-            </datalist>
-            <span class="setting-hint">glm-4.7-flash is the free coding model; glm-4.6v-flash is the free vision model.</span>
+            <label class="setting-label" for="set-model-pick">Model</label>
+            <!-- A menu, matching the setup screen. This was an <input list> and
+                 a datalist, which on iOS is a plain text box: the model names
+                 are the one thing here nobody can be expected to spell from
+                 memory, and a typo does not fail until the first message, as an
+                 error about the model not existing.
+
+                 The text box survives for an API typed in by hand, where there
+                 is no list to choose from -- exactly the same split as setup. -->
+            <select id="set-model-pick" class="setting-input"></select>
+            <input id="set-model" class="setting-input" spellcheck="false" autocapitalize="off" placeholder="glm-4.7-flash" hidden />
+            <span class="setting-hint" id="set-model-hint">Which model answers. Scan the QR on your computer again if one is missing.</span>
           </div>
 
           <div class="setting-block">

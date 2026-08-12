@@ -476,6 +476,11 @@
       const secrets = { modelKey, model, baseUrl, githubToken };
       const blob = await AC.encryptVault(secrets, pin);
       storeVault(blob);
+      // The choice made on this screen, recorded where the app reads it back
+      // from. It used to go only into the vault, which the model resolver
+      // consulted LAST -- so on a phone that was also paired, the desktop
+      // provider's first model replaced it before the first message.
+      localStorage.setItem("mnm.model", model);
       clearSession();  // a fresh setup starts a fresh session
       const salt = AC._b64.b64ToBytes(blob.salt);
       const key = await AC.deriveKey(pin, salt, keepSignedIn());
@@ -2443,12 +2448,29 @@
         === AC.normalizeBase(session && session.secrets && session.secrets.baseUrl))
       || list[0] || null;
   }
+  /* Which model answers, in order of how deliberate the choice was.
+   *
+   * The vault's model used to rank BELOW the provider's first model, and that
+   * is not a detail: the model picked on the setup screen is written into the
+   * vault, so on any phone that had also been paired -- which is every phone
+   * that scanned a QR -- the desktop provider's first model silently replaced
+   * the choice just made. You picked gemini-3.5-flash-lite, the app used
+   * whatever happened to sort first in the paired list, and the first message
+   * failed saying that model does not exist.
+   *
+   * It only ranks above models[0] when the provider actually offers it,
+   * though. Switching APIs leaves the vault holding a model belonging to the
+   * old one, and sending a glm name to a Gemini key was only ever going to
+   * 404. */
   function getModelName() {
     const chosen = pref("mnm.model", "");
     if (chosen) return chosen;
     const p = currentProvider();
-    if (p && p.models && p.models.length) return p.models[0];
-    return (session && session.secrets && session.secrets.model) || "glm-4.7-flash";
+    const models = (p && p.models) || [];
+    const stored = (session && session.secrets && session.secrets.model) || "";
+    if (stored && (!models.length || models.includes(stored))) return stored;
+    if (models.length) return models[0];
+    return stored || "glm-4.7-flash";
   }
   function getThinking() { return pref("mnm.thinking", "medium"); }
   function confirmCommits() { return pref("mnm.confirm", "1") === "1"; }
@@ -2481,10 +2503,11 @@
   // ================================================================ SETTINGS SHEET
   function openSettings() {
     renderBgPicker($("settings-bg"));
-    // Before the model field: it reads the chosen provider's model list, and
-    // filling the box from a stale provider is how the two disagree.
+    // This draws the model control too (through renderModelOptions), which
+    // decides between the menu and the text box from the chosen provider's
+    // list and selects the current model in whichever is showing. Setting the
+    // field here as well is how the two used to disagree.
     renderProviderPicker();
-    $("set-model").value = getModelName();
     setSegOn($("set-thinking"), getThinking());
     $("set-plan").checked = planMode();
     $("set-subagents").checked = subagentsOn();
@@ -2621,31 +2644,53 @@
     refreshVoiceButton();
     const list = getProviders();
     const block = $("set-provider-block");
-    if (!block) return;
-    block.hidden = list.length < 2;
     const sel = $("set-provider");
-    const cur = currentProvider();
-    sel.innerHTML = "";
-    for (const p of list) {
-      const o = document.createElement("option");
-      o.value = p.name; o.textContent = p.name;
-      if (cur && p.name === cur.name) o.selected = true;
-      sel.appendChild(o);
+    if (block && sel) {
+      // One API is not a choice, so the row stays out of the way -- but the
+      // model list below it still has to be drawn, which is why this guard
+      // does not return.
+      block.hidden = list.length < 2;
+      const cur = currentProvider();
+      sel.innerHTML = "";
+      for (const p of list) {
+        const o = document.createElement("option");
+        o.value = p.name; o.textContent = p.name;
+        if (cur && p.name === cur.name) o.selected = true;
+        sel.appendChild(o);
+      }
     }
     renderModelOptions();
   }
+  /* The model menu, drawn from the chosen provider -- so the names offered
+   * belong to the API that will actually be called; glm names against a Gemini
+   * key were only ever going to 404.
+   *
+   * Falls back to the text box when this API has no list to offer, which is
+   * the case for an endpoint typed in by hand. Same split as the setup screen,
+   * and for the same reason: with a list, spelling a model out is a typo
+   * waiting to happen; without one, typing is all there is. */
   function renderModelOptions() {
-    const dl = $("model-list");
+    const sel = $("set-model-pick"), box = $("set-model");
+    if (!sel || !box) return;
     const p = currentProvider();
-    if (!dl || !p || !p.models || !p.models.length) return;
-    // The chosen provider's models, so the suggestions belong to the API that
-    // will actually be called -- glm names against a Gemini key were only ever
-    // going to 404.
-    dl.innerHTML = "";
-    for (const m of p.models) {
+    const models = ((p && p.models) || []).slice();
+    const cur = getModelName();
+    sel.hidden = !models.length;
+    box.hidden = !!models.length;
+    $("set-model-hint").textContent = models.length
+      ? "Which model answers. Scan the QR on your computer again if one is missing."
+      : "The model name this API expects, spelled exactly.";
+    if (!models.length) { box.value = cur; return; }
+    // A model the list does not carry is still the one in use -- offered
+    // rather than quietly swapped out from under the chat, which is the whole
+    // failure this screen just had.
+    if (cur && !models.includes(cur)) models.unshift(cur);
+    sel.innerHTML = "";
+    for (const m of models) {
       const o = document.createElement("option");
-      o.value = m;
-      dl.appendChild(o);
+      o.value = m; o.textContent = m;
+      if (m === cur) o.selected = true;
+      sel.appendChild(o);
     }
   }
   if ($("set-provider")) {
@@ -2657,17 +2702,19 @@
       const models = (p && p.models) || [];
       if (models.length && !models.includes(pref("mnm.model", ""))) {
         localStorage.setItem("mnm.model", models[0]);
-        $("set-model").value = models[0];
       }
       renderModelOptions();
       if (session) buildModel();
     });
   }
 
-  $("set-model").addEventListener("change", () => {
-    localStorage.setItem("mnm.model", $("set-model").value.trim() || getModelName());
+  function chooseModel(name) {
+    const m = String(name || "").trim();
+    localStorage.setItem("mnm.model", m || getModelName());
     if (session) buildModel();
-  });
+  }
+  $("set-model-pick").addEventListener("change", () => chooseModel($("set-model-pick").value));
+  $("set-model").addEventListener("change", () => chooseModel($("set-model").value));
   $("set-thinking").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-v]"); if (!b) return;
     localStorage.setItem("mnm.thinking", b.dataset.v);
