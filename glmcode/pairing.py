@@ -37,6 +37,7 @@ import base64
 import json
 import secrets
 import time
+import zlib
 
 from . import syncstore
 
@@ -127,7 +128,19 @@ def build_payload(*, model_key: str = "", base_url: str = "", model: str = "",
 # fields base64'd individually and then base64'd again costs ~30% more
 # characters, which is the difference between a QR a phone reads instantly and
 # one it has to hunt for. mobile/agent-core.js unpacks this exact layout.
-_WIRE_V = 1
+#
+# Version 2 deflates the JSON before encrypting it. That is not a micro-
+# optimisation: this payload is read by a phone camera, and QR size is what
+# decides whether that works. A realistic payload -- two APIs with their model
+# lists, a GitHub token, a sync passphrase -- is a 731-byte JSON, which came
+# out as a 113-module QR once it had been base64'd and wrapped in a URL. A
+# camera has to resolve every one of those modules. Deflated it is a 73-module
+# code: the model names and base URLs are highly repetitive, so it compresses
+# by about half, while the keys (being random) do not compress at all.
+#
+# Version 1 is still read, so a token minted by an older desktop still opens.
+_WIRE_V = 2
+_WIRE_V_PLAIN = 1
 _SALT_LEN, _IV_LEN = 16, 12
 
 
@@ -139,9 +152,12 @@ def seal(payload: dict, code: str) -> str:
     """
     salt = secrets.token_bytes(_SALT_LEN)
     key = syncstore.derive_key(code, salt)
-    blob = syncstore.aes_encrypt(payload, key)
-    raw = (bytes([_WIRE_V]) + salt
-           + base64.b64decode(blob["iv"]) + base64.b64decode(blob["ct"]))
+    # Compress first, encrypt second. The other order does nothing: ciphertext
+    # is indistinguishable from random and deflate would only add a header.
+    body = zlib.compress(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), 9)
+    iv, ct = syncstore.aes_encrypt_bytes(body, key)
+    raw = bytes([_WIRE_V]) + salt + iv + ct
     return base64.urlsafe_b64encode(raw).decode().rstrip("=")
 
 
@@ -151,17 +167,25 @@ def open_sealed(token: str, code: str, now: float | None = None) -> dict:
     try:
         pad = "=" * (-len(token) % 4)
         raw = base64.urlsafe_b64decode(token + pad)
-        if len(raw) < 1 + _SALT_LEN + _IV_LEN + 16 or raw[0] != _WIRE_V:
+        if (len(raw) < 1 + _SALT_LEN + _IV_LEN + 16
+                or raw[0] not in (_WIRE_V, _WIRE_V_PLAIN)):
             raise ValueError("bad envelope")
+        version = raw[0]
         salt = raw[1:1 + _SALT_LEN]
         iv = raw[1 + _SALT_LEN:1 + _SALT_LEN + _IV_LEN]
         ct = raw[1 + _SALT_LEN + _IV_LEN:]
     except Exception as e:
         raise syncstore.SyncError("That pairing link is damaged.") from e
     key = syncstore.derive_key(normalize_code(code), salt)
-    data = syncstore.aes_decrypt(
-        {"v": 1, "iv": base64.b64encode(iv).decode(),
-         "ct": base64.b64encode(ct).decode()}, key)
+    body = syncstore.aes_decrypt_bytes(iv, ct, key)
+    try:
+        if version == _WIRE_V:
+            body = zlib.decompress(body)
+        data = json.loads(body.decode("utf-8"))
+    except Exception as e:
+        # Past the AES tag, so the code was right and the bytes are intact --
+        # whatever is wrong here is not something a retry fixes.
+        raise syncstore.SyncError("That pairing link is damaged.") from e
     ts = (now if now is not None else time.time()) * 1000
     if int(data.get("exp", 0)) < ts:
         raise syncstore.SyncError("That pairing code has expired — show a new one.")
@@ -171,7 +195,17 @@ def open_sealed(token: str, code: str, now: float | None = None) -> dict:
 def pair_url(app_url: str, token: str) -> str:
     """Put the token in the FRAGMENT. Browsers never send a fragment to the
     server, so the secrets reach the phone without the host ever seeing them --
-    which is the whole reason this is safe to point at a public Pages URL."""
+    which is the whole reason this is safe to point at a public Pages URL.
+
+    Kept for links that already exist; the QR itself no longer carries one. A
+    code containing a URL is one the phone's *Camera* app will happily open,
+    and on iOS that lands in Safari -- which, for an app installed to the home
+    screen, is a different storage box entirely. So the keys arrive somewhere
+    that is not the app, and the app still has none. The failure looked like
+    the QR being unreadable and was the opposite: it read perfectly, into the
+    wrong place. A bare token cannot be opened by anything, so scanning it with
+    the wrong app does nothing at all, which is a far better outcome.
+    """
     base = (app_url or "").strip()
     if not base:
         return ""

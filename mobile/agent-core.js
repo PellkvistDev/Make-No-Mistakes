@@ -90,19 +90,62 @@
 
   // --- pairing (set up by scanning the desktop's QR) -----------------------
   // The desktop seals your keys under a short code shown as TEXT, never encoded
-  // into the image, and the payload rides in the URL fragment — which browsers
-  // never send to a server. So the secrets reach this phone without touching a
-  // network, and a screenshot of the QR on its own is useless.
+  // into the image. So the secrets reach this phone by camera, without touching
+  // a network at all, and a screenshot of the QR on its own is useless.
   //
   // Wire layout, matching glmcode/pairing.py exactly:
-  //   byte 0     version (1)
+  //   byte 0     version: 1 = JSON, 2 = deflated JSON
   //   bytes 1..16   PBKDF2 salt
   //   bytes 17..28  AES-GCM iv
   //   rest          ciphertext
-  const PAIR_WIRE_V = 1, PAIR_SALT_LEN = 16, PAIR_IV_LEN = 12;
+  //
+  // Version 2 exists because this payload is read by a camera and QR size is
+  // what decides whether that works. Deflate roughly halves the JSON — the
+  // base URLs and model names repeat heavily, while the keys are random and do
+  // not compress at all — taking a realistic pairing code from 113 modules down
+  // to 73. Version 1 is still accepted so a token from an older desktop opens.
+  const PAIR_WIRE_V = 2, PAIR_WIRE_V_PLAIN = 1;
+  const PAIR_SALT_LEN = 16, PAIR_IV_LEN = 12;
 
   function normalizePairCode(code) {
     return String(code || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  }
+
+  async function inflate(bytes) {
+    // Checked separately from the decompression itself: "your browser cannot
+    // do this" names something the person can act on, and it would otherwise
+    // be reported as a damaged code they would keep rescanning.
+    if (typeof DecompressionStream !== "function") {
+      throw new Error("This browser is too old to read the set-up code — "
+        + "type your keys in by hand, or update it.");
+    }
+    try {
+      const stream = new Blob([bytes]).stream()
+        .pipeThrough(new DecompressionStream("deflate"));
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    } catch (e) {
+      throw new Error("That pairing link is damaged.");
+    }
+  }
+
+  // The smallest envelope that could possibly be one of ours: version byte,
+  // salt, iv and a bare GCM tag, base64'd. Nothing shorter is worth a code
+  // prompt, and the length is what tells a bare token apart from the other
+  // short strings a camera finds on a desk.
+  const PAIR_TOKEN_MIN = Math.ceil((1 + PAIR_SALT_LEN + PAIR_IV_LEN + 16) * 4 / 3);
+
+  /* Pull a pairing token out of whatever was scanned or opened.
+   *
+   * Two shapes, and the bare one is now what the QR holds. A code containing a
+   * URL is one the phone's Camera app will open in Safari, which on iOS is a
+   * different storage box from an app installed to the home screen -- so the
+   * keys land somewhere that is not the app. The URL form is still read
+   * because links minted before that change still exist. */
+  function pairTokenFrom(text) {
+    const s = String(text || "").trim();
+    const m = /[#&]pair=([A-Za-z0-9_-]+)/.exec(s);
+    if (m) return m[1];
+    return /^[A-Za-z0-9_-]+$/.test(s) && s.length >= PAIR_TOKEN_MIN ? s : "";
   }
 
   async function openPairToken(token, code, now) {
@@ -111,19 +154,32 @@
       const b64 = String(token || "").replace(/-/g, "+").replace(/_/g, "/");
       raw = b64ToBytes(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
     } catch (e) { throw new Error("That pairing link is damaged."); }
-    if (raw.length < 1 + PAIR_SALT_LEN + PAIR_IV_LEN + 16 || raw[0] !== PAIR_WIRE_V) {
+    const version = raw.length ? raw[0] : 0;
+    if (raw.length < 1 + PAIR_SALT_LEN + PAIR_IV_LEN + 16
+      || (version !== PAIR_WIRE_V && version !== PAIR_WIRE_V_PLAIN)) {
       throw new Error("That pairing link is damaged.");
     }
     const salt = raw.slice(1, 1 + PAIR_SALT_LEN);
     const iv = raw.slice(1 + PAIR_SALT_LEN, 1 + PAIR_SALT_LEN + PAIR_IV_LEN);
     const ct = raw.slice(1 + PAIR_SALT_LEN + PAIR_IV_LEN);
     const key = await deriveKey(normalizePairCode(code), salt);
-    let data;
+    let body;
     try {
-      data = await aesDecrypt({ v: 1, iv: bytesToB64(iv), ct: bytesToB64(ct) }, key);
+      body = new Uint8Array(await subtle().decrypt({ name: "AES-GCM", iv }, key, ct));
     } catch (e) {
       // AES-GCM authentication failing IS the wrong-code signal.
       throw new Error("That code doesn't match. Check the six characters on your computer.");
+    }
+    // Past the AES tag: the code was right and the bytes are intact, so
+    // anything wrong from here is not something scanning again would fix.
+    // inflate() reports its own failures, which distinguish "this browser
+    // can't" from "these bytes are wrong".
+    const plain = version === PAIR_WIRE_V ? await inflate(body) : body;
+    let data;
+    try {
+      data = JSON.parse(fromUtf8(plain));
+    } catch (e) {
+      throw new Error("That pairing link is damaged.");
     }
     if (Number(data.exp || 0) < (now || Date.now())) {
       throw new Error("That pairing code has expired — show a new one on your computer.");
@@ -1362,7 +1418,7 @@
     aesEncrypt, aesDecrypt, exportRawKey, importRawKey,
     makeGitHub, makeModel, makeTools, runAgent, TOOL_SCHEMAS, SPAWN_SCHEMA, VIEW_IMAGE_SCHEMA,
     NEEDS_DESKTOP_SCHEMA, pendingNote, PENDING_MARKER,
-    openPairToken, normalizePairCode,
+    openPairToken, normalizePairCode, pairTokenFrom, PAIR_TOKEN_MIN,
     SYSTEM_PROMPT, SUBAGENT_PROMPT,
     openSync, makeSyncStore, ensureSyncRepo,
     SYNC_REPO_NAME, SYNC_REPO_BRANCH, STATE_BRANCH,

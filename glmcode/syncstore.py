@@ -190,22 +190,36 @@ def derive_key(passphrase: str, salt: bytes) -> bytes:
                                salt, PBKDF2_ITERS, 32)
 
 
-def aes_encrypt(obj, key: bytes) -> dict:
-    """AES-256-GCM encrypt a JSON-able object into a WebCrypto-compatible blob."""
+def aes_encrypt_bytes(data: bytes, key: bytes) -> tuple[bytes, bytes]:
+    """AES-256-GCM over raw bytes -> (iv, ciphertext-with-tag).
+
+    Pairing needs this: its payload is compressed before encryption, and
+    routing those bytes through the JSON-shaped helper below would base64 them
+    first and give most of the compression straight back."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     iv = os.urandom(12)
-    pt = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-    ct = AESGCM(key).encrypt(iv, pt, None)  # tag is appended, like WebCrypto
+    return iv, AESGCM(key).encrypt(iv, data, None)  # tag appended, like WebCrypto
+
+
+def aes_decrypt_bytes(iv: bytes, ct: bytes, key: bytes) -> bytes:
+    """Reverse of aes_encrypt_bytes. Raises SyncError on a wrong key / tampering."""
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    try:
+        return AESGCM(key).decrypt(iv, ct, None)
+    except Exception:
+        raise SyncError("Could not decrypt (wrong passphrase or corrupted data).")
+
+
+def aes_encrypt(obj, key: bytes) -> dict:
+    """AES-256-GCM encrypt a JSON-able object into a WebCrypto-compatible blob."""
+    iv, ct = aes_encrypt_bytes(
+        json.dumps(obj, ensure_ascii=False).encode("utf-8"), key)
     return {"v": 1, "iv": _b64e(iv), "ct": _b64e(ct)}
 
 
 def aes_decrypt(blob: dict, key: bytes):
     """Reverse of aes_encrypt. Raises SyncError on a wrong key / tampering."""
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    try:
-        pt = AESGCM(key).decrypt(_b64d(blob["iv"]), _b64d(blob["ct"]), None)
-    except Exception:
-        raise SyncError("Could not decrypt (wrong passphrase or corrupted data).")
+    pt = aes_decrypt_bytes(_b64d(blob["iv"]), _b64d(blob["ct"]), key)
     return json.loads(pt.decode("utf-8"))
 
 

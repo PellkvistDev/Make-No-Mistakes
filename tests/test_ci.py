@@ -137,6 +137,30 @@ def test_every_mobile_test_file_is_actually_run_by_ci():
         "line in .github/workflows/ci.yml:\n  " + "\n  ".join(missing))
 
 
+def test_the_browser_job_installs_what_its_tests_need_to_run():
+    """The same silent failure as above, one level down.
+
+    tests/mobile_ui reaches glmcode.pairing through importorskip, so when the
+    browser-ui job installed no `requests` -- a transitive import of that
+    module -- the pairing tests SKIPPED, for months, while the job's own
+    comment said they were what pinned the two halves of the wire format
+    together. A skipped test and a passing one look identical in a green check,
+    which is exactly why importorskip needs this backstop.
+
+    Only packages the app declares are checked. Anything in requirements.txt is
+    something a contributor already has, so needing it here costs nothing.
+    """
+    root = Path(__file__).parent.parent
+    workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    installs = [ln for ln in workflow.splitlines() if "pip install" in ln]
+    assert len(installs) == 2, "expected one pip install per job"
+    for pkg in ("requests", "cryptography", "segno"):
+        missing = [ln.strip() for ln in installs if pkg not in ln]
+        assert not missing, (
+            f"{pkg} is imported by tests in both jobs; without it they skip "
+            f"rather than fail:\n  " + "\n  ".join(missing))
+
+
 # ------------------------------------------------- source files stay text --
 
 def test_no_source_file_contains_a_literal_nul_byte():

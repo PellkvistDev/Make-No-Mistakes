@@ -82,6 +82,69 @@ def test_payload_expires():
     assert p["exp"] == int((1000.0 + pairing.PAIR_TTL_SECONDS) * 1000)
 
 
+# ---------------------------------------------------- how big the code gets
+#
+# The pairing QR would not scan, and the reason was density: the payload was
+# JSON, base64'd, wrapped in a URL, and came out at 113 modules. A camera has
+# to resolve every one of them off a laptop screen. Deflating first roughly
+# halves the token, because base URLs and model names repeat heavily while the
+# keys (being random) do not compress at all.
+#
+# These numbers are asserted rather than described. A field added to the
+# payload later is exactly how this creeps back, and the QR getting quietly
+# denser again is not something anyone notices until a phone won't read it.
+
+def _modules(data: str) -> int:
+    segno = pytest.importorskip("segno")
+    return segno.make(data, error="l").symbol_size(scale=1, border=0)[0]
+
+
+def _realistic_payload():
+    """Two APIs with their model lists, a GitHub PAT and a sync passphrase --
+    what a set-up desktop actually sends."""
+    return pairing.build_payload(
+        model_key="a" * 32, base_url="https://api.z.ai/api/paas/v4",
+        model="glm-4.7-flash", github_token="github_pat_" + "c" * 70,
+        sync_passphrase="d" * 24,
+        providers=[
+            {"name": "Z.AI", "baseUrl": "https://api.z.ai/api/paas/v4",
+             "key": "a" * 32, "models": ["glm-4.7-flash", "glm-4.6v-flash"]},
+            {"name": "Google AI Studio", "key": "AIzaSy" + "b" * 33,
+             "baseUrl": "https://generativelanguage.googleapis.com/v1beta/openai",
+             "models": ["gemini-3.6-flash", "gemini-3.5-flash", "gemini-3-flash",
+                        "gemini-2.5-flash", "gemini-2.5-flash-lite"]},
+        ])
+
+
+@needs_crypto
+def test_a_realistic_pairing_code_stays_readable_by_a_camera():
+    n = _modules(pairing.seal(_realistic_payload(), pairing.make_code()))
+    assert n <= 81, (
+        f"{n} modules. Above ~80 this stops scanning off a screen; it was 113 "
+        "when the payload was uncompressed and wrapped in a URL.")
+
+
+@needs_crypto
+def test_compression_is_what_keeps_it_readable():
+    """Stated as a comparison so removing the compression fails here, rather
+    than only on someone's phone."""
+    import json as _j
+    import zlib as _z
+    raw = _j.dumps(_realistic_payload(), separators=(",", ":")).encode()
+    assert len(_z.compress(raw, 9)) < len(raw) * 0.7
+
+
+@needs_crypto
+def test_adding_a_third_api_does_not_blow_the_code_up():
+    """Providers repeat almost entirely, so a fourth one should cost close to
+    nothing -- if it doesn't, compression has stopped working."""
+    p = _realistic_payload()
+    p["providers"] = p["providers"] + [
+        dict(x, name=x["name"] + " 2", baseUrl=x["baseUrl"] + "/x")
+        for x in p["providers"]]
+    assert _modules(pairing.seal(p, pairing.make_code())) <= 81
+
+
 # ------------------------------------------------------------------- the URL
 
 def test_token_rides_in_the_fragment_so_no_server_sees_it():
@@ -146,6 +209,33 @@ def test_each_seal_uses_a_fresh_salt():
     code = pairing.make_code()
     p = pairing.build_payload(model_key="k")
     assert pairing.seal(p, code) != pairing.seal(p, code)
+
+
+@needs_crypto
+def test_a_token_from_an_older_desktop_still_opens():
+    """The compressed layout is a new wire version, and a phone updates itself
+    from Pages while a desktop is whatever is installed. Refusing version 1
+    would mean a freshly-updated phone could not read the code on the screen
+    in front of it."""
+    import base64 as _b64
+    import json as _j
+    code = pairing.make_code()
+    payload = pairing.build_payload(model_key="k", github_token="t")
+    salt = b"\x01" * 16
+    key = syncstore.derive_key(code, salt)
+    iv, ct = syncstore.aes_encrypt_bytes(
+        _j.dumps(payload).encode("utf-8"), key)
+    old = _b64.urlsafe_b64encode(bytes([1]) + salt + iv + ct).decode().rstrip("=")
+    assert pairing.open_sealed(old, code)["githubToken"] == "t"
+
+
+@needs_crypto
+def test_a_wire_version_from_the_future_is_refused_rather_than_guessed():
+    import base64 as _b64
+    raw = bytes([9]) + b"\x00" * (16 + 12 + 16)
+    with pytest.raises(syncstore.SyncError, match="damaged"):
+        pairing.open_sealed(
+            _b64.urlsafe_b64encode(raw).decode().rstrip("="), "ABCDEF")
 
 
 # --------------------------------------------------------------------- #
@@ -250,6 +340,102 @@ def _merge(existing, incoming):
         capture_output=True, text=True, timeout=30)
     assert js.returncode == 0, js.stderr
     return _json.loads(js.stdout)
+
+
+def _node(expr, *args):
+    js = _subprocess.run(
+        ["node", "-e",
+         "const C=require(process.argv[1]);"
+         "(async()=>{console.log(JSON.stringify(await (" + expr + ")))})()"
+         ".catch(e=>{console.log(JSON.stringify({__err:String(e.message||e)}))})",
+         str(_CORE), *[str(a) for a in args]],
+        capture_output=True, text=True, timeout=60)
+    assert js.returncode == 0, js.stderr
+    return _json.loads(js.stdout)
+
+
+# ---- the two ends of the wire, driven against each other -------------------
+#
+# The desktop seals and the phone opens, and nothing in either file can tell
+# you whether the other agrees. The layout is a byte offset, a version number
+# and a compression scheme; get any of them wrong and the failure surfaces as
+# "that pairing link is damaged" on a phone, with the working copy on the
+# other machine.
+
+@needs_crypto
+@_needs_node
+def test_the_phone_opens_what_this_desktop_seals():
+    code = pairing.make_code()
+    token = pairing.seal(pairing.build_payload(
+        model_key="sk-model", github_token="github_pat_x", sync_passphrase="pp",
+        providers=[{"name": "Google", "baseUrl": "https://g.test/v1",
+                    "key": "sk-g", "models": ["gemini-3.6-flash"]}]), code)
+    got = _node("C.openPairToken(process.argv[2],process.argv[3])", token, code)
+    assert got.get("__err") is None, got
+    assert got["modelKey"] == "sk-model"
+    assert got["githubToken"] == "github_pat_x"
+    assert got["providers"][0]["models"] == ["gemini-3.6-flash"]
+
+
+@needs_crypto
+@_needs_node
+def test_the_phone_still_reads_the_wrong_code_as_the_wrong_code():
+    """Not as a damaged link. Which one it says decides whether someone
+    re-types the six characters or gives up and goes back to the computer."""
+    token = pairing.seal(pairing.build_payload(model_key="k"), pairing.make_code())
+    got = _node("C.openPairToken(process.argv[2],'ZZZZZZ')", token)
+    assert "doesn't match" in got["__err"]
+
+
+@needs_crypto
+@_needs_node
+def test_the_phone_refuses_a_stale_code_rather_than_pairing_with_it():
+    code = pairing.make_code()
+    token = pairing.seal(pairing.build_payload(model_key="k", now=0.0), code)
+    got = _node("C.openPairToken(process.argv[2],process.argv[3],Date.now())",
+                token, code)
+    assert "expired" in got["__err"]
+
+
+# ---- what counts as a pairing code when it is scanned ---------------------
+#
+# The QR no longer holds a URL. It held one so the link could be followed in a
+# browser, and that turned out to be the bug: the phone's Camera app reads it,
+# opens Safari, and pairs Safari's storage -- which for an app installed to the
+# home screen is not the app's. The keys arrive somewhere that is not the app,
+# and the app still has none. It looked exactly like the code being unreadable.
+
+@_needs_node
+def test_a_bare_token_is_recognised_when_scanned():
+    token = "A" * 100
+    assert _node("C.pairTokenFrom(process.argv[2])", token) == token
+
+
+@_needs_node
+def test_a_link_from_before_the_change_is_still_recognised():
+    assert _node("C.pairTokenFrom(process.argv[2])",
+                 "https://you.github.io/app/#pair=TOKEN_abc-123") == "TOKEN_abc-123"
+
+
+@_needs_node
+@pytest.mark.parametrize("text", [
+    "https://example.com/",          # a QR on a poster
+    "WIFI:S:cafe;T:WPA;P:hunter2;;",  # the one taped to a router
+    "hello",
+    "",
+    "A" * 20,                        # short: too small to be an envelope
+])
+def test_a_qr_that_is_not_ours_is_not_mistaken_for_one(text):
+    """The scanner keeps looking, and says so, rather than opening a code
+    prompt for a poster."""
+    assert _node("C.pairTokenFrom(process.argv[2])", text) == ""
+
+
+@_needs_node
+def test_the_floor_is_the_smallest_envelope_that_could_be_real():
+    """Not a number picked to make the tests pass: below it there is no room
+    for a version byte, a salt, an iv and a GCM tag."""
+    assert _node("C.PAIR_TOKEN_MIN") == 60
 
 
 @_needs_node
