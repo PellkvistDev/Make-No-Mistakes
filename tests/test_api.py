@@ -412,3 +412,105 @@ def test_without_a_cancel_the_retries_still_happen():
     with pytest.raises(ApiError):
         c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
     assert c.attempts > 1
+
+
+# --------------------------------------------------------------------- #
+# The server usually says how long to wait. This client ignored it.
+#
+#   429 ... Quota exceeded for metric: ..._input_token_count, limit: 16000
+#           Please retry in 15.551629653s.
+#
+# answered with a 1.8s backoff -- so several attempts were spent re-asking a
+# question the server had already answered, which is what a "retry storm" in
+# the chat log actually is.
+
+class _Resp429:
+    def __init__(self, headers=None, msg="rate limited"):
+        self.status_code = 429
+        self.headers = headers or {}
+        self._msg = msg
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def json(self):
+        return {"error": {"message": self._msg}}
+
+
+def test_the_servers_own_retry_delay_is_read_from_the_message():
+    from glmcode.api import _retry_hint
+    assert _retry_hint(_Resp429(), "Please retry in 15.551629653s.") == pytest.approx(15.55, abs=0.01)
+
+
+def test_the_retry_after_header_is_read_when_present():
+    from glmcode.api import _retry_hint
+    assert _retry_hint(_Resp429({"Retry-After": "30"}), "no hint") == 30.0
+
+
+def test_an_http_date_header_falls_through_to_the_message():
+    """Retry-After may be a date. Rather than parse it, fall back to the text,
+    which is where the providers here actually put the number."""
+    from glmcode.api import _retry_hint
+    r = _Resp429({"Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"})
+    assert _retry_hint(r, "please retry in 9s") == 9.0
+
+
+def test_no_hint_is_not_zero():
+    """None means the server did not say -- distinct from "wait no time"."""
+    from glmcode.api import _retry_hint
+    assert _retry_hint(_Resp429(), "just broken") is None
+
+
+def test_the_backoff_waits_at_least_as_long_as_the_server_asked():
+    """The point of the whole thing: a 1.8s guess against a 15.5s instruction
+    burns attempts to be told the same thing again."""
+    import threading as _t
+    from glmcode.api import ApiError as _AE
+
+    waited = []
+
+    class _Client(ZaiClient):
+        def __init__(self):
+            super().__init__("k", "https://api.z.ai/api/paas/v4")
+            self.n = 0
+
+        def _sleep_unless_cancelled(self, seconds, cancel):
+            waited.append(seconds)
+            if len(waited) >= 2:
+                raise _t.ThreadError("stop the test")
+
+        def _stream_once(self, payload, *a, **k):
+            self.n += 1
+            raise _AE(429, "quota exceeded. Please retry in 15.5s.",
+                      retry_after=15.5)
+
+    c = _Client()
+    with pytest.raises((_t.ThreadError, ApiError)):
+        c.chat(model="m", messages=[{"role": "user", "content": "hi"}])
+    assert waited and waited[0] >= 15.5, waited
+
+
+def test_a_hint_longer_than_the_cap_is_bounded():
+    """A provider must not be able to park a turn indefinitely."""
+    import threading as _t
+    from glmcode.api import ApiError as _AE, MAX_RETRY_WAIT
+
+    waited = []
+
+    class _Client(ZaiClient):
+        def __init__(self):
+            super().__init__("k", "https://api.z.ai/api/paas/v4")
+
+        def _sleep_unless_cancelled(self, seconds, cancel):
+            waited.append(seconds)
+            raise _t.ThreadError("stop")
+
+        def _stream_once(self, payload, *a, **k):
+            raise _AE(429, "retry in 3600s", retry_after=3600.0)
+
+    with pytest.raises((_t.ThreadError, ApiError)):
+        _Client().chat(model="m", messages=[{"role": "user", "content": "hi"}])
+    assert waited[0] <= MAX_RETRY_WAIT

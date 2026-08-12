@@ -12,6 +12,7 @@ import base64
 import json
 import mimetypes
 import random
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -22,10 +23,13 @@ import requests
 
 
 class ApiError(Exception):
-    def __init__(self, status: int, message: str):
+    def __init__(self, status: int, message: str, retry_after: float | None = None):
         super().__init__(f"API error {status}: {message}")
         self.status = status
         self.message = message
+        # Seconds the server asked us to wait, when it said. None means it did
+        # not -- which is not the same as zero, and the backoff treats it so.
+        self.retry_after = retry_after
 
 
 class Cancelled(Exception):
@@ -63,6 +67,9 @@ class ChatResult:
 
 RETRYABLE = {429, 500, 502, 503, 504}
 MAX_RETRIES = 8
+# Ceiling on honouring a server's retry hint: long enough for a per-minute
+# window to roll over, short enough that a turn is never parked indefinitely.
+MAX_RETRY_WAIT = 65.0
 
 
 class RateLimiter:
@@ -86,6 +93,31 @@ class RateLimiter:
         delay = start - now
         if delay > 0:
             time.sleep(delay)
+
+
+_RETRY_IN_RE = re.compile(r"retry in ([0-9]+(?:\.[0-9]+)?)s", re.I)
+
+
+def _retry_hint(resp, msg: str) -> float | None:
+    """How long the server asked us to wait, if it said.
+
+    Rate limits come with a real number and this client was ignoring it: a 429
+    saying "Please retry in 15.5s" was answered with a 1.8s backoff, so several
+    attempts were burnt re-asking a question the server had already answered.
+    The Retry-After header is the standard place; Google puts it in the message
+    text instead, so both are read.
+    """
+    try:
+        header = (resp.headers or {}).get("Retry-After")
+    except Exception:
+        header = None
+    if header:
+        try:
+            return max(0.0, float(str(header).strip()))
+        except ValueError:
+            pass            # HTTP-date form: fall through to the message
+    m = _RETRY_IN_RE.search(msg or "")
+    return float(m.group(1)) if m else None
 
 
 def _raise_if_cancelled(cancel) -> None:
@@ -151,6 +183,7 @@ class ZaiClient:
                 base = min(2 ** attempt, 30)
                 if isinstance(last_err, ApiError) and last_err.status == 429:
                     base = max(base, 2)
+                asked = getattr(last_err, "retry_after", None)
                 # Full jitter (sleep a random amount in [0, base]) rather than
                 # a fixed backoff: several parallel sub-agents that hit the
                 # same 429 at the same instant would otherwise all wait the
@@ -158,6 +191,12 @@ class ZaiClient:
                 # burning their retry budget on the same synchronized spike.
                 # Randomizing spreads their retries out so they stop fighting.
                 wait = round(random.uniform(base / 2, base), 1)
+                if asked is not None:
+                    # The server's own number wins over a guess -- retrying
+                    # sooner than it asked just spends an attempt to be told
+                    # the same thing. Capped so a provider cannot park a turn
+                    # for an unbounded time, and never shortened.
+                    wait = max(wait, min(float(asked) + 0.5, MAX_RETRY_WAIT))
                 if on_status:
                     on_status(f"retrying in {wait}s ({last_err})")
                 self._sleep_unless_cancelled(wait, cancel)
@@ -255,7 +294,8 @@ class ZaiClient:
                     msg = body.get("error", {}).get("message") or json.dumps(body)[:500]
                 except Exception:
                     msg = resp.text[:500]
-                raise ApiError(resp.status_code, msg)
+                raise ApiError(resp.status_code, msg,
+                               retry_after=_retry_hint(resp, msg))
 
             for raw in resp.iter_lines(decode_unicode=True):
                 if cancel is not None and cancel.is_set():

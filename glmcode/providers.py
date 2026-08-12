@@ -325,17 +325,23 @@ def is_chat_model(name: str) -> bool:
 # confused the model with one way of serving it: Gemma 4 runs tools perfectly
 # well under a local runner, which implements them through the chat template.
 #
-# Whether GOOGLE'S hosted endpoint accepts a tools array for a gemma-* model is
-# a different question, and reports that it answers "Tool use with function
-# calling is unsupported" are second-hand and span older Gemma versions. So it
-# is selectable and simply not recommended: it stays out of the preset's
-# chat_models, which keeps it off the default menu, and reaches the picker only
-# through the live listing under "show all". Trying it settles the question;
-# hiding it guarantees nobody ever can.
+# It was then tried against the hosted endpoint, and TOOL CALLING WORKS: the
+# first message of a chat completes normally. What stops it is the other
+# number, measured rather than predicted:
 #
-# Worth knowing before reaching for that daily allowance: the binding limit is
-# 16K tokens per minute against Gemini's 250K, and one agentic request carries
-# the system prompt, the files and the history.
+#   429 Quota exceeded for metric: ..._free_tier_input_token_count,
+#       limit: 16000, model: gemma-4-26b. Please retry in 15.5s.
+#
+# 16,000 INPUT tokens per minute, and this app's floor per request is about
+# 12,400 before any conversation at all -- roughly 5,000 for the system prompt
+# and 7,400 for 45 tool schemas, which are re-sent every single request. One
+# request fits in a minute; the second does not. A fresh chat 429s on its
+# second message.
+#
+# So it stays selectable and not recommended, and the reason is now a
+# measurement: the binding limit is tokens per minute, not the 14,400 requests
+# a day that made it look attractive. Any model with a per-minute input budget
+# near this app's own floor has the same problem, whoever serves it.
 
 
 # Suffixes that mark a model as something other than the current stable
