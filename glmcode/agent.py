@@ -1459,6 +1459,15 @@ class Agent:
                 self._tool_reply(tc, f"ERROR: could not parse tool arguments: {e}. "
                                      f"Raw arguments were: {raw_args[:500]}",
                                  error=True, name=name, args={})
+                # Replace the unparseable arguments in the stored history.
+                # Telling the model is not enough: the broken call stays in
+                # the assistant message, goes back out on every following
+                # request, and Google answers each one with
+                #   400 Request contains an invalid argument.
+                # -- so a single bad call would wedge the chat permanently,
+                # with no way out but deleting it. The raw text is already in
+                # the tool reply above, so nothing is lost by clearing it.
+                tc["function"]["arguments"] = "{}"
                 continue
 
             # A stable per-call token: the UI carries it on the tool box so a
