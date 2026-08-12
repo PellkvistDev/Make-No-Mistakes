@@ -21,6 +21,16 @@ def _tiny_png(tmp_path) -> Path:
 
 
 # -- model selection ------------------------------------------------------ #
+#
+# The turn's model no longer depends on images at all. It used to: an image
+# anywhere in the history moved the whole turn onto cfg.vision_model, which
+# belonged to the provider chosen at setup. Look at a picture with Gemini,
+# switch the chat to GLM, and every following turn went back to Gemini --
+# for the rest of the conversation, because the check scans all of it.
+
+IMG = {"role": "user", "content": [
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}]}
+
 
 def test_no_images_uses_chat_model(scripted_agent):
     agent = scripted_agent()
@@ -28,32 +38,32 @@ def test_no_images_uses_chat_model(scripted_agent):
     assert agent._model_for_turn() == "custom/coder"
 
 
-def test_images_describe_mode_routes_to_vision_model(scripted_agent):
+@pytest.mark.parametrize("route", ["describe", "direct", "auto"])
+def test_an_image_in_the_history_does_not_move_the_turn(scripted_agent, route):
     agent = scripted_agent()
     agent.model_override = "custom/coder"
-    agent.cfg.vision_route = "describe"
-    agent.messages.append({"role": "user", "content": [
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}]})
-    assert agent._model_for_turn() == agent.cfg.vision_model
+    agent.cfg.vision_route = route
+    agent.messages.append(IMG)
+    assert agent._model_for_turn() == "custom/coder"
 
 
-def test_images_direct_mode_keeps_custom_model(scripted_agent):
+def test_switching_model_after_an_image_stays_switched(scripted_agent):
+    """The reported behaviour, end to end: an image is read on one model, the
+    chat is moved to another, and the move has to stick."""
     agent = scripted_agent()
-    agent.model_override = "custom/multimodal"
-    agent.cfg.vision_route = "direct"
-    agent.messages.append({"role": "user", "content": [
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}]})
-    # the user's multimodal model sees the image itself
-    assert agent._model_for_turn() == "custom/multimodal"
+    agent.model_override = "gemini-3.6-flash"
+    agent.messages.append(IMG)
+    assert agent._model_for_turn() == "gemini-3.6-flash"
+
+    agent.model_override = "glm-4.7-flash"
+    assert agent._model_for_turn() == "glm-4.7-flash"
 
 
-def test_images_direct_mode_builtin_falls_back_to_vision(scripted_agent):
+def test_the_default_model_runs_the_turn_when_nothing_is_overridden(scripted_agent):
     agent = scripted_agent()
-    agent.model_override = None  # the free built-in model (coding model, blind)
-    agent.cfg.vision_route = "direct"
-    agent.messages.append({"role": "user", "content": [
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}}]})
-    assert agent._model_for_turn() == agent.cfg.vision_model
+    agent.model_override = None
+    agent.messages.append(IMG)
+    assert agent._model_for_turn() == agent.cfg.model
 
 
 # -- uploads -------------------------------------------------------------- #
@@ -152,7 +162,9 @@ def test_view_image_describe_mode_calls_vision_model(scripted_agent, tmp_path):
     agent.client = FakeVision()
     out = agent._view_image(str(img))
     assert out == "a red dot"
-    assert called["model"] == agent.cfg.vision_model
+    # Resolved from the chat's OWN API rather than read out of the config:
+    # z.ai's chat models cannot see, but the same key serves this one.
+    assert called["model"] == "glm-4.6v-flash"
     assert agent._pending_images == []  # nothing queued in describe mode
 
 
@@ -216,4 +228,3 @@ def test_direct_view_image_end_to_end_stays_on_multimodal_model(scripted_agent, 
                for m in agent.messages)
     # every model call used the custom multimodal model -- never GLM vision
     assert models_seen and all(m == "custom/multimodal" for m in models_seen)
-    assert agent.cfg.vision_model not in models_seen

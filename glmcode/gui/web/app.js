@@ -2825,60 +2825,118 @@ const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" str
 const CROSS_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
 
 function apiRowSub(p) {
-  if (p.builtin && !p.has_key) return "no API key yet — edit this row and paste yours";
+  if (!p.has_key && !p.local) return "no API key yet — edit this row and paste yours";
   const bits = [p.base_url];
-  if (p.models.length) {
-    bits.push(`${p.models.length} model${p.models.length === 1 ? "" : "s"}`);
-  }
+  const n = (p.all_models || p.models || []).length;
+  if (n) bits.push(`${n} model${n === 1 ? "" : "s"}`);
   const note = TIER_NOTE[p.tier];
   if (note) bits.push(note);
   return bits.join(" · ");
 }
 
+/* Settings lists the APIs you have; it does not choose between them. It used
+ * to: every row was a radio that set the current chat's provider, which was a
+ * second, rival place to pick a model next to the picker at the top of the
+ * chat that already lists every model from every API. Worse, the two meant
+ * different things -- selecting the setup provider ran a different code path
+ * from selecting any other. Choosing happens in one place now, and this is
+ * where you add, edit and remove. */
 function renderApiList(res) {
   const list = $("api-list");
   list.innerHTML = "";
   for (const p of res.providers) {
-    const selected = p.name === res.chat_provider;
     const row = document.createElement("div");
-    row.className = "provider-row api-row" + (selected ? " selected" : "");
+    row.className = "provider-row api-row";
     row.innerHTML =
-      `<span class="api-radio"></span>` +
       `<div class="provider-row-text"><span class="provider-name"></span>` +
       `<span class="provider-sub"></span></div>` +
-      `<button class="icon-btn-mini api-edit" aria-label="Edit API" title="Edit">${PENCIL_SVG}</button>`;
+      `<button class="icon-btn-mini api-edit" aria-label="Edit API" title="Edit">${PENCIL_SVG}</button>` +
+      `<button class="icon-btn-mini api-del" aria-label="Delete API" title="Delete">${CROSS_SVG}</button>`;
     row.querySelector(".provider-name").textContent = p.name;
     row.querySelector(".provider-sub").textContent = apiRowSub(p);
-    // The selected row exposes its model choice inline (built-in excluded:
-    // its chat model is the free default, vision routes automatically).
-    if (selected && !p.builtin && p.models.length) {
-      const sel = document.createElement("select");
-      sel.className = "voice-select api-model-select";
-      sel.innerHTML = p.models.map((m) => `<option>${esc(m)}</option>`).join("");
-      if (p.models.includes(res.chat_model)) sel.value = res.chat_model;
-      sel.addEventListener("change", () => selectApi(p, sel.value));
-      row.insertBefore(sel, row.querySelector(".api-edit"));
+    // Badges rather than position. "The first one" used to carry both these
+    // meanings, and neither was visible or changeable.
+    const edit = row.querySelector(".api-edit");
+    for (const [cond, text, cls] of [
+      [p.name === res.default_provider, "default", "api-badge"],
+      [p.name === res.vision_provider, "images", "api-badge api-badge-soft"],
+    ]) {
+      if (!cond) continue;
+      const b = document.createElement("span");
+      b.className = cls;
+      b.textContent = text;
+      row.insertBefore(b, edit);
     }
     row.querySelector(".api-edit").addEventListener("click", (e) => {
       e.stopPropagation();
       openApiForm(p, p.name);
     });
-    if (!p.builtin) {
-      const del = document.createElement("button");
-      del.className = "icon-btn-mini";
-      del.setAttribute("aria-label", "Delete API");
-      del.title = "Delete";
-      del.innerHTML = CROSS_SVG;
-      del.addEventListener("click", async (e) => {
-        e.stopPropagation();
-        const res2 = await api().delete_provider(p.name);
-        populateModelPicker(res2);
-      });
-      row.appendChild(del);
-    }
-    if (!selected) row.addEventListener("click", () => selectApi(p));
+    // On every row. There used to be one without it -- not because removing it
+    // was unsafe, but because it was stored where the delete could not see it.
+    row.querySelector(".api-del").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const last = res.providers.length === 1;
+      const msg = last
+        ? `Remove ${p.name}? It is the only API configured, so the app will ask you to set one up again.`
+        : `Remove ${p.name}? Chats using it will fall back to ${res.default_provider}.`;
+      if (!window.confirm(msg)) return;
+      const res2 = await api().delete_provider(p.name);
+      if (res2 && res2.error) { toast(res2.error, "error", 5000); return; }
+      if (res2.needsKey) { location.reload(); return; }
+      populateModelPicker(res2);
+      toast(`${p.name} removed.`, "info", 2500);
+    });
     list.appendChild(row);
   }
+  renderDefaultsRow(res);
+}
+
+/* The two things a provider list needs on top of itself: which model new chats
+ * start on, and which one reads images. Both were implicit before -- the first
+ * was "whatever setup wrote", the second was a field no screen could reach. */
+function renderDefaultsRow(res) {
+  const box = $("api-defaults");
+  if (!box) return;
+  const entries = modelEntries(res, true);
+  // Options are addressed by their position in `entries`, not by a
+  // "provider<sep>model" string: provider names are free text and contain
+  // spaces, so any separator is a name someone can legitimately type.
+  const opts = (sel) => entries.map((e, i) =>
+    `<option value="${i}"${e.provider === sel.p && e.model === sel.m ? " selected" : ""}>`
+    + `${esc(e.model)} — ${esc(e.provider)}</option>`).join("");
+  const pick = (el) => entries[Number(el.value)] || null;
+
+  const dsel = $("default-model-select");
+  dsel.innerHTML = opts({ p: res.default_provider, m: res.default_model });
+  dsel.onchange = async () => {
+    const e = pick(dsel);
+    if (!e) return;
+    const r = await api().set_default_model(e.provider, e.model);
+    if (r && r.error) { toast(r.error, "error", 5000); return; }
+    populateModelPicker(r);
+    toast(`New chats will start on ${e.model}.`, "info", 2500);
+  };
+
+  const vsel = $("vision-model-select");
+  // "Automatic" is a real answer and the default one: with it, each chat reads
+  // images using its own API -- the model itself if it can see, that API's
+  // dedicated vision model if it has one.
+  vsel.innerHTML = `<option value="auto"${res.vision_pinned ? "" : " selected"}>`
+    + "Automatic — use the chat's own API</option>"
+    + opts(res.vision_pinned
+      ? { p: res.vision_provider, m: res.vision_model } : { p: "", m: "" });
+  vsel.onchange = async () => {
+    const e = pick(vsel);
+    const r = e ? await api().set_vision_model(e.provider, e.model)
+      : await api().set_vision_model("", "");
+    if (r && r.error) { toast(r.error, "error", 5000); return; }
+    populateModelPicker(r);
+  };
+  $("vision-model-note").textContent = res.vision_model
+    ? (res.vision_pinned
+      ? `Images always go to ${res.vision_model}.`
+      : `Right now that means ${res.vision_model} via ${res.vision_provider}.`)
+    : "No configured API can read images.";
 }
 
 async function populateModelPicker(data) {
@@ -2906,9 +2964,17 @@ function hiddenModelCount(res) {
   return Math.max(0, n);
 }
 
-function modelEntries(res) {
+function modelEntries(res, everything) {
   const out = [];
   for (const p of res.providers || []) {
+    if (everything) {
+      // The settings pickers list all of it: choosing a default or an image
+      // model is a deliberate act, not a menu you scan mid-task.
+      for (const m of (p.all_models || p.models || [])) {
+        out.push({ provider: p.name, model: m });
+      }
+      continue;
+    }
     // No longer truncated. The built-in row used to report [chat, vision] and
     // this kept the first, because the vision model is not something to code
     // with. The backend now sends only chat choices, so slicing here just hid
@@ -3056,33 +3122,24 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !$("model-menu").hidden) closeModelMenu();
 });
 
-async function selectApi(p, model) {
-  const res = await api().set_chat_model(
-    p.name, model || (p.builtin ? "" : (p.models[0] || "")));
-  if (res && res.error) {
-    toast(res.error, "error", 5000);
-    populateModelPicker();
-    return;
-  }
-  populateModelPicker(res);
-  toast(`This chat now uses ${res.chat_model}.`, "info", 2500);
-}
-
 function openApiForm(prefill, editingName) {
   provFormEditing = editingName || null;
-  const isBuiltin = !!prefill.builtin;
   $("api-form").hidden = false;
   $("prov-name").value = prefill.name || "";
   $("prov-url").value = prefill.base_url || "";
   $("prov-models").value = (prefill.models || []).join(", ");
   $("prov-key").value = "";
-  // The provider chosen at setup is fixed except for the key.
-  for (const id of ["prov-name", "prov-url", "prov-models"]) $(id).disabled = isBuiltin;
-  $("prov-key").placeholder = isBuiltin
-    ? `Paste your ${prefill.name || "API"} key`
-    : editingName ? "New API key (empty = keep the current one)"
-      : "API key (leave empty for local servers)";
-  $("prov-key").focus();
+  // Nothing is disabled. The row created at setup used to have its name, URL
+  // and model list greyed out, so it was the one API in the app whose typo
+  // could not be corrected -- and the save path behind it discarded three of
+  // the four fields anyway.
+  for (const id of ["prov-name", "prov-url", "prov-models"]) $(id).disabled = false;
+  $("prov-key").placeholder = editingName
+    ? (prefill.env_var
+      ? `New key (empty = keep it; saved to ${prefill.env_var})`
+      : "New API key (empty = keep the current one)")
+    : "API key (leave empty for local servers)";
+  (editingName ? $("prov-key") : $("prov-name")).focus();
 }
 
 function closeApiForm() {
@@ -3131,10 +3188,10 @@ async function renderApiPresets() {
 $("api-add").addEventListener("click", () => {
   renderApiPresets();
   const ps = providersCache?.providers || [];
-  const builtin = ps.find((p) => p.builtin);
-  // First time here with nothing configured at all: pre-fill the provider
-  // chosen at setup, so the only thing left to type is the key.
-  if (builtin && !builtin.has_key && ps.length <= 1) openApiForm(builtin, builtin.name);
+  // First time here with one API and no key on it: open that row, so the only
+  // thing left to type is the key.
+  const keyless = ps.length === 1 && !ps[0].has_key && !ps[0].local ? ps[0] : null;
+  if (keyless) openApiForm(keyless, keyless.name);
   else openApiForm({}, null);
 });
 $("prov-cancel").addEventListener("click", closeApiForm);
@@ -3146,7 +3203,10 @@ $("prov-save").addEventListener("click", async () => {
   closeApiForm();
   populateModelPicker(res);
   if (res.persisted_env === false) {
-    toast("Key saved to config (couldn't set the ZAI_API_KEY environment variable).", "info", 5000);
+    // Named ZAI_API_KEY whatever the API was, which was a leftover from when
+    // there could only be one.
+    toast("Key saved to the config file (couldn't write the environment variable).",
+      "info", 5000);
   } else {
     toast("API saved.", "info", 3000);
   }

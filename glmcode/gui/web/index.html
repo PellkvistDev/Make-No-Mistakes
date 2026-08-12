@@ -539,12 +539,15 @@
         <button data-v="describe" role="radio">Describe</button>
         <button data-v="direct" role="radio">Direct</button>
       </div>
-      <p class="row-sub"><strong>Auto</strong> (default): models that can read images
-         are given them directly; the rest get a written description. Nothing to set.
-         <strong>Describe</strong>: always narrate images through a vision model —
+      <p class="row-sub"><strong>Auto</strong> (default): a model that can read images
+         is given them directly; one that can't gets a written description from the
+         image model set above. Nothing to set.
+         <strong>Describe</strong>: always narrate images through the image model —
          works with any chat model, even one that can't see. <strong>Direct</strong>:
          always send the image itself. Override Auto only for a hand-typed endpoint
          or a local model, where it has no way to know.</p>
+      <p class="row-sub">Whichever you pick, the chat's own model answers the turn.
+         Images never move a conversation onto another model.</p>
     </section>
 
     <section data-tab="voice">
@@ -651,10 +654,27 @@
 
     <section data-tab="models">
       <h3>APIs</h3>
-      <p class="row-sub">The API this chat talks to — click one to select it. New chats start
-         on the one you chose at setup. Any OpenAI-compatible endpoint works
-         (OpenRouter, Ollama, LM Studio, paid APIs).</p>
+      <p class="row-sub">The APIs you've configured. Any OpenAI-compatible endpoint works
+         (OpenRouter, Ollama, LM Studio, paid APIs). Every one can be edited or removed.
+         To change the model a chat is using, use the model picker above the composer —
+         it lists every model from every API here.</p>
       <div id="api-list" class="provider-list"></div>
+      <div id="api-defaults">
+        <div class="row">
+          <div class="row-text"><label for="default-model-select">Model for new chats</label>
+            <span class="row-sub">Each chat can still be switched individually.</span></div>
+          <div class="row-actions">
+            <select id="default-model-select" class="voice-select"></select>
+          </div>
+        </div>
+        <div class="row">
+          <div class="row-text"><label for="vision-model-select">Model that reads images</label>
+            <span class="row-sub" id="vision-model-note"></span></div>
+          <div class="row-actions">
+            <select id="vision-model-select" class="voice-select"></select>
+          </div>
+        </div>
+      </div>
       <div class="sheet-actions api-actions">
         <button id="prov-detect" class="btn btn-ghost">Detect local (Ollama / LM Studio)</button>
         <button id="api-add" class="btn btn-primary">Add API…</button>

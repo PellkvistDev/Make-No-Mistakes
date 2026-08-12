@@ -244,8 +244,12 @@ def test_ollama_setup_needs_a_model_but_not_a_key(monkeypatch):
     res = api.save_setup("ollama", "", model="qwen2.5-coder:7b")
     assert res.get("ok") is True
     assert api._cfg.model == "qwen2.5-coder:7b"
-    assert api._cfg.vision_model == "qwen2.5-coder:7b"
     assert api._cfg.base_url == "http://localhost:11434/v1"
+    # Setup does NOT pin a vision model. It used to write one -- the preset's,
+    # or failing that the chat model -- which made an automatic answer look
+    # like a decision the user had made, and that decision then followed every
+    # chat to every other API.
+    assert (api._cfg.vision_model, api._cfg.vision_provider) == ("", "")
 
 
 def test_local_models_reports_the_three_states_apart(monkeypatch):
@@ -338,7 +342,10 @@ def test_refreshing_moves_off_a_model_the_provider_has_retired(monkeypatch):
 
     api.refresh_models()
     assert cfg.model == "gemini-3-pro"
-    assert cfg.vision_model == "gemini-3-pro"
+    # The vision model is not dragged along. It is set only when someone picks
+    # one, and it stays unset here -- so it resolves per chat, against the API
+    # that chat is actually using.
+    assert (cfg.vision_model, cfg.vision_provider) == ("", "")
     assert cfg.available_models == ["gemini-3-pro"]
 
 
@@ -377,12 +384,15 @@ def test_choosing_another_model_on_the_builtin_provider_sticks():
     assert ag.model_override == "gemini-2.5-pro"
 
 
-def test_choosing_the_default_again_clears_the_override():
+def test_choosing_the_default_again_is_still_a_choice():
+    """It used to be erased -- picking the model that happened to equal the
+    default cleared the chat's override, so the chat silently followed the
+    default afterwards. A click is a click whichever model it lands on."""
     api, ag = _with_open_chat(config_mod.Config(model="gemini-2.5-flash"))
 
     api._apply_chat_model(ag, "Google AI Studio", "gemini-2.5-flash")
-    assert api.session_model == ""
-    assert ag.model_override is None
+    assert api.session_model == "gemini-2.5-flash"
+    assert ag.model_override == "gemini-2.5-flash"
 
 
 def test_switching_model_rebuilds_the_prompt_that_names_it():
@@ -529,7 +539,9 @@ def test_an_install_pinned_to_a_retired_model_is_moved_off_it(tmp_path, monkeypa
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"})
     from glmcode import providers
     assert cfg.model == providers.preset("google")["model"]
-    assert cfg.vision_model == providers.preset("google")["vision_model"]
+    # And the vision model goes back to automatic rather than being pinned to
+    # the retired one's replacement -- nobody chose either.
+    assert (cfg.vision_model, cfg.vision_provider) == ("", "")
 
 
 def test_a_model_the_preset_still_lists_is_left_alone(tmp_path, monkeypatch):

@@ -30,7 +30,10 @@ from .. import backup as backup_module
 from .. import providers as providers_mod
 from ..config import (BUILTIN_PROVIDER_NAME, CONFIG_DIR, PERMISSION_MODES, Config,
                       builtin_provider_name,
-                      all_providers, find_provider, load_config, save_config)
+                      all_providers, find_provider, load_config, save_config,
+                      default_provider, vision_target, normalize_provider,
+                      default_model as cfg_default_model,
+                      provider_key as cfg_provider_key)
 from ..events import AgentEvents
 from .. import githubsync
 from .. import pairing
@@ -750,11 +753,17 @@ class Api:
             self._active.model = value
 
     def _ensure_client(self) -> ZaiClient | None:
-        key = self._cfg.resolve_api_key()
-        if not key:
+        """A client for the API new chats start on."""
+        prov = default_provider(self._cfg)
+        if prov is None:
+            return None
+        key = cfg_provider_key(prov)
+        # A local server has no key and does not want one; a hosted one without
+        # a key cannot answer, and a client built now would fail on every turn.
+        if not key and not providers_mod.is_local(prov["base_url"]):
             return None
         if self._client is None:
-            self._client = ZaiClient(key, self._cfg.base_url)
+            self._client = ZaiClient(key or "local", prov["base_url"])
         return self._client
 
     def _make_events(self, sid: str) -> WebEvents:
@@ -797,7 +806,7 @@ class Api:
 
     def boot(self):
         _startup_log("[py] boot() called")
-        has_key = bool(self._cfg.resolve_api_key())
+        has_key = self._ensure_client() is not None
         # Setup is shown when this install has not been through it -- not
         # merely when no key can be found. The key is persisted with `setx`,
         # into the user's registry environment, so it outlives deleting
@@ -945,19 +954,37 @@ class Api:
             return []
         return sorted({n for n in names if n and providers_mod.is_chat_model(n)})
 
-    def refresh_models(self):
-        """Re-read the primary provider's model list from the provider."""
-        models = self._fetch_models(self._cfg.base_url, self._cfg.resolve_api_key())
+    def refresh_models(self, provider: str = ""):
+        """Re-read an API's model list from the API itself.
+
+        Named rather than assumed. It used to refresh "the primary provider",
+        which meant the button in the model menu could only ever update one row
+        however many were configured -- and refreshed a row you might not even
+        be using.
+        """
+        row = self._find_row(provider) if provider else None
+        if row is None:
+            row = self._find_row((default_provider(self._cfg) or {}).get("name", ""))
+        if row is None:
+            return {"error": "no API configured to ask"}
+        entry = normalize_provider(row)
+        models = self._fetch_models(entry["base_url"], cfg_provider_key(entry))
         if not models:
-            return {"error": "couldn't reach the provider to list its models"}
-        self._cfg.available_models = models
-        # The chat model may have been retired out from under us, which is the
-        # whole reason for asking. Move to something that exists rather than
-        # leaving a default that 404s on the next message.
-        if self._cfg.model not in models:
-            self._cfg.model = providers_mod.preferred_model(models, self._cfg.base_url)
-        if self._cfg.vision_model not in models:
-            self._cfg.vision_model = self._cfg.model
+            return {"error": f'couldn\'t reach {entry["name"]} to list its models'}
+        row["all_models"] = models
+        row["models"] = providers_mod.shortlist(models)
+        if entry["base_url"] == (self._cfg.base_url or "").rstrip("/"):
+            self._cfg.available_models = models
+        # The default model may have been retired out from under us, which is
+        # the whole reason for asking. Move to something that exists rather
+        # than leaving a default that 404s on the next message.
+        if self._cfg.default_provider == row.get("name") and \
+                self._cfg.model not in models:
+            self._cfg.model = providers_mod.preferred_model(models, entry["base_url"])
+        if self._cfg.vision_provider == row.get("name") and \
+                self._cfg.vision_model not in models:
+            self._cfg.vision_provider = ""     # back to automatic
+            self._cfg.vision_model = ""
         try:
             save_config(self._cfg)
         except Exception:
@@ -1011,7 +1038,12 @@ class Api:
         self._cfg.setup_done = True
         self._cfg.base_url = base_url
         self._cfg.model = model
-        self._cfg.vision_model = vision
+        # NOT set from the preset. `vision` is what setup would have written,
+        # and writing it made an automatic answer look like a decision -- one
+        # that then followed every chat to every other API. Left empty so it
+        # resolves per chat, unless someone chooses otherwise in Settings.
+        self._cfg.vision_model = ""
+        self._cfg.vision_provider = ""
         persisted = False
         if not needs_key and not api_key:
             # A keyless provider must not inherit the previous one's key.
@@ -1039,8 +1071,25 @@ class Api:
             self._cfg.available_models = live
             if self._cfg.model not in live:
                 self._cfg.model = providers_mod.preferred_model(live, base_url)
-            if self._cfg.vision_model not in live:
-                self._cfg.vision_model = self._cfg.model
+        # Setup adds a row to the list like everything else does. It used to
+        # write the loose fields above and stop, which is what made this one
+        # provider unlike every other -- uneditable, undeletable, and needing
+        # its own branch in every function that touched a provider.
+        row = self._find_row(providers_mod.preset(preset)["label"] if known
+                             else base_url)
+        entry = normalize_provider({
+            "name": (known or {}).get("label") or "",
+            "base_url": base_url, "preset": preset,
+            "api_key": self._cfg.api_key,
+            "models": [model] if model else [],
+            "all_models": list(live),
+        })
+        if row is None:
+            self._cfg.providers.append(entry)
+        else:
+            row.clear()
+            row.update(entry)
+        self._cfg.default_provider = entry["name"]
         try:
             save_config(self._cfg)
         except Exception:
@@ -1060,7 +1109,7 @@ class Api:
         # for this session" -- which reads as "you will have to do this again".
         return {"ok": True, "persisted": persisted, "reused": reused and not api_key,
                 "session": session, "sessions": sessions,
-                "provider": builtin_provider_name(self._cfg)}
+                "provider": (default_provider(self._cfg) or {}).get("name", "")}
 
     def save_api_key(self, key: str):
         key = (key or "").strip()
@@ -1404,6 +1453,7 @@ class Api:
         only while z.ai was the only thing this app could talk to.
         """
         out = []
+        used = usage_mod.today()
         for p in all_providers(self._cfg):
             models = p.get("models") or []
             # Where this provider's keys come from, so the key field can point
@@ -1413,7 +1463,6 @@ class Api:
             # allowance where one is known. A day's quota here is small enough
             # to run out mid-task (20/day for Gemini Flash), so it belongs
             # where the model is chosen rather than in a settings page.
-            used = usage_mod.today()
             quota = {}
             for m in (p.get("all_models") or models):
                 lim = providers_mod.free_limits(p["base_url"], m)
@@ -1426,95 +1475,223 @@ class Api:
                         # Everything the provider listed, when that is more
                         # than the shortlist shown by default.
                         "all_models": p.get("all_models") or models,
-                        "builtin": bool(p.get("builtin")),
+                        "preset": p.get("preset", ""),
+                        # Whether its key lives in an environment variable
+                        # rather than the config file. The form needs to know,
+                        # because that is the one field it cannot show back.
+                        "env_var": p.get("env_var", ""),
                         "local": providers_mod.is_local(p["base_url"]),
+                        "multimodal": providers_mod.is_multimodal(p["base_url"]),
                         "tier": providers_mod.model_tier(
                             p["base_url"], models[0] if models else ""),
                         "key_url": (known or {}).get("key_url", ""),
-                        "has_key": bool(p.get("api_key"))})
-        chat_provider = self.session_provider or builtin_provider_name(self._cfg)
-        chat_model = self.session_model or self._cfg.model
+                        "has_key": bool(cfg_provider_key(p))})
+        default = default_provider(self._cfg)
+        chat_provider = self.session_provider or (default or {}).get("name", "")
+        chat_model = self.session_model or cfg_default_model(self._cfg)
         chosen = find_provider(self._cfg, chat_provider)
+        vprov, vmodel = vision_target(self._cfg, chosen, chat_model)
         return {"providers": out,
                 "chat_provider": chat_provider,
                 "chat_model": chat_model,
+                # Which row new chats start on. Marked rather than positional:
+                # "the first one" was the old rule and it was invisible, which
+                # is how a list nobody could reorder ended up meaning something.
+                "default_provider": (default or {}).get("name", ""),
+                "default_model": cfg_default_model(self._cfg),
+                # The image reader, and whether it was chosen or worked out.
+                "vision_provider": vprov["name"] if vprov else "",
+                "vision_model": vmodel,
+                "vision_pinned": bool(self._cfg.vision_provider),
                 "chat_tier": providers_mod.model_tier(
                     (chosen or {}).get("base_url", ""), chat_model)}
+
+    def set_default_model(self, provider: str, model: str):
+        """Which model new chats start on."""
+        prov = find_provider(self._cfg, provider)
+        if prov is None:
+            return {"error": f'no API named "{provider}"'}
+        if model and model not in (prov.get("all_models") or []):
+            return {"error": f'{prov["name"]} does not list "{model}"'}
+        self._cfg.default_provider = prov["name"]
+        self._cfg.model = model or (prov.get("models") or [""])[0]
+        save_config(self._cfg)
+        return self.providers()
+
+    def set_vision_model(self, provider: str, model: str):
+        """Which model reads images. Empty provider means work it out per chat.
+
+        A setting at all because it was never one: the image model was whatever
+        setup happened to write, it belonged to the provider chosen there, and
+        a chat that moved elsewhere still had its images -- and then its whole
+        turn -- sent back to it.
+        """
+        if not provider:
+            self._cfg.vision_provider = ""
+            self._cfg.vision_model = ""
+            save_config(self._cfg)
+            return self.providers()
+        prov = find_provider(self._cfg, provider)
+        if prov is None:
+            return {"error": f'no API named "{provider}"'}
+        if model and model not in (prov.get("all_models") or []):
+            return {"error": f'{prov["name"]} does not list "{model}"'}
+        self._cfg.vision_provider = prov["name"]
+        self._cfg.vision_model = model or (prov.get("models") or [""])[0]
+        save_config(self._cfg)
+        # Live chats cache a vision client; drop it so the change takes now.
+        for cs in self._chats.values():
+            if cs.agent is not None:
+                cs.agent.vision_client = None
+        return self.providers()
 
     def add_provider(self, name: str, base_url: str, api_key: str, models: str):
         return self.save_provider("", name, base_url, api_key, models)
 
+    def _find_row(self, name: str) -> dict | None:
+        """The stored dict for a provider, by any name it has been known by.
+
+        The stored dict and not a normalized copy: this is the one edits are
+        written into.
+        """
+        resolved = find_provider(self._cfg, name)
+        if resolved is None:
+            return None
+        base = resolved.get("base_url", "")
+        for row in self._cfg.providers:
+            if row.get("name") == resolved["name"] or \
+                    (row.get("base_url") or "").rstrip("/") == base:
+                return row
+        return None
+
     def save_provider(self, original_name: str, name: str, base_url: str,
                       api_key: str, models: str):
-        """Add a new API or save edits to an existing one. `original_name`
+        """Add a new API, or save edits to any existing one. `original_name`
         is the row the form was opened from ("" = adding a new one).
 
-        Editing the provider chosen at setup only ever means one thing --
-        setting or replacing the API key -- and that key is persisted to that
-        provider's own environment variable (like first-run onboarding), not to
-        the custom provider list."""
+        One path for every row. The provider chosen at setup used to take a
+        different one that accepted nothing but a key -- so its name, its URL
+        and its model list were the only ones in the app that could not be
+        corrected, and the form silently discarded three of the four fields
+        someone had just filled in.
+        """
         original_name = (original_name or "").strip()
         name = (name or "").strip()
         api_key = (api_key or "").strip()
-        primary = builtin_provider_name(self._cfg)
-        # BUILTIN_PROVIDER_NAME as well as the current label: a config written
-        # before presets is still showing the old hardcoded name in the UI the
-        # form was opened from.
-        if primary in (original_name, name) \
-                or BUILTIN_PROVIDER_NAME in (original_name, name):
-            if not api_key:
-                where = providers_mod.preset(self._cfg.provider_preset)
-                return {"error": "paste your API key"
-                                 + (f" ({where['key_url']})" if where else "")}
-            persisted = persist_env_var(self._cfg.provider_env_var(), api_key)
-            self._cfg.api_key = api_key  # fallback source if setx failed
-            save_config(self._cfg)
-            self._client = None  # rebuild with the new key on next use
-            res = self.providers()
-            res["persisted_env"] = persisted
-            return res
         base_url = (base_url or "").strip().rstrip("/")
         model_list = [m.strip() for m in (models or "").split(",") if m.strip()]
+        existing = self._find_row(original_name) if original_name else None
+        if original_name and existing is None:
+            return {"error": f'no API named "{original_name}" to edit'}
+        # Editing keeps whatever the form did not send, so a row can be
+        # renamed without retyping its model list.
+        if existing is not None:
+            name = name or existing.get("name", "")
+            base_url = base_url or (existing.get("base_url") or "")
+            model_list = model_list or list(existing.get("models") or [])
         if not name or not base_url or not model_list:
             return {"error": "name, base URL and at least one model id are required"}
-        existing = None
-        if original_name:
-            existing = next((p for p in self._cfg.providers
-                             if p.get("name") == original_name), None)
-            if existing is None:
-                return {"error": f'no API named "{original_name}" to edit'}
-        clash = find_provider(self._cfg, name)
+        clash = self._find_row(name)
         if clash is not None and clash is not existing:
             return {"error": f'an API named "{name}" already exists'}
-        # Editing with the key field left empty keeps the stored key.
-        entry = {"name": name, "base_url": base_url,
-                 "api_key": api_key or (existing or {}).get("api_key", ""),
-                 "models": model_list}
+        entry = normalize_provider({
+            **(existing or {}),
+            "name": name, "base_url": base_url, "models": model_list,
+        })
+        # Everything the endpoint lists stays reachable, but it belongs to the
+        # URL: repointing a row at another provider must not leave the old
+        # provider's models behind it under "show all".
+        if existing is not None and (existing.get("base_url") or "").rstrip("/") != base_url:
+            entry["all_models"] = list(model_list)
+        persisted = None
+        if api_key:
+            # Into the provider's own environment variable when it has one --
+            # the same place onboarding writes, so a key set here survives
+            # deleting the config folder exactly as one set at setup does.
+            if entry.get("env_var"):
+                persisted = persist_env_var(entry["env_var"], api_key)
+                # Kept as the fallback for a machine where writing the
+                # environment is blocked by policy.
+                entry["api_key"] = api_key
+                if entry["base_url"] == (self._cfg.base_url or "").rstrip("/"):
+                    self._cfg.api_key = api_key
+            else:
+                entry["api_key"] = api_key
         if existing is None:
             self._cfg.providers.append(entry)
         else:
+            existing.clear()
             existing.update(entry)
-            if original_name != name:  # chats pointing at the old name follow
+            if original_name != name:
+                # Chats and the two pointers follow the rename rather than
+                # silently falling back to something else.
                 for cs in self._chats.values():
                     if cs.provider == original_name:
                         cs.provider = name
+                if self._cfg.default_provider == original_name:
+                    self._cfg.default_provider = name
+                if self._cfg.vision_provider == original_name:
+                    self._cfg.vision_provider = name
         save_config(self._cfg)
+        self._client = None       # rebuild with the new url/key on next use
         # The active chat picks up new url/key/models immediately; background
         # and reopened chats re-apply their provider on activation anyway.
-        if self.session_provider == name and self._agent and not self._agent.busy:
+        if self.session_provider in (name, original_name) and self._agent \
+                and not self._agent.busy:
             keep = self.session_model if self.session_model in model_list else ""
             self._apply_chat_model(self._agent, name, keep)
             self._save_current()
-        return self.providers()
+        res = self.providers()
+        if persisted is not None:
+            res["persisted_env"] = persisted
+        return res
 
     def delete_provider(self, name: str):
-        self._cfg.providers = [p for p in self._cfg.providers
-                               if p.get("name") != name]
+        """Remove an API. Any API -- there is no undeletable one.
+
+        There used to be, and not on purpose: the row created at setup lived
+        outside cfg.providers, so the filter below could not see it and the UI
+        drew no delete button for it. Nothing about it was more permanent than
+        any other row; it was just stored somewhere the delete could not reach.
+        """
+        row = self._find_row(name)
+        if row is None:
+            return {"error": f'no API named "{name}"'}
+        gone = row.get("name", name)
+        base = (row.get("base_url") or "").rstrip("/")
+        self._cfg.providers = [p for p in self._cfg.providers if p is not row]
+        # The legacy fields describe this same endpoint, and leaving them would
+        # have __post_init__ helpfully put the row back on the next launch.
+        if base and base == (self._cfg.base_url or "").rstrip("/"):
+            self._cfg.base_url = ""
+            self._cfg.provider_preset = ""
+            self._cfg.api_key = ""
+            self._cfg.available_models = []
+        if self._cfg.vision_provider == gone:
+            self._cfg.vision_provider = ""
+            self._cfg.vision_model = ""
+        if self._cfg.default_provider == gone:
+            nxt = (self._cfg.providers or [None])[0]
+            self._cfg.default_provider = (nxt or {}).get("name", "")
+            self._cfg.model = ((nxt or {}).get("models") or [""])[0]
+        if not self._cfg.providers:
+            # Nothing left to talk to. Say so by sending the app back to the
+            # screen for it, rather than leaving a chat window that fails on
+            # every message.
+            self._cfg.setup_done = False
         save_config(self._cfg)
-        if self.session_provider == name and self._agent:
-            self._apply_chat_model(self._agent, "", "")  # back to the default
+        self._client = None
+        for cs in self._chats.values():
+            if cs.provider == gone:
+                cs.provider = ""
+                cs.model = ""
+                if cs.agent is not None and not cs.agent.busy:
+                    self._apply_chat_model(cs.agent, "", "")
+        if self.session_provider == gone and self._agent:
             self._save_current()
-        return self.providers()
+        res = self.providers()
+        res["needsKey"] = not self._cfg.providers
+        return res
 
     # -- custom slash commands --------------------------------------------- #
 
@@ -1631,12 +1808,19 @@ class Api:
                 continue
             if not models:
                 continue
-            existing = find_provider(self._cfg, name)
-            if existing and not existing.get("builtin"):
-                existing["models"] = models  # refresh the model list
+            # Matched on the URL, not the name: a local server already set up
+            # through the Ollama preset is called "Ollama (on this PC)" and
+            # would otherwise be added a second time under a different label.
+            row = next((p for p in self._cfg.providers
+                        if (p.get("base_url") or "").rstrip("/") == base_url), None)
+            if row is not None:
+                row["models"] = models
+                row["all_models"] = models
             else:
-                self._cfg.providers.append({"name": name, "base_url": base_url,
-                                            "api_key": "local", "models": models})
+                self._cfg.providers.append(normalize_provider(
+                    {"name": name, "base_url": base_url,
+                     "api_key": "local", "models": models,
+                     "all_models": models}))
             added.append(f"{name} ({len(models)} models)")
         if added:
             save_config(self._cfg)
@@ -1651,48 +1835,45 @@ class Api:
             return {"error": "no active chat"}
         if self._agent.busy:
             return {"error": "can't switch models while the agent is working"}
-        if provider_name != builtin_provider_name(self._cfg) \
-                and provider_name != BUILTIN_PROVIDER_NAME \
-                and not find_provider(self._cfg, provider_name):
+        if provider_name and not find_provider(self._cfg, provider_name):
             return {"error": f'unknown provider "{provider_name}"'}
         self._apply_chat_model(self._agent, provider_name, model)
         self._save_current()
         return self.providers()
 
     def _apply_chat_model(self, agent: Agent, provider_name: str, model: str) -> None:
-        """Point an agent at the chat's chosen provider+model. Empty/unknown
-        provider falls back to the built-in free default."""
+        """Point an agent at the chat's chosen provider+model.
+
+        One path, because there is one kind of provider now. It used to fork on
+        `builtin`, and the two halves disagreed: the builtin half discarded any
+        model equal to cfg.model (so picking the default back looked like it
+        did nothing), and the custom half pinned `vision_client` at the setup
+        provider -- which is how a chat moved to z.ai kept reading its images,
+        and then answering, on Gemini.
+        """
         prov = find_provider(self._cfg, provider_name) if provider_name else None
-        if prov is None or prov.get("builtin"):
-            self.session_provider = ""
-            # A model picked from the built-in provider's OWN list is a real
-            # choice, not "back to the default". This threw it away and reset
-            # to cfg.model, so selecting any other model on that row appeared
-            # to do nothing -- you clicked Pro and got Flash back. Harmless
-            # while that row held exactly one model; wrong as soon as a preset
-            # offered alternatives.
-            self.session_model = "" if (not model or model == self._cfg.model) else model
-            agent.model_override = self.session_model or None
-            agent.vision_client = None
-            # Point back at the built-in client too (the agent may have been
-            # switched to a custom endpoint earlier in this chat).
-            builtin_client = self._ensure_client()
-            if builtin_client is not None:
-                agent.client = builtin_client
-            # The prompt names the model, so it has to be rebuilt when the
-            # model changes. Without this the switch takes effect on the wire
-            # and not in the prompt, and the two disagree for the rest of the
-            # chat.
-            agent.rebuild_system_prompt()
-            return
+        if prov is None:
+            prov = default_provider(self._cfg)
+            model = model or cfg_default_model(self._cfg)
+        if prov is None:
+            return                      # nothing configured; setup will run
+        # Worked out locally and then stored, rather than stored and read back.
+        # session_model writes through to the active chat and silently does
+        # nothing when there isn't one -- so reading it back handed the agent
+        # None, and the chat kept answering on the model it was already using.
+        chosen = model or (prov.get("models") or [""])[0]
         self.session_provider = prov["name"]
-        self.session_model = model or (prov.get("models") or [""])[0]
-        agent.client = ZaiClient(prov.get("api_key", ""), prov["base_url"])
-        agent.model_override = self.session_model or None
-        # Vision keeps working through the built-in provider.
-        zai_key = self._cfg.resolve_api_key()
-        agent.vision_client = ZaiClient(zai_key, self._cfg.base_url) if zai_key else None
-        agent.rebuild_system_prompt()   # see above: the prompt names the model
+        self.session_model = chosen
+        agent.client = ZaiClient(cfg_provider_key(prov), prov["base_url"])
+        agent.model_override = chosen or None
+        # Dropped, not pointed anywhere: the agent resolves the image model
+        # from the chat's own provider now (Agent._vision_client_and_model),
+        # and a stale client here would outrank it.
+        agent.vision_client = None
+        # The prompt names the model, so it has to be rebuilt when the model
+        # changes. Without this the switch takes effect on the wire and not in
+        # the prompt, and the two disagree for the rest of the chat.
+        agent.rebuild_system_prompt()
 
     def _activate_session(self, sid: str, messages: list, cwd: str,
                           prompt_tokens: int, completion_tokens: int,
@@ -2204,10 +2385,11 @@ class Api:
         token_gh = self._gh_token() or ""
         passphrase = syncstore.load_passphrase() or ""
         phone_providers = pairing.providers_for_phone(all_providers(self._cfg))
+        default = default_provider(self._cfg) or {}
         payload = pairing.build_payload(
-            model_key=self._cfg.resolve_api_key(),
-            base_url=self._cfg.base_url,
-            model=self._cfg.model,
+            model_key=cfg_provider_key(default),
+            base_url=default.get("base_url", ""),
+            model=cfg_default_model(self._cfg),
             github_token=token_gh,
             sync_passphrase=passphrase,
             providers=phone_providers,
@@ -2223,7 +2405,7 @@ class Api:
         except Exception as e:
             return {"error": f"Couldn't build the pairing code: {e}"}
         return {"code": code, "svg": svg, "ttl": pairing.PAIR_TTL_SECONDS,
-                "includes": {"model_key": bool(self._cfg.resolve_api_key()),
+                "includes": {"model_key": bool(cfg_provider_key(default)),
                              "github": bool(token_gh), "sync": bool(passphrase),
                              "providers": len(phone_providers)}}
 
@@ -3012,7 +3194,7 @@ class Api:
             return ""
         try:
             res = client.chat(
-                model=self._cfg.model,
+                model=cfg_default_model(self._cfg),
                 messages=[{"role": "user",
                            "content": TITLE_PROMPT.format(message=first_message[:2000])}],
                 tools=None, temperature=0.3, max_tokens=24, thinking=False,
