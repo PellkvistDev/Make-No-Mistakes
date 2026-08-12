@@ -33,7 +33,13 @@
   const SCREENS = ["screen-setup", "screen-unlock", "screen-repo", "screen-chats", "screen-chat"];
   function show(id) {
     for (const s of SCREENS) $(s).hidden = s !== id;
-    if (id === "screen-chat") requestAnimationFrame(fitMessages);
+    if (id === "screen-chat") {
+      requestAnimationFrame(fitMessages);
+      // Here rather than only when Settings opens: whether talking is possible
+      // depends on which APIs are configured, and pairing can add one at any
+      // time -- including on the launch that first reaches this screen.
+      refreshVoiceButton();
+    }
   }
   // Pad the scroll area so content clears the (overlaid) top bar and bottom dock,
   // which vary with the safe areas, the growing textarea, and attachment chips.
@@ -1203,6 +1209,25 @@
   }
 
   $("btn-attach").addEventListener("click", openFilePicker);
+  // Started from a tap, and it has to stay that way: iOS will not let a page
+  // open the microphone or resume an AudioContext outside a user gesture, so
+  // the whole session is set up inside this handler.
+  $("btn-voice").addEventListener("click", startVoice);
+  $("voice-end").addEventListener("click", stopVoice);
+  $("voice-mute").addEventListener("click", () => {
+    voice.muted = !voice.muted;
+    $("voice-mute").setAttribute("aria-pressed", String(voice.muted));
+    $("voice-mute").textContent = voice.muted ? "Unmute" : "Mute";
+    // Tells the server to flush what it is holding rather than wait for more.
+    if (voice.muted) voiceSend(AC.liveAudioStreamEnd());
+    voiceSetStatus(voice.muted ? "Muted — it can't hear you." : "Listening — just talk.");
+  });
+  // The app being backgrounded ends the session, because iOS ends it anyway:
+  // web content gets no background execution, so the socket dies under us and
+  // the only choice is whether that looks deliberate. See CLAUDE.md.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && voice.on) stopVoice();
+  });
   $("filepick-done").addEventListener("click", () => { $("filepick-backdrop").hidden = true; });
   $("filepick-backdrop").addEventListener("click", (e) => { if (e.target === $("filepick-backdrop")) $("filepick-backdrop").hidden = true; });
   $("filepick-search").addEventListener("input", renderFileList);
@@ -2503,6 +2528,10 @@
    * paired providers so the phone offers what the desktop has, rather than a
    * base URL typed into a phone and a model name spelled from memory. */
   function renderProviderPicker() {
+    // Whether talking is possible depends on which APIs are configured, and
+    // pairing can add one at any time -- so the button is re-checked wherever
+    // the provider list is drawn rather than only at startup.
+    refreshVoiceButton();
     const list = getProviders();
     const block = $("set-provider-block");
     if (!block) return;
@@ -2866,4 +2895,277 @@
     await consumePairLink();
   }
   boot();
+  /* ===================== TALKING TO IT =============================== *
+   *
+   * The phone is the device where typing is worst and talking is most
+   * obvious, and until now it was the one device with no voice at all.
+   *
+   * The Live API fits this app's hardest constraint exactly: the session is a
+   * WebSocket opened by this page, so there is still no backend -- the same
+   * reason the whole app is Path A. What it does NOT do is change what the
+   * phone can do while closed. iOS gives web content no background execution,
+   * so a live session dies with the app exactly as a turn does; the sheet says
+   * so rather than letting you find out.
+   *
+   * Tools run here, against the same GitHub-as-filesystem the typed agent
+   * uses -- so it can actually read the repo and answer from it. Anything
+   * needing a shell goes to needs_desktop, which is already how this app moves
+   * work to a real machine.
+   */
+  const voice = {
+    ws: null, ctx: null, node: null, stream: null, on: false,
+    playAt: 0, sources: [], handle: "", closing: false, tries: 0,
+    said: "", heard: "", muted: false,
+  };
+  const VOICE_MAX_TRIES = 5;
+  // The tools a spoken session gets: everything that reads, plus the one that
+  // moves work to the desktop. Deliberately not the writing tools -- a commit
+  // you cannot see the diff of, triggered by a sentence that might have been
+  // misheard, is not something to do hands-free.
+  const VOICE_TOOL_NAMES = ["list_dir", "glob", "read_file", "grep",
+                            "search_code", "needs_desktop"];
+
+  function voiceSchemas() {
+    return [...AC.TOOL_SCHEMAS, AC.NEEDS_DESKTOP_SCHEMA]
+      .filter((t) => VOICE_TOOL_NAMES.includes(t.function.name));
+  }
+
+  function voiceLiveKey() {
+    // Only a provider that actually serves the live model. The phone can hold
+    // several APIs since pairing started syncing them, and most of them do not
+    // speak this protocol at all.
+    const list = getProviders().filter((p) => AC.normalizeBase(p.baseUrl || "")
+      .includes("generativelanguage.googleapis.com"));
+    const p = list.find((x) => x.key) || null;
+    return p ? p.key : "";
+  }
+
+  function voiceAvailable() {
+    return !!(voiceLiveKey() && window.WebSocket && navigator.mediaDevices
+      && (window.AudioContext || window.webkitAudioContext));
+  }
+
+  function voiceSend(obj) {
+    if (voice.ws && voice.ws.readyState === WebSocket.OPEN) voice.ws.send(JSON.stringify(obj));
+  }
+
+  function voiceSetStatus(t) { $("voice-status").textContent = t; }
+  function voiceSetOrb(state) { $("voice-orb").className = "voice-orb " + state; }
+
+  function voiceStopPlayback() {
+    for (const s of voice.sources) { try { s.stop(); } catch (e) { /* ended */ } }
+    voice.sources = [];
+    voice.playAt = 0;
+  }
+
+  function voicePlay(bytes) {
+    const ctx = voice.ctx;
+    if (!ctx) return;
+    const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+    const buf = ctx.createBuffer(1, pcm.length, AC.LIVE_OUTPUT_RATE);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    // Scheduled end to end rather than played on arrival: chunks land in
+    // bursts, and starting each one "now" overlaps them into noise.
+    voice.playAt = Math.max(voice.playAt, ctx.currentTime + 0.06);
+    src.start(voice.playAt);
+    voice.playAt += buf.duration;
+    voice.sources.push(src);
+    src.onended = () => {
+      voice.sources = voice.sources.filter((x) => x !== src);
+      if (!voice.sources.length && voice.on) voiceSetOrb("idle");
+    };
+  }
+
+  async function voiceRunTools(calls) {
+    // Answered as a batch: the model is blocked on all of them at once.
+    const out = await Promise.all((calls || []).map(async (c) => {
+      let output;
+      try {
+        output = await voiceCallTool(c.name, c.args || {});
+      } catch (e) {
+        // Reported, not thrown: the model is stopped waiting for this, so a
+        // failure has to come back as something it can talk about.
+        output = "ERROR: " + (e && e.message ? e.message : String(e));
+      }
+      return { id: c.id, name: c.name, output: String(output == null ? "" : output) };
+    }));
+    voiceSend(AC.liveToolResponse(out));
+  }
+
+  async function voiceCallTool(name, args) {
+    if (name === "needs_desktop") return needsDesktop(args.task || "", args.why || "");
+    const t = session.tools;
+    if (!t) return "ERROR: this chat is not open.";
+    const fn = t[name];
+    if (typeof fn !== "function") return "ERROR: no tool named " + name;
+    return fn(args);
+  }
+
+  function voiceOnMessage(payload) {
+    if (payload.toolCall) voiceRunTools(payload.toolCall.functionCalls);
+    if (payload.sessionResumptionUpdate && payload.sessionResumptionUpdate.resumable) {
+      voice.handle = payload.sessionResumptionUpdate.newHandle || voice.handle;
+    }
+    // Sent BEFORE the connection ends, which is the only warning there is.
+    if (payload.goAway) { voiceReconnect(); return; }
+    const sc = payload.serverContent;
+    if (!sc) return;
+    if (sc.interrupted) voiceStopPlayback();
+    if (sc.inputTranscription && sc.inputTranscription.text) {
+      voice.heard += sc.inputTranscription.text;
+      $("voice-caption").textContent = voice.heard;
+    }
+    if (sc.outputTranscription && sc.outputTranscription.text) {
+      voice.said += sc.outputTranscription.text;
+      $("voice-caption").textContent = voice.said;
+    }
+    // One event can carry several parts at once, so every part is looked at.
+    for (const part of (sc.modelTurn && sc.modelTurn.parts) || []) {
+      const d = part.inlineData;
+      if (d && d.data && String(d.mimeType || "").startsWith("audio/")) {
+        voiceSetOrb("speaking");
+        voicePlay(AC.liveBytes(d.data));
+      }
+    }
+    if (sc.turnComplete) {
+      const heard = voice.heard.trim();
+      const said = voice.said.trim();
+      voice.heard = voice.said = "";
+      if (heard || said) voiceRecordTurn(heard, said);
+      voiceSetOrb("idle");
+    }
+  }
+
+  function voiceRecordTurn(heard, said) {
+    // Into the same conversation the typed agent uses, so a spoken exchange
+    // scrolls back with everything else and syncs to the desktop like any
+    // other turn. The model holds the conversation on its own side, so
+    // nothing lands here unless it is put here.
+    if (!session || !session.messages) return;
+    if (heard) {
+      session.messages.push({ role: "user", content: heard });
+      addBubble("user", heard);
+    }
+    if (said) {
+      session.messages.push({ role: "assistant", content: said });
+      addBubble("assistant", said);
+    }
+    syncSave().catch(() => {});
+  }
+
+  async function voiceReconnect() {
+    if (voice.closing || !voice.on) return;
+    if (voice.tries >= VOICE_MAX_TRIES) {
+      voiceSetStatus("Kept losing the connection.");
+      setTimeout(stopVoice, 1500);
+      return;
+    }
+    voice.tries += 1;
+    try { voice.ws.close(); } catch (e) { /* already gone */ }
+    await voiceOpen();
+  }
+
+  function voiceOpen() {
+    const key = voiceLiveKey();
+    if (!key) return Promise.resolve(false);
+    const setup = AC.liveSetup(AC.LIVE_MODEL, AC.LIVE_VOICE_PROMPT, voiceSchemas(),
+      { resumeHandle: voice.handle });
+    return new Promise((resolve) => {
+      let ws;
+      try { ws = new WebSocket(AC.liveWsUrl(key)); } catch (e) { resolve(false); return; }
+      voice.ws = ws;
+      ws.onopen = () => { ws.send(JSON.stringify(setup)); resolve(true); };
+      ws.onmessage = async (ev) => {
+        let text = ev.data;
+        if (text instanceof Blob) text = await text.text();
+        else if (text instanceof ArrayBuffer) text = new TextDecoder().decode(text);
+        let payload;
+        try { payload = JSON.parse(text); } catch (e) { return; }
+        try { voiceOnMessage(payload); } catch (e) { /* one bad frame is not the session */ }
+      };
+      ws.onclose = () => { if (!voice.closing && voice.on) voiceReconnect(); };
+    });
+  }
+
+  async function startVoice() {
+    if (voice.on) return;
+    if (!voiceAvailable()) {
+      toast("Voice needs a Google AI Studio key — pair with your computer or add one in Settings.");
+      return;
+    }
+    voice.on = true;
+    voice.closing = false;
+    voice.tries = 0;
+    voice.handle = "";
+    voice.said = voice.heard = "";
+    voice.muted = false;
+    $("voice-backdrop").hidden = false;
+    voiceSetStatus("Connecting…");
+    voiceSetOrb("thinking");
+    try {
+      voice.stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (e) {
+      voiceSetStatus("Microphone access is needed.");
+      setTimeout(stopVoice, 1800);
+      return;
+    }
+    if (!(await voiceOpen())) { voiceSetStatus("Couldn't connect."); setTimeout(stopVoice, 1800); return; }
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    voice.ctx = new Ctx();
+    // iOS starts every context suspended until a user gesture resumes it, and
+    // this runs inside the tap that opened the sheet -- so it is the one
+    // moment resume() is allowed to work.
+    try { await voice.ctx.resume(); } catch (e) { /* older WebKit */ }
+    const src = voice.ctx.createMediaStreamSource(voice.stream);
+    const rate = voice.ctx.sampleRate;
+    // ScriptProcessor rather than an AudioWorklet: a worklet is loaded from a
+    // separate module URL, and this page runs under a CSP with script-src
+    // 'self' and no bundler. Deprecated, universally supported, and the work
+    // per block is one downsample.
+    const node = voice.ctx.createScriptProcessor(4096, 1, 1);
+    node.onaudioprocess = (e) => {
+      if (!voice.on || voice.muted) return;
+      voiceSend(AC.liveAudioChunk(AC.liveB64(
+        AC.livePcm16(e.inputBuffer.getChannelData(0), rate))));
+    };
+    src.connect(node);
+    // Into a silent gain node: a ScriptProcessor only runs while connected to
+    // something, and connecting it to the speakers plays the mic back into the
+    // room -- which on a phone is immediate feedback howl.
+    const sink = voice.ctx.createGain();
+    sink.gain.value = 0;
+    node.connect(sink);
+    sink.connect(voice.ctx.destination);
+    voice.node = node;
+    voiceSetStatus("Listening — just talk.");
+    voiceSetOrb("idle");
+  }
+
+  function stopVoice() {
+    if (!voice.on && !voice.stream) return;
+    voice.on = false;
+    voice.closing = true;
+    voiceStopPlayback();
+    // Flushes what the server is still holding. Without it the tail of the
+    // last sentence is simply lost.
+    try { voiceSend(AC.liveAudioStreamEnd()); } catch (e) { /* closed */ }
+    try { if (voice.node) voice.node.disconnect(); } catch (e) { /* ignore */ }
+    try { if (voice.ws) voice.ws.close(); } catch (e) { /* ignore */ }
+    if (voice.stream) { voice.stream.getTracks().forEach((t) => t.stop()); voice.stream = null; }
+    if (voice.ctx) { try { voice.ctx.close(); } catch (e) { /* ignore */ } }
+    voice.ws = voice.ctx = voice.node = null;
+    $("voice-backdrop").hidden = true;
+  }
+
+  function refreshVoiceButton() {
+    const b = $("btn-voice");
+    if (b) b.hidden = !voiceAvailable();
+  }
+
 })();

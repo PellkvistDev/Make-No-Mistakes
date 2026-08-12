@@ -65,6 +65,14 @@ there isn't one. The only real answer for work that must continue while the app
 is closed is to run it somewhere else — the desktop, via the handoff in
 `session.pending`.
 
+Speech-to-speech does not change this and must not be described as if it
+does. A Live session is a WebSocket opened by the page, so it is subject to
+exactly the same suspension: iOS freezes the tab, the socket dies, and the
+session is over. The phone ends it deliberately on `visibilitychange` rather
+than letting it die silently — that is the whole of the difference. Work that
+must continue while the app is closed still goes to the desktop, through
+`session.pending`.
+
 What *is* done, in `withRun`:
 
 - A screen wake lock is held for the duration of a turn, so the phone does not
@@ -114,6 +122,13 @@ impossible, so do not remove any of it as redundant.
   `True` standing and the chat would be picked up forever.
 - **The phone awaits `refreshOpenChatFromSync` before resuming.** Otherwise it
   redoes a turn the desktop already finished.
+
+The same rule now covers the Live session builder: `glmcode/live.py` and the
+`live*` functions in `mobile/agent-core.js` must produce byte-identical setup
+messages for the same inputs. Both devices open their own socket to the same
+model with the same tools, so a difference is not cosmetic — it is one device
+offering the model a tool the other cannot run. `tests/test_live.py` pins them
+against each other by driving the phone's copy under Node.
 
 `heal_interrupted_turn` exists in both `glmcode/syncstore.py` and
 `mobile/agent-core.js` and the two must stay in step: each end adopts the

@@ -7,6 +7,10 @@ microphone and listen", which is how the iOS keyboard work in this repo ended
 up costing a round trip to a real phone per guess.
 """
 
+import json
+import pathlib
+import shutil
+import subprocess
 import sys
 import types
 
@@ -274,3 +278,100 @@ def test_a_spoken_exchange_is_written_back_into_the_conversation():
         {"role": "assistant", "content": "the login test"},
     ]
     assert persisted == ["what's failing?"]
+
+
+# --------------------------------------------------------------------- #
+# The phone builds the same session.
+#
+# Both devices open their own socket to the same model with the same tools, so
+# a difference here is not cosmetic: it is one device offering the model a tool
+# the other does not, or asking for transcription the other omits. The same
+# rule already holds for heal_interrupted_turn, and for the same reason -- a
+# chat moves between these two.
+
+_CORE_JS = pathlib.Path(__file__).resolve().parent.parent / "mobile" / "agent-core.js"
+needs_node = pytest.mark.skipif(
+    not (shutil.which("node") and _CORE_JS.is_file()),
+    reason="node or mobile/agent-core.js unavailable")
+
+
+def _phone(expr, *args):
+    out = subprocess.run(
+        ["node", "-e",
+         "const C=require(process.argv[1]);"
+         "const a=JSON.parse(process.argv[2]);"
+         f"console.log(JSON.stringify({expr}));",
+         str(_CORE_JS), json.dumps(list(args))],
+        capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+@needs_node
+def test_the_phone_and_the_desktop_open_the_same_session():
+    desktop = live.setup_message("m", "be helpful", CONVERSATIONAL_SCHEMAS,
+                                 voice="Puck", language="en-US")
+    phone = _phone("C.liveSetup(a[0], a[1], a[2], {voice: a[3], language: a[4]})",
+                   "m", "be helpful", CONVERSATIONAL_SCHEMAS, "Puck", "en-US")
+    assert phone == desktop
+
+
+@needs_node
+def test_the_two_agree_about_resuming_a_session():
+    assert _phone("C.liveSetup('m', 'p', [], {resumeHandle: a[0]})", "h-1") \
+        == live.setup_message("m", "p", [], resume_handle="h-1")
+
+
+@needs_node
+def test_the_two_trim_tool_schemas_identically():
+    """The trim is the part with the most room to drift, and the failure it
+    causes is the least obvious: a session that never opens."""
+    schemas = [{"type": "function", "function": {
+        "name": "t", "description": "d",
+        "parameters": {"type": "object", "additionalProperties": False,
+                       "properties": {
+                           "a": {"type": "string", "title": "A"},
+                           "rows": {"type": "array", "minItems": 1,
+                                    "items": {"type": "object", "properties": {
+                                        "x": {"type": "string", "default": "no"}}}}},
+                       "required": ["a"]}}}]
+    assert _phone("C.liveFunctionDeclarations(a[0])", schemas) \
+        == live.function_declarations(schemas)
+
+
+@needs_node
+def test_the_two_send_the_same_frames():
+    assert _phone("C.liveToolResponse(a[0])",
+                  [{"id": "c1", "name": "n", "output": "o"}]) \
+        == live.tool_response([{"id": "c1", "name": "n", "output": "o"}])
+    assert _phone("C.liveTextTurn(a[0])", "hi") == live.text_turn("hi")
+    assert _phone("C.liveAudioChunk(a[0])", "AAAA") == live.audio_chunk("AAAA")
+    assert _phone("C.liveAudioStreamEnd()") == live.audio_stream_end()
+
+
+@needs_node
+def test_the_two_agree_on_the_model_and_the_two_rates():
+    got = _phone("[C.LIVE_MODEL, C.LIVE_INPUT_RATE, C.LIVE_OUTPUT_RATE, C.liveWsUrl('k')]")
+    assert got[0] == providers.preset("google")["live_model"]
+    assert got[1:3] == [live.INPUT_SAMPLE_RATE, live.OUTPUT_SAMPLE_RATE]
+    assert got[3] == live.ws_url("k")
+
+
+@needs_node
+def test_the_phone_resamples_and_clips_the_same_way():
+    """Checked here rather than only in the browser: it is arithmetic, it is
+    wrong silently, and a phone mic commonly runs at 48k."""
+    assert _phone("C.livePcm16(new Float32Array(48000), 48000).byteLength") == 32000
+    assert _phone("[...new Int16Array(C.livePcm16(new Float32Array([1,-1,0]), 16000).buffer)]") \
+        == [32767, -32768, 0]
+
+
+@needs_node
+def test_the_phone_speaks_rather_than_writes():
+    """The coding prompt asks for paths, code blocks and diffs. None of that
+    survives being read out loud on a phone."""
+    p = _phone("C.LIVE_VOICE_PROMPT")
+    assert "out loud" in p
+    assert "needs_desktop" in p, "the phone has no shell; that has to be said"
+    for written in ("markdown", "code block"):
+        assert written in p.lower()

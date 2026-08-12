@@ -19,7 +19,11 @@
       connect-src             — network is pinned to exactly the model API + GitHub.
                                 A key-stealer would have nowhere to send anything.
       No 'unsafe-inline' for scripts, no 'unsafe-eval'.
-    Keep connect-src in lockstep with the two hosts the app actually talks to.
+    Keep connect-src in lockstep with the hosts the app actually talks to.
+    The wss: entry is the speech-to-speech socket and is NOT covered by the
+    https: one -- connect-src matches on scheme, so a WebSocket to a host
+    already allowed over https is still blocked, and the failure arrives as
+    a bare console error with no request in the network tab.
   -->
   <meta http-equiv="Content-Security-Policy" content="
     default-src 'none';
@@ -28,7 +32,9 @@
     img-src 'self' data:;
     font-src 'self';
     manifest-src 'self';
-    connect-src https://api.github.com https://api.z.ai https://open.bigmodel.cn;
+    connect-src https://api.github.com https://api.z.ai https://open.bigmodel.cn
+                https://generativelanguage.googleapis.com
+                wss://generativelanguage.googleapis.com;
     base-uri 'none';
     form-action 'none';
     frame-ancestors 'none';
@@ -229,11 +235,29 @@
                So: keep the real form control, which is better at dictation,
                VoiceOver, undo and autocorrect, and leave the 44px spent. -->
           <textarea id="in-prompt" rows="1" placeholder="Message the agent…" autocomplete="off"></textarea>
+          <button id="btn-voice" class="attach-btn voice-btn" type="button"
+                  title="Talk to it" aria-label="Talk to it" hidden>🎙</button>
           <button id="btn-send" class="send" type="submit" title="Send">▲</button>
           <button id="btn-stop" class="send stop" type="button" title="Stop" hidden>■</button>
         </form>
       </div>
     </section>
+
+    <!-- ===================== VOICE ===================== -->
+    <!-- Foreground only, and it says so. iOS gives web content no background
+         execution, so a live session ends when the app does -- exactly like a
+         turn does today. See CLAUDE.md; there is no web API for this. -->
+    <div id="voice-backdrop" class="voice-backdrop" hidden>
+      <div class="voice-sheet">
+        <div id="voice-orb" class="voice-orb"></div>
+        <div id="voice-status" class="voice-status">Connecting…</div>
+        <div id="voice-caption" class="voice-caption"></div>
+        <div class="voice-actions">
+          <button id="voice-mute" class="btn" type="button" aria-pressed="false">Mute</button>
+          <button id="voice-end" class="btn btn-danger" type="button">End</button>
+        </div>
+      </div>
+    </div>
 
     <!-- ===================== PAIRING SCANNER ===================== -->
     <div id="scan-backdrop" class="scan-backdrop" hidden>

@@ -1152,6 +1152,155 @@
     return String(url || "").trim().replace(/\/+$/, "").toLowerCase();
   }
 
+
+  // --- speech to speech (Gemini Live) --------------------------------------
+  //
+  // The phone has no voice mode at all today, and it is the device where
+  // talking is the obvious way in: a keyboard on a phone is the worst part of
+  // using this app from one. The Live API fits the phone's hardest constraint
+  // exactly -- it is a WebSocket opened by the page, so there is no backend to
+  // run, which is the same reason this whole app is Path A.
+  //
+  // It does NOT change what the phone can do in the background. A live session
+  // is a foreground session; iOS suspends the tab and the socket dies with it,
+  // the same way a turn does today. Nothing here pretends otherwise.
+  //
+  // This mirrors glmcode/live.py and the two MUST stay in step: a phone and a
+  // desktop pointed at the same model with the same tools should open the same
+  // session, and a difference here would show up as one device mishearing
+  // tools the other handles. tests/test_live.py pins them against each other.
+  const LIVE_WS = "wss://generativelanguage.googleapis.com/ws/"
+    + "google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent";
+  const LIVE_MODEL = "gemini-3.1-flash-live-preview";
+  // Fixed by the API, and different in each direction. Swapping them is a
+  // chipmunk one way and a drawl the other.
+  const LIVE_INPUT_RATE = 16000;
+  const LIVE_OUTPUT_RATE = 24000;
+  // Everything the JSON Schema subset Gemini accepts does NOT include. A stray
+  // key is not ignored: the setup is rejected and no session opens, which from
+  // the outside looks exactly like a bad API key.
+  const LIVE_SCHEMA_KEYS = ["type", "description", "enum", "items",
+                            "properties", "required", "nullable", "format"];
+
+  function liveWsUrl(apiKey) { return LIVE_WS + "?key=" + apiKey; }
+
+  function liveCleanSchema(node) {
+    if (!node || typeof node !== "object" || Array.isArray(node)) return node;
+    const out = {};
+    for (const k of LIVE_SCHEMA_KEYS) {
+      if (!(k in node)) continue;
+      if (k === "properties" && node[k] && typeof node[k] === "object") {
+        out[k] = {};
+        for (const [name, sub] of Object.entries(node[k])) out[k][name] = liveCleanSchema(sub);
+      } else if (k === "items") {
+        out[k] = liveCleanSchema(node[k]);
+      } else {
+        out[k] = JSON.parse(JSON.stringify(node[k]));
+      }
+    }
+    // An object with no properties is rejected outright, and a function that
+    // takes no arguments is an ordinary thing to want.
+    if (out.type === "object" && !(out.properties && Object.keys(out.properties).length)) return {};
+    return out;
+  }
+
+  function liveFunctionDeclarations(schemas) {
+    const out = [];
+    for (const s of schemas || []) {
+      const fn = s && s.type === "function" ? s.function : s;
+      if (!fn || !fn.name) continue;
+      const decl = { name: fn.name, description: fn.description || "" };
+      const params = liveCleanSchema(fn.parameters || {});
+      if (params && Object.keys(params).length) decl.parameters = params;
+      out.push(decl);
+    }
+    return out;
+  }
+
+  function liveSetup(model, systemPrompt, schemas, opts) {
+    opts = opts || {};
+    const gen = {
+      responseModalities: ["AUDIO"],
+      // Asked for explicitly. A session returns AUDIO or TEXT and never both,
+      // so without this there is no text at all -- and the phone writes every
+      // turn into the synced chat, which is what lets the desktop pick it up.
+      outputAudioTranscription: {},
+      inputAudioTranscription: {},
+    };
+    if (opts.voice) {
+      gen.speechConfig = { voiceConfig: { prebuiltVoiceConfig: { voiceName: opts.voice } } };
+    }
+    if (opts.language) {
+      gen.speechConfig = Object.assign({}, gen.speechConfig, { languageCode: opts.language });
+    }
+    const setup = {
+      model: "models/" + model,
+      generationConfig: gen,
+      systemInstruction: { parts: [{ text: systemPrompt }] },
+      contextWindowCompression: { slidingWindow: {} },
+      sessionResumption: opts.resumeHandle ? { handle: opts.resumeHandle } : {},
+    };
+    const decls = liveFunctionDeclarations(schemas);
+    if (decls.length) setup.tools = [{ functionDeclarations: decls }];
+    return { setup };
+  }
+
+  function liveToolResponse(responses) {
+    return { toolResponse: { functionResponses: (responses || []).map((r) => ({
+      id: r.id || "", name: r.name || "", response: { output: r.output || "" } })) } };
+  }
+
+  function liveTextTurn(text) { return { realtimeInput: { text } }; }
+  function liveAudioChunk(b64) {
+    return { realtimeInput: { audio: { data: b64, mimeType: "audio/pcm;rate=" + LIVE_INPUT_RATE } } };
+  }
+  function liveAudioStreamEnd() { return { realtimeInput: { audioStreamEnd: true } }; }
+
+  // Float32 at whatever the device gave us -> Int16 at 16kHz, the only rate
+  // the API takes. A phone mic commonly runs at 48k, and sending that through
+  // unchanged is heard three times too fast.
+  function livePcm16(samples, fromRate) {
+    const ratio = fromRate / LIVE_INPUT_RATE;
+    const out = new Int16Array(Math.floor(samples.length / ratio));
+    for (let i = 0; i < out.length; i++) {
+      const v = Math.max(-1, Math.min(1, samples[Math.floor(i * ratio)] || 0));
+      // Asymmetric on purpose: +1.0 through 0x8000 overflows to -32768, and a
+      // loud passage turns to static that sounds like a broken microphone.
+      out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+    }
+    return new Uint8Array(out.buffer);
+  }
+
+  function liveB64(bytes) {
+    let s = "";
+    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return typeof btoa === "function" ? btoa(s) : Buffer.from(bytes).toString("base64");
+  }
+
+  function liveBytes(b64) {
+    if (typeof atob !== "function") return new Uint8Array(Buffer.from(b64, "base64"));
+    const s = atob(b64);
+    const a = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) a[i] = s.charCodeAt(i);
+    return a;
+  }
+
+  // Spoken, not written. The coding prompt is built for a chat window: it asks
+  // for file paths, code blocks and diffs, none of which survive being read
+  // out loud. This one is for a conversation you are having while walking.
+  const LIVE_VOICE_PROMPT =
+    "You are Make No Mistakes, talking with the user out loud on their phone.\n\n" +
+    "SPEAK like a person: short sentences, no lists, no markdown, no code blocks, " +
+    "no file paths read out character by character. If you need to refer to a file, " +
+    "say its name the way a person would ('the sync store', not 'glmcode/syncstore.py').\n\n" +
+    "You can read this repository with your tools, and you should — answer from what " +
+    "is actually there rather than from memory.\n\n" +
+    "You have NO shell here. This is a phone: nothing can be run, built, tested or " +
+    "served. The moment something needs running, call needs_desktop to leave it for " +
+    "the user's computer, then say out loud that you have done so. Do not pretend to " +
+    "have run anything.\n\n" +
+    "Keep answers to a few sentences unless asked for more. The user cannot skim you.";
+
   const CoreAPI = {
     encryptVault, decryptVault, deriveKey, PBKDF2_ITERS,
     aesEncrypt, aesDecrypt, exportRawKey, importRawKey,
@@ -1166,6 +1315,10 @@
     handoffNote, applyHandoff, HANDOFF_MARKER, repoStateWarning,
     healInterruptedTurn, INTERRUPTED_TOOL,
     mergeProviders, normalizeBase,
+    liveWsUrl, liveSetup, liveFunctionDeclarations, liveToolResponse,
+    liveTextTurn, liveAudioChunk, liveAudioStreamEnd,
+    livePcm16, liveB64, liveBytes,
+    LIVE_MODEL, LIVE_INPUT_RATE, LIVE_OUTPUT_RATE, LIVE_VOICE_PROMPT,
     estimateTokens, trimHistory, historyDigest, splitTurns, COMPACT_PROMPT,
     messageChars, calibrateRatio, DEFAULT_CHARS_PER_TOKEN, IMAGE_CHARS,
     _b64: { bytesToB64, b64ToBytes },
