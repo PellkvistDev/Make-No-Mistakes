@@ -71,10 +71,34 @@ def test_a_session_asks_for_audio_and_for_the_words_that_went_with_it():
     """A session returns AUDIO or TEXT, never both -- so without asking for
     transcription there is no text at all, and this app writes every voice turn
     into the chat's searchable transcript."""
-    cfg = _setup()["generationConfig"]
-    assert cfg["responseModalities"] == ["AUDIO"]
-    assert "outputAudioTranscription" in cfg
-    assert "inputAudioTranscription" in cfg
+    s = _setup()
+    assert s["generationConfig"]["responseModalities"] == ["AUDIO"]
+    assert "outputAudioTranscription" in s
+    assert "inputAudioTranscription" in s
+
+
+def test_transcription_is_a_sibling_of_generationconfig_not_a_field_in_it():
+    """The reported failure. BidiGenerateContentSetup keeps only generation
+    parameters under generationConfig; transcription is top-level. Nested,
+    these are unknown fields -- and the server does not ignore an unknown
+    field, it rejects the setup and closes the socket. The app read that as
+    the connection dropping and said so, five times."""
+    gen = _setup()["generationConfig"]
+    assert "outputAudioTranscription" not in gen
+    assert "inputAudioTranscription" not in gen
+    # Only generation parameters live in there.
+    assert set(gen) <= {"responseModalities", "speechConfig", "temperature",
+                        "topP", "topK", "maxOutputTokens", "mediaResolution"}
+
+
+def test_every_top_level_key_is_one_the_setup_message_defines():
+    """A single unrecognised key anywhere here costs the whole session, and the
+    symptom names none of them -- so the set is pinned rather than trusted."""
+    allowed = {"model", "generationConfig", "systemInstruction", "tools",
+               "realtimeInputConfig", "sessionResumption",
+               "contextWindowCompression", "inputAudioTranscription",
+               "outputAudioTranscription", "proactivity"}
+    assert set(_setup()) <= allowed
 
 
 def test_a_session_can_outlive_its_connection():

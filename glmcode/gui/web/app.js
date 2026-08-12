@@ -6179,7 +6179,7 @@ else window.addEventListener("pywebviewready", bootSafely);
 const liveVoice = {
   ws: null, ctx: null, node: null, stream: null,
   playAt: 0, sources: [], handle: "", closing: false, reconnects: 0,
-  said: "", heard: "",
+  established: false, said: "", heard: "",
 };
 
 const LIVE_MAX_RECONNECTS = 5;
@@ -6265,6 +6265,13 @@ async function liveHandleToolCalls(calls) {
 }
 
 function liveOnMessage(payload) {
+  // The server's first message on a good setup. Its arrival is the only
+  // difference between "the session is up" and "the socket opened and was
+  // then hung up on", and those two need opposite responses to a close.
+  if (payload.setupComplete) {
+    liveVoice.established = true;
+    liveVoice.reconnects = 0;   // this connection worked; the budget resets
+  }
   const sc = payload.serverContent;
   if (payload.toolCall) liveHandleToolCalls(payload.toolCall.functionCalls);
   // The handle that makes a dropped socket a non-event. Stored every time it
@@ -6354,9 +6361,26 @@ async function liveOpenSocket() {
       try { liveOnMessage(payload); } catch (e) { console.error("live", e); }
     };
     ws.onerror = () => { /* onclose always follows; handled there */ };
-    ws.onclose = () => {
+    ws.onclose = (ev) => {
       if (liveVoice.closing || !voice.active) return;
-      // Closed without a goAway: a genuine drop rather than the scheduled
+      // The code and the reason, which the server DOES send and this used to
+      // throw away. A rejected setup closes with the field it objected to in
+      // ev.reason; discarding it left "kept losing its connection" as the only
+      // thing the app could say about a message it had built wrong itself.
+      const why = (ev && ev.reason ? ev.reason : "").trim();
+      const code = ev ? ev.code : 0;
+      console.error("live: socket closed", code, why);
+      if (!liveVoice.established) {
+        // Closed before the session ever opened. Retrying cannot help: the
+        // same setup will be rejected the same way, so five attempts only
+        // delay the message and bury the reason under a timeout.
+        toast(why ? `Voice couldn't start: ${why}` :
+          `Voice couldn't start (the server closed the connection, code ${code}).`,
+          "error", 9000);
+        stopVoice();
+        return;
+      }
+      // Closed after it was working: a genuine drop or the scheduled socket
       // rotation, and the same repair either way.
       liveReconnect();
     };
@@ -6366,6 +6390,7 @@ async function liveOpenSocket() {
 async function startLiveVoice() {
   liveVoice.closing = false;
   liveVoice.reconnects = 0;
+  liveVoice.established = false;
   liveVoice.handle = "";
   liveVoice.said = liveVoice.heard = "";
   if (!(await liveOpenSocket())) return false;

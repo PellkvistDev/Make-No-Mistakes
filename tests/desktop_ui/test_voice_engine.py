@@ -111,3 +111,80 @@ def test_base64_survives_bytes_that_are_not_text(desktop):
              return JSON.stringify(round) === JSON.stringify(src);
            }""")
     assert ok is True
+
+
+# ---- what happens when the server says no ------------------------------- #
+#
+# It closed the socket because the setup message was malformed, and the app
+# retried five times and reported "kept losing its connection" -- a message
+# about the network, for a message the app had built wrong itself. The reason
+# was in ev.reason the whole time, and onclose discarded it.
+
+def _fake_socket(desktop):
+    """A WebSocket that opens and is then closed by the "server", with a
+    reason -- the shape of a rejected setup."""
+    desktop.page.evaluate("""() => {
+      window.__closed = [];
+      class FakeWS {
+        constructor(url) {
+          this.url = url; this.readyState = 1;
+          window.__ws = this;
+          setTimeout(() => this.onopen && this.onopen(), 0);
+        }
+        send(d) { window.__closed.push(d); }
+        close() { this.readyState = 3; }
+      }
+      FakeWS.OPEN = 1;
+      window.WebSocket = FakeWS;
+    }""")
+
+
+def test_a_rejected_setup_says_what_the_server_objected_to(desktop):
+    _open(desktop, voice_engine="live")
+    _fake_socket(desktop)
+    desktop.page.evaluate("""async () => {
+      window.__toasts = [];
+      const real = window.toast;
+      window.toast = (m) => { window.__toasts.push(m); };
+      voice.active = true;
+      await liveOpenSocket();
+      window.__ws.onclose({ code: 1007, reason: 'Unknown name "foo" at setup' });
+    }""")
+    desktop.page.wait_for_timeout(200)
+    said = desktop.page.evaluate("() => window.__toasts.join(' | ')")
+    assert 'Unknown name "foo"' in said
+    assert "losing" not in said, "that is a story about the network"
+
+
+def test_a_setup_that_never_opened_is_not_retried(desktop):
+    """Retrying cannot help: the same setup is rejected the same way every
+    time, so five attempts only delay the message and bury the reason."""
+    _open(desktop, voice_engine="live")
+    _fake_socket(desktop)
+    tries = desktop.page.evaluate("""async () => {
+      window.toast = () => {};
+      voice.active = true;
+      await liveOpenSocket();
+      window.__ws.onclose({ code: 1007, reason: "nope" });
+      await new Promise((r) => setTimeout(r, 250));
+      return liveVoice.reconnects;
+    }""")
+    assert tries == 0
+
+
+def test_a_drop_after_the_session_opened_is_retried(desktop):
+    """The other half: once setupComplete has arrived the session is real, and
+    a close is the socket rotating (they last ~10 minutes) or a genuine drop.
+    Both are repaired by reconnecting with the resumption handle."""
+    _open(desktop, voice_engine="live")
+    _fake_socket(desktop)
+    tries = desktop.page.evaluate("""async () => {
+      window.toast = () => {};
+      voice.active = true;
+      await liveOpenSocket();
+      liveOnMessage({ setupComplete: {} });
+      window.__ws.onclose({ code: 1006, reason: "" });
+      await new Promise((r) => setTimeout(r, 250));
+      return liveVoice.reconnects;
+    }""")
+    assert tries >= 1

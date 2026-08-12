@@ -2915,7 +2915,7 @@
   const voice = {
     ws: null, ctx: null, node: null, stream: null, on: false,
     playAt: 0, sources: [], handle: "", closing: false, tries: 0,
-    said: "", heard: "", muted: false,
+    established: false, said: "", heard: "", muted: false,
   };
   const VOICE_MAX_TRIES = 5;
   // The tools a spoken session gets: everything that reads, plus the one that
@@ -3006,6 +3006,12 @@
   }
 
   function voiceOnMessage(payload) {
+    // The only thing that distinguishes "the session is up" from "the socket
+    // opened and was then hung up on", which need opposite responses.
+    if (payload.setupComplete) {
+      voice.established = true;
+      voice.tries = 0;          // this connection worked; the budget resets
+    }
     if (payload.toolCall) voiceRunTools(payload.toolCall.functionCalls);
     if (payload.sessionResumptionUpdate && payload.sessionResumptionUpdate.resumable) {
       voice.handle = payload.sessionResumptionUpdate.newHandle || voice.handle;
@@ -3087,7 +3093,22 @@
         try { payload = JSON.parse(text); } catch (e) { return; }
         try { voiceOnMessage(payload); } catch (e) { /* one bad frame is not the session */ }
       };
-      ws.onclose = () => { if (!voice.closing && voice.on) voiceReconnect(); };
+      ws.onclose = (ev) => {
+        if (voice.closing || !voice.on) return;
+        // The code and reason the server sends, which this used to discard --
+        // a rejected setup names the field it objected to in ev.reason, and
+        // throwing that away leaves "kept losing the connection" as the only
+        // thing the app can say about a message it built wrong itself.
+        const why = (ev && ev.reason ? ev.reason : "").trim();
+        if (!voice.established) {
+          // Closed before the session opened. Retrying cannot help: the same
+          // setup is rejected the same way every time.
+          voiceSetStatus(why ? "Couldn't start: " + why : "Couldn't start.");
+          setTimeout(stopVoice, 3500);
+          return;
+        }
+        voiceReconnect();
+      };
     });
   }
 
@@ -3100,6 +3121,7 @@
     voice.on = true;
     voice.closing = false;
     voice.tries = 0;
+    voice.established = false;
     voice.handle = "";
     voice.said = voice.heard = "";
     voice.muted = false;
