@@ -665,3 +665,41 @@ pre.code, pre.tool-out, .preview {
   background: rgba(8, 10, 14, 0.55); border: 1px solid var(--glass-brd);
   color: var(--text); overflow-x: auto;
 }
+
+/* ---- talking to it ----------------------------------------------------- */
+/* Deliberately a full sheet rather than a bar: a voice session is the whole
+   interaction while it lasts, and leaving the composer reachable underneath
+   invites typing at something that is listening. */
+.voice-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(8, 10, 16, 0.92);
+  display: flex; align-items: center; justify-content: center;
+  padding: calc(env(safe-area-inset-top) + 24px) 20px
+           calc(env(safe-area-inset-bottom) + 24px);
+}
+.voice-backdrop[hidden] { display: none; }
+.voice-sheet { width: 100%; max-width: 420px; text-align: center; }
+.voice-orb {
+  width: 116px; height: 116px; margin: 0 auto 22px; border-radius: 50%;
+  background: radial-gradient(circle at 50% 40%, #7aa2ff 0%, #3d5bd0 62%, #22306b 100%);
+  box-shadow: 0 0 40px rgba(122, 162, 255, 0.35);
+}
+/* Motion, not colour, carries the state: the orb is the only thing to look at
+   and the phone is often at arm's length or in a pocket. */
+.voice-orb.thinking { animation: voice-pulse 1.5s ease-in-out infinite; }
+.voice-orb.speaking { animation: voice-pulse 0.7s ease-in-out infinite; }
+@keyframes voice-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.85; }
+  50% { transform: scale(1.07); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-orb.thinking, .voice-orb.speaking { animation: none; opacity: 1; }
+}
+.voice-status { font-size: 15px; color: var(--text, #e8ecf5); margin-bottom: 10px; }
+.voice-caption {
+  min-height: 3.4em; font-size: 15px; line-height: 1.45;
+  color: var(--muted, #9aa4bd); overflow-y: auto; max-height: 40vh;
+}
+.voice-actions { display: flex; gap: 10px; justify-content: center; margin-top: 22px; }
+.voice-actions .btn { min-width: 104px; }
+.voice-btn { font-size: 17px; }
