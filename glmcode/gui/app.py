@@ -2533,6 +2533,49 @@ class Api:
             "repo": syncstore.SYNC_REPO_NAME,
         }
 
+    def sync_enable(self):
+        """Turn shared chats on, without asking anyone to invent anything.
+
+        The passphrase was never a password: it is the key the chats are
+        encrypted under, and its only job is to be identical on both devices.
+        Pairing already carries it to the phone, so making the user think one
+        up bought nothing but a chance to choose something weak, or to mistype
+        it on the second device and fork the history into two halves that can
+        never read each other.
+
+        So this machine generates one. The only case that still needs a human
+        is a store some OTHER machine already created, where the key is decided
+        and cannot be guessed -- that is what the recovery code is for, and it
+        is reported here rather than surfacing as `Wrong sync passphrase` for a
+        passphrase the user never chose.
+        """
+        state, why = syncstore.crypto_status()
+        if state != "ok":
+            return {"error": why}
+        if not self._gh_token():
+            return {"error": "Connect a GitHub token first (Settings → GitHub)."}
+        try:
+            if syncstore.central_has_store(token=self._gh_token()):
+                return {"needs_code": True, **self.sync_env(),
+                        "error": "Shared chats are already set up on another "
+                                 "device. Open its settings, copy the recovery "
+                                 "code, and paste it below."}
+            return self.sync_set_passphrase(syncstore.make_passphrase())
+        except (syncstore.SyncError, githubsync.GitHubError) as e:
+            return {"error": str(e)}
+
+    def sync_recovery_code(self):
+        """The generated key, for bringing another computer in.
+
+        Shown rather than hidden, and this is the trade the generation makes:
+        nobody types a passphrase, but nobody has one memorised either, so the
+        only copy lives in this machine's credential store. A phone that has
+        been paired holds it too. Both gone and the chats are ciphertext
+        forever -- which is worth being able to see and write down.
+        """
+        code = syncstore.load_passphrase() or ""
+        return {"code": code} if code else {"error": "Shared chats aren't on yet."}
+
     def sync_set_passphrase(self, passphrase: str):
         """Turn sync on: create the private sync repo if it doesn't exist yet,
         VERIFY the passphrase against it, then remember it. Verifying first means
@@ -2540,7 +2583,7 @@ class Api:
         silently forking your history into two unreadable halves."""
         passphrase = (passphrase or "").strip()
         if len(passphrase) < 6:
-            return {"error": "Sync passphrase must be at least 6 characters."}
+            return {"error": "That recovery code is too short to be one."}
         state, why = syncstore.crypto_status()
         if state != "ok":
             return {"error": why}

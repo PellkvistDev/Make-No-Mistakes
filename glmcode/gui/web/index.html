@@ -920,17 +920,46 @@
         </div>
       </div>
       <div id="sync-noset">
-        <div class="provider-form">
-          <input id="sync-pass" class="text-input" type="password" placeholder="Sync passphrase (min 6 characters)">
-          <div class="sheet-actions"><button id="sync-pass-save" class="btn btn-primary">Turn on sync</button></div>
+        <!-- One button. The passphrase used to be typed here, and it was never
+             a password: it is the key the chats are encrypted under, and its
+             only job is to match on both devices. Pairing already carries it to
+             the phone, so asking someone to invent one bought nothing except a
+             chance to pick something weak or mistype it on the second machine
+             and fork the history in half. -->
+        <div class="row"><div class="row-text"><label>Turn on shared chats</label>
+          <span class="row-sub">Nothing to choose — this computer makes the encryption key and
+            your phone picks it up when you pair.</span></div>
+          <div class="row-actions"><button id="sync-enable" class="btn btn-primary">Turn on</button></div>
         </div>
+        <!-- The second-computer case, and the only one that still needs a
+             human: the key already exists and cannot be guessed. -->
+        <details id="sync-have-code">
+          <summary>Already on, on another computer?</summary>
+          <div class="provider-form">
+            <p class="row-sub">Open its settings → Shared chats → “Show recovery code”, and paste it here.</p>
+            <input id="sync-pass" class="text-input mono" autocomplete="off" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX">
+            <div class="sheet-actions"><button id="sync-pass-save" class="btn btn-primary">Use this code</button></div>
+          </div>
+        </details>
       </div>
       <div id="sync-set" hidden>
         <div class="row"><div class="row-text"><label>Sync is on</label>
           <span class="row-sub" id="sync-repo-note">Chats upload automatically after each turn.</span></div>
           <div class="row-actions">
-            <button id="sync-pass-change" class="btn btn-ghost">Change passphrase</button>
+            <button id="sync-show-code" class="btn btn-ghost">Show recovery code</button>
             <button id="sync-pass-forget" class="btn btn-danger-ghost">Turn off</button>
+          </div>
+        </div>
+        <!-- Shown, not hidden. Nobody memorises a generated key, so the only
+             copies are this machine's credential store and any paired phone.
+             Lose both and the chats stay ciphertext forever, which is worth
+             being able to write down. -->
+        <div id="sync-code-wrap" hidden>
+          <div class="provider-form">
+            <input id="sync-code" class="text-input mono" readonly>
+            <p class="row-sub">The only other copy is on a paired phone. Keep it somewhere safe —
+              without it, chats already uploaded can't be read on a new computer.</p>
+            <div class="sheet-actions"><button id="sync-code-copy" class="btn btn-ghost">Copy</button></div>
           </div>
         </div>
       </div>

@@ -41,8 +41,11 @@ import zlib
 
 from . import syncstore
 
-# No I/O/0/1 -- they're the characters people misread off a screen.
-CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+# No I/O/0/1 -- they're the characters people misread off a screen. Defined in
+# syncstore and aliased here rather than spelled twice: the pairing code and the
+# sync recovery code are both read off one screen and typed on another, so they
+# want the same alphabet, and two copies of it is two things to keep in step.
+CODE_ALPHABET = syncstore.RECOVERY_ALPHABET
 CODE_LENGTH = 6
 # Long enough to walk to the phone, short enough that a stale QR stops working.
 PAIR_TTL_SECONDS = 300

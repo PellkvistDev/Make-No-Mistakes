@@ -240,16 +240,28 @@ class Phone:
 
     def enable_sync(self, passphrase, settings_btn="btn-chat-settings"):
         """Through the real settings sheet, not a back door -- the verify-then-
-        store order in that handler is itself behaviour worth exercising."""
+        store order in that handler is itself behaviour worth exercising.
+
+        The store is created first, under the passphrase the caller names, so
+        this phone takes the "another device already has one" path. That is
+        what makes the key knowable to the test -- the phone generates its own
+        when nothing exists yet, which is the point of the new flow and is
+        covered directly in test_sync_setup.py.
+        """
         p = self.page
+        p.evaluate("""async (pass) => {
+          const AC = window.AgentCore;
+          const probe = AC.makeGitHub({ token: "ghtoken", owner: "", repo: "" });
+          const { owner, repo } = await AC.ensureSyncRepo(probe);
+          const gh = AC.makeGitHub({ token: "ghtoken", owner, repo, branch: AC.SYNC_REPO_BRANCH });
+          await AC.openSync(gh, pass);
+        }""", passphrase)
         p.click("#" + settings_btn)
         p.wait_for_selector("#settings-backdrop:not([hidden])", timeout=15000)
-        # Flipping the toggle with no passphrase saved is what opens the sheet;
-        # the "change passphrase" button is hidden until sync is already on.
+        # Flipping the toggle with no key on this phone is what opens the sheet.
         p.click("#set-sync")
         p.wait_for_selector("#syncpass-backdrop:not([hidden])", timeout=15000)
         p.fill("#in-syncpass", passphrase)
-        p.fill("#in-syncpass2", passphrase)
         p.click("#btn-syncpass-save")
         p.wait_for_selector("#syncpass-backdrop", state="hidden", timeout=15000)
         self.close_settings()

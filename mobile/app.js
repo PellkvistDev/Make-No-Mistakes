@@ -476,6 +476,11 @@
       const secrets = { modelKey, model, baseUrl, githubToken };
       const blob = await AC.encryptVault(secrets, pin);
       storeVault(blob);
+      // The choice made on this screen, recorded where the app reads it back
+      // from. It used to go only into the vault, which the model resolver
+      // consulted LAST -- so on a phone that was also paired, the desktop
+      // provider's first model replaced it before the first message.
+      localStorage.setItem("mnm.model", model);
       clearSession();  // a fresh setup starts a fresh session
       const salt = AC._b64.b64ToBytes(blob.salt);
       const key = await AC.deriveKey(pin, salt, keepSignedIn());
@@ -2443,12 +2448,29 @@
         === AC.normalizeBase(session && session.secrets && session.secrets.baseUrl))
       || list[0] || null;
   }
+  /* Which model answers, in order of how deliberate the choice was.
+   *
+   * The vault's model used to rank BELOW the provider's first model, and that
+   * is not a detail: the model picked on the setup screen is written into the
+   * vault, so on any phone that had also been paired -- which is every phone
+   * that scanned a QR -- the desktop provider's first model silently replaced
+   * the choice just made. You picked gemini-3.5-flash-lite, the app used
+   * whatever happened to sort first in the paired list, and the first message
+   * failed saying that model does not exist.
+   *
+   * It only ranks above models[0] when the provider actually offers it,
+   * though. Switching APIs leaves the vault holding a model belonging to the
+   * old one, and sending a glm name to a Gemini key was only ever going to
+   * 404. */
   function getModelName() {
     const chosen = pref("mnm.model", "");
     if (chosen) return chosen;
     const p = currentProvider();
-    if (p && p.models && p.models.length) return p.models[0];
-    return (session && session.secrets && session.secrets.model) || "glm-4.7-flash";
+    const models = (p && p.models) || [];
+    const stored = (session && session.secrets && session.secrets.model) || "";
+    if (stored && (!models.length || models.includes(stored))) return stored;
+    if (models.length) return models[0];
+    return stored || "glm-4.7-flash";
   }
   function getThinking() { return pref("mnm.thinking", "medium"); }
   function confirmCommits() { return pref("mnm.confirm", "1") === "1"; }
@@ -2481,10 +2503,11 @@
   // ================================================================ SETTINGS SHEET
   function openSettings() {
     renderBgPicker($("settings-bg"));
-    // Before the model field: it reads the chosen provider's model list, and
-    // filling the box from a stale provider is how the two disagree.
+    // This draws the model control too (through renderModelOptions), which
+    // decides between the menu and the text box from the chosen provider's
+    // list and selects the current model in whichever is showing. Setting the
+    // field here as well is how the two used to disagree.
     renderProviderPicker();
-    $("set-model").value = getModelName();
     setSegOn($("set-thinking"), getThinking());
     $("set-plan").checked = planMode();
     $("set-subagents").checked = subagentsOn();
@@ -2621,31 +2644,53 @@
     refreshVoiceButton();
     const list = getProviders();
     const block = $("set-provider-block");
-    if (!block) return;
-    block.hidden = list.length < 2;
     const sel = $("set-provider");
-    const cur = currentProvider();
-    sel.innerHTML = "";
-    for (const p of list) {
-      const o = document.createElement("option");
-      o.value = p.name; o.textContent = p.name;
-      if (cur && p.name === cur.name) o.selected = true;
-      sel.appendChild(o);
+    if (block && sel) {
+      // One API is not a choice, so the row stays out of the way -- but the
+      // model list below it still has to be drawn, which is why this guard
+      // does not return.
+      block.hidden = list.length < 2;
+      const cur = currentProvider();
+      sel.innerHTML = "";
+      for (const p of list) {
+        const o = document.createElement("option");
+        o.value = p.name; o.textContent = p.name;
+        if (cur && p.name === cur.name) o.selected = true;
+        sel.appendChild(o);
+      }
     }
     renderModelOptions();
   }
+  /* The model menu, drawn from the chosen provider -- so the names offered
+   * belong to the API that will actually be called; glm names against a Gemini
+   * key were only ever going to 404.
+   *
+   * Falls back to the text box when this API has no list to offer, which is
+   * the case for an endpoint typed in by hand. Same split as the setup screen,
+   * and for the same reason: with a list, spelling a model out is a typo
+   * waiting to happen; without one, typing is all there is. */
   function renderModelOptions() {
-    const dl = $("model-list");
+    const sel = $("set-model-pick"), box = $("set-model");
+    if (!sel || !box) return;
     const p = currentProvider();
-    if (!dl || !p || !p.models || !p.models.length) return;
-    // The chosen provider's models, so the suggestions belong to the API that
-    // will actually be called -- glm names against a Gemini key were only ever
-    // going to 404.
-    dl.innerHTML = "";
-    for (const m of p.models) {
+    const models = ((p && p.models) || []).slice();
+    const cur = getModelName();
+    sel.hidden = !models.length;
+    box.hidden = !!models.length;
+    $("set-model-hint").textContent = models.length
+      ? "Which model answers. Scan the QR on your computer again if one is missing."
+      : "The model name this API expects, spelled exactly.";
+    if (!models.length) { box.value = cur; return; }
+    // A model the list does not carry is still the one in use -- offered
+    // rather than quietly swapped out from under the chat, which is the whole
+    // failure this screen just had.
+    if (cur && !models.includes(cur)) models.unshift(cur);
+    sel.innerHTML = "";
+    for (const m of models) {
       const o = document.createElement("option");
-      o.value = m;
-      dl.appendChild(o);
+      o.value = m; o.textContent = m;
+      if (m === cur) o.selected = true;
+      sel.appendChild(o);
     }
   }
   if ($("set-provider")) {
@@ -2657,17 +2702,19 @@
       const models = (p && p.models) || [];
       if (models.length && !models.includes(pref("mnm.model", ""))) {
         localStorage.setItem("mnm.model", models[0]);
-        $("set-model").value = models[0];
       }
       renderModelOptions();
       if (session) buildModel();
     });
   }
 
-  $("set-model").addEventListener("change", () => {
-    localStorage.setItem("mnm.model", $("set-model").value.trim() || getModelName());
+  function chooseModel(name) {
+    const m = String(name || "").trim();
+    localStorage.setItem("mnm.model", m || getModelName());
     if (session) buildModel();
-  });
+  }
+  $("set-model-pick").addEventListener("change", () => chooseModel($("set-model-pick").value));
+  $("set-model").addEventListener("change", () => chooseModel($("set-model").value));
   $("set-thinking").addEventListener("click", (e) => {
     const b = e.target.closest("button[data-v]"); if (!b) return;
     localStorage.setItem("mnm.thinking", b.dataset.v);
@@ -2706,14 +2753,59 @@
   // ---- sync settings + passphrase sheet ----
   $("set-sync").addEventListener("change", () => {
     const on = $("set-sync").checked;
-    if (on && !hasSyncPass()) { $("set-sync").checked = false; openSyncPass(); return; }
+    if (on && !hasSyncPass()) { $("set-sync").checked = false; startSync(); return; }
     localStorage.setItem("mnm.sync", on ? "1" : "0");
     $("set-sync-pass-row").hidden = !on;
     if (!on && session) session.syncStore = null;
   });
-  $("btn-change-syncpass").addEventListener("click", openSyncPass);
+
+  /* Turning sync on where this phone has no key yet.
+   *
+   * Almost always it already does: pairing carries it over, which is the
+   * whole point of pairing. Beyond that there are two cases and only one of
+   * them needs a person. Nothing here yet -- this phone is the first device --
+   * and it makes a key, the same way the computer would. A store that already
+   * exists, and the key is decided and cannot be guessed, so the recovery code
+   * has to be copied across.
+   *
+   * What it no longer does is ask anyone to invent a passphrase and type it
+   * twice. That was never a password, and a phone keyboard is the worst place
+   * to mistype the one string that has to match another device exactly.
+   */
+  async function startSync() {
+    if (!session || !session.cryptoKey) { toast("Unlock first."); return; }
+    toast("Setting up shared chats…");
+    try {
+      const api = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+      const { owner, repo } = await AC.ensureSyncRepo(api);
+      const gh = AC.makeGitHub({ token: session.secrets.githubToken,
+        owner, repo, branch: AC.SYNC_REPO_BRANCH });
+      if (await AC.syncStoreExists(gh)) { openSyncPass(); return; }
+      const pass = AC.makeSyncPassphrase();
+      const { store } = await AC.openSync(gh, pass);
+      await storeSyncPass(pass);
+      localStorage.setItem("mnm.sync", "1");
+      session.syncStore = store;
+      if (session.chatId) await syncSave();
+      $("set-sync").checked = true;
+      $("set-sync-pass-row").hidden = false;
+      toast("Shared chats are on.");
+    } catch (e) {
+      toast(friendlyGhError(e, "list"));
+    }
+  }
+  // Shows the key rather than offering to change it. Changing it was never a
+  // useful thing to do -- a new one cannot read anything already uploaded --
+  // whereas reading it off is how a second computer joins.
+  $("btn-change-syncpass").addEventListener("click", async () => {
+    const box = $("set-syncpass-code"), hint = $("set-syncpass-hint");
+    if (!box.hidden) { box.hidden = true; hint.hidden = true; box.value = ""; return; }
+    const pass = await getSyncPass();
+    if (!pass) { toast("Shared chats aren't on yet."); return; }
+    box.value = pass; box.hidden = false; hint.hidden = false;
+  });
   function openSyncPass() {
-    $("in-syncpass").value = ""; $("in-syncpass2").value = "";
+    $("in-syncpass").value = "";
     $("syncpass-error").textContent = "";
     $("syncpass-backdrop").hidden = false;
   }
@@ -2722,9 +2814,8 @@
   $("syncpass-backdrop").addEventListener("click", (e) => { if (e.target === $("syncpass-backdrop")) closeSyncPass(); });
   $("btn-syncpass-save").addEventListener("click", async () => {
     const err = $("syncpass-error"); err.textContent = "";
-    const p1 = $("in-syncpass").value, p2 = $("in-syncpass2").value;
-    if (p1.length < 6) return (err.textContent = "Passphrase must be at least 6 characters.");
-    if (p1 !== p2) return (err.textContent = "Passphrases don't match.");
+    const p1 = $("in-syncpass").value.trim();
+    if (p1.length < 6) return (err.textContent = "That code is too short to be one.");
     if (!session || !session.cryptoKey) return (err.textContent = "Unlock first.");
     $("btn-syncpass-save").disabled = true;
     try {

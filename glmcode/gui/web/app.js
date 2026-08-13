@@ -4194,16 +4194,44 @@ function renderSyncSettings() {
   if (repoName && e.repo) repoName.textContent = e.repo;
 }
 
+// Turning it on: one click, nothing to invent. The backend makes the key.
+//
+// Deliberately not through ghAction: that treats any reply carrying `error` as
+// a failure and swallows the reply, and "another computer already has one" is
+// not a failure -- it is the next step, and it arrives with the message that
+// explains it.
+async function enableSync(btn) {
+  const label = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+  let res;
+  try { res = await api().sync_enable(); }
+  catch (e) { res = { error: "Couldn't reach the app." }; }
+  finally { if (btn) { btn.disabled = false; btn.textContent = label; } }
+  if (res && res.needs_code) {
+    // A store another machine already created. The key is decided and cannot
+    // be guessed, so this is the one path that still needs a human -- opened
+    // for them rather than left as a collapsed detail they have to find.
+    $("sync-have-code").open = true;
+    $("sync-pass").focus();
+    toast(res.error, "info", 8000);
+    return;
+  }
+  if (!res || res.error) { toast((res && res.error) || "Couldn't turn it on.", "error", 6000); return; }
+  syncEnv = res; renderSyncSettings();
+  refreshSyncChatsBackground();   // fold synced chats into the sidebar now
+  toast("Shared chats are on. Pair your phone and it picks this up automatically.",
+        "info", 6000);
+}
+
 async function saveSyncPassphrase(btn) {
   const p = $("sync-pass").value.trim();
-  if (p.length < 6) { toast("Use at least 6 characters.", "error", 3000); return; }
+  if (p.length < 6) { toast("That code is too short to be one.", "error", 3000); return; }
   const res = await ghAction(btn, () => api().sync_set_passphrase(p));
   if (!res) return;
   $("sync-pass").value = "";
   syncEnv = res; renderSyncSettings();
-  refreshSyncChatsBackground();   // fold synced chats into the sidebar now
-  toast("Sync is on — your chats upload automatically. Use the same " +
-        "passphrase on your phone.", "info", 6000);
+  refreshSyncChatsBackground();
+  toast("Shared chats are on — this computer now reads the same chats.", "info", 6000);
 }
 
 $("sync-install-copy").addEventListener("click", () => {
@@ -4212,21 +4240,34 @@ $("sync-install-copy").addEventListener("click", () => {
     .catch(() => toast("Couldn't copy — select the command and copy it manually.", "error", 4000));
 });
 
+$("sync-enable").addEventListener("click", () => enableSync($("sync-enable")));
 $("sync-pass-save").addEventListener("click", () => saveSyncPassphrase($("sync-pass-save")));
 $("sync-pass").addEventListener("keydown", (e) => {
   if (e.key === "Enter") saveSyncPassphrase($("sync-pass-save"));
 });
-$("sync-pass-change").addEventListener("click", () => {
-  $("sync-set").hidden = true;
-  $("sync-noset").hidden = false;
-  $("sync-pass").focus();
+$("sync-show-code").addEventListener("click", async () => {
+  const wrap = $("sync-code-wrap");
+  if (!wrap.hidden) { wrap.hidden = true; $("sync-code").value = ""; return; }
+  let res;
+  try { res = await api().sync_recovery_code(); }
+  catch (e) { res = { error: "Couldn't reach the app." }; }
+  if (res.error) { toast(res.error, "error", 4000); return; }
+  $("sync-code").value = res.code;
+  wrap.hidden = false;
+});
+$("sync-code-copy").addEventListener("click", () => {
+  copyText($("sync-code").value)
+    .then(() => toast("Recovery code copied.", "info", 3000))
+    .catch(() => toast("Couldn't copy — select the code and copy it manually.", "error", 4000));
 });
 $("sync-pass-forget").addEventListener("click", async () => {
-  if (!confirm("Forget the sync passphrase on this computer? Your synced chats stay on GitHub " +
-               "(still encrypted), and you can re-enter the passphrase to read them again.")) return;
+  if (!confirm("Turn off shared chats on this computer? Your chats stay on GitHub (still " +
+               "encrypted). You'll need the recovery code to read them here again — show and " +
+               "save it first if you haven't.")) return;
   syncEnv = await api().sync_forget_passphrase();
   renderSyncSettings();
-  toast("Sync passphrase removed from this computer.", "info", 3000);
+  $("sync-code-wrap").hidden = true; $("sync-code").value = "";
+  toast("Shared chats turned off on this computer.", "info", 3000);
 });
 
 // Closing must wipe the code and QR, not leave a live pairing payload
