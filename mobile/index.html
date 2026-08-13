@@ -417,7 +417,10 @@
                since — merged with what is here, never replacing it.</p>
           </div>
           <div class="setting-block" id="set-sync-pass-row" hidden>
-            <button id="btn-change-syncpass" class="ghost" type="button" style="width:100%">Change sync passphrase</button>
+            <button id="btn-change-syncpass" class="ghost" type="button" style="width:100%">Show recovery code</button>
+            <input id="set-syncpass-code" class="setting-input mono" readonly hidden />
+            <p class="setting-hint" id="set-syncpass-hint" hidden>Type this on another computer to let it
+               read the same chats. Without it, chats already uploaded can't be read anywhere else.</p>
           </div>
 
           <!-- Which build is running, and what this phone reports about its
@@ -456,22 +459,24 @@
     <!-- ===================== SYNC PASSPHRASE SHEET ===================== -->
     <div id="syncpass-backdrop" class="backdrop" hidden>
       <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="syncpass-title">
-        <h3 id="syncpass-title">Sync passphrase</h3>
-        <p class="hint">This passphrase encrypts your synced chats. Enter the <b>same</b> passphrase on
-          every device you want to sync. It's never sent to GitHub or stored in plain text — if you
-          forget it, you can set a new one, but existing synced chats stay locked.</p>
+        <h3 id="syncpass-title">Recovery code</h3>
+        <!-- One field, and it is a code being COPIED, not a secret being
+             invented. It used to ask for a passphrase twice, with a minimum
+             length -- on a phone keyboard, for the one string that has to
+             match another device exactly. Nothing generates a key here when a
+             store already exists: that key is decided, and a fresh one would
+             fork the history into two halves that can never read each other. -->
+        <p class="hint">Shared chats are already set up on your computer. Open its settings →
+          <b>Your phone</b> → <b>Show recovery code</b>, and type it in here. Pairing by QR sends
+          it across automatically, so this is only needed if you skipped that.</p>
         <label class="field">
-          <span>Sync passphrase (min 6)</span>
-          <input id="in-syncpass" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="passphrase" />
-        </label>
-        <label class="field">
-          <span>Confirm passphrase</span>
-          <input id="in-syncpass2" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="repeat passphrase" />
+          <span>Recovery code</span>
+          <input id="in-syncpass" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX" />
         </label>
         <p id="syncpass-error" class="error" role="alert"></p>
         <div class="dialog-actions">
           <button id="btn-syncpass-cancel" class="ghost">Cancel</button>
-          <button id="btn-syncpass-save" class="primary">Save</button>
+          <button id="btn-syncpass-save" class="primary">Use this code</button>
         </div>
       </div>
     </div>

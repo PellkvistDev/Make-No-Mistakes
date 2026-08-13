@@ -2753,14 +2753,59 @@
   // ---- sync settings + passphrase sheet ----
   $("set-sync").addEventListener("change", () => {
     const on = $("set-sync").checked;
-    if (on && !hasSyncPass()) { $("set-sync").checked = false; openSyncPass(); return; }
+    if (on && !hasSyncPass()) { $("set-sync").checked = false; startSync(); return; }
     localStorage.setItem("mnm.sync", on ? "1" : "0");
     $("set-sync-pass-row").hidden = !on;
     if (!on && session) session.syncStore = null;
   });
-  $("btn-change-syncpass").addEventListener("click", openSyncPass);
+
+  /* Turning sync on where this phone has no key yet.
+   *
+   * Almost always it already does: pairing carries it over, which is the
+   * whole point of pairing. Beyond that there are two cases and only one of
+   * them needs a person. Nothing here yet -- this phone is the first device --
+   * and it makes a key, the same way the computer would. A store that already
+   * exists, and the key is decided and cannot be guessed, so the recovery code
+   * has to be copied across.
+   *
+   * What it no longer does is ask anyone to invent a passphrase and type it
+   * twice. That was never a password, and a phone keyboard is the worst place
+   * to mistype the one string that has to match another device exactly.
+   */
+  async function startSync() {
+    if (!session || !session.cryptoKey) { toast("Unlock first."); return; }
+    toast("Setting up shared chats…");
+    try {
+      const api = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+      const { owner, repo } = await AC.ensureSyncRepo(api);
+      const gh = AC.makeGitHub({ token: session.secrets.githubToken,
+        owner, repo, branch: AC.SYNC_REPO_BRANCH });
+      if (await AC.syncStoreExists(gh)) { openSyncPass(); return; }
+      const pass = AC.makeSyncPassphrase();
+      const { store } = await AC.openSync(gh, pass);
+      await storeSyncPass(pass);
+      localStorage.setItem("mnm.sync", "1");
+      session.syncStore = store;
+      if (session.chatId) await syncSave();
+      $("set-sync").checked = true;
+      $("set-sync-pass-row").hidden = false;
+      toast("Shared chats are on.");
+    } catch (e) {
+      toast(friendlyGhError(e, "list"));
+    }
+  }
+  // Shows the key rather than offering to change it. Changing it was never a
+  // useful thing to do -- a new one cannot read anything already uploaded --
+  // whereas reading it off is how a second computer joins.
+  $("btn-change-syncpass").addEventListener("click", async () => {
+    const box = $("set-syncpass-code"), hint = $("set-syncpass-hint");
+    if (!box.hidden) { box.hidden = true; hint.hidden = true; box.value = ""; return; }
+    const pass = await getSyncPass();
+    if (!pass) { toast("Shared chats aren't on yet."); return; }
+    box.value = pass; box.hidden = false; hint.hidden = false;
+  });
   function openSyncPass() {
-    $("in-syncpass").value = ""; $("in-syncpass2").value = "";
+    $("in-syncpass").value = "";
     $("syncpass-error").textContent = "";
     $("syncpass-backdrop").hidden = false;
   }
@@ -2769,9 +2814,8 @@
   $("syncpass-backdrop").addEventListener("click", (e) => { if (e.target === $("syncpass-backdrop")) closeSyncPass(); });
   $("btn-syncpass-save").addEventListener("click", async () => {
     const err = $("syncpass-error"); err.textContent = "";
-    const p1 = $("in-syncpass").value, p2 = $("in-syncpass2").value;
-    if (p1.length < 6) return (err.textContent = "Passphrase must be at least 6 characters.");
-    if (p1 !== p2) return (err.textContent = "Passphrases don't match.");
+    const p1 = $("in-syncpass").value.trim();
+    if (p1.length < 6) return (err.textContent = "That code is too short to be one.");
     if (!session || !session.cryptoKey) return (err.textContent = "Unlock first.");
     $("btn-syncpass-save").disabled = true;
     try {

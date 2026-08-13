@@ -179,6 +179,43 @@ reads about two pixels per module from those while a lens does not. So the
 margin is asserted where it is a fact — the pixels the decoder is handed —
 rather than by trusting a synthetic decode.
 
+## The sync passphrase is generated, never invented
+
+It reads like a password and is not one. It is the key the chats are encrypted
+under, and its only job is to be **identical on both devices** — nobody logs in
+with it, and there is nothing to "remember". Asking a person to make one up
+bought exactly two things: a chance to pick something weak, and a chance to
+mistype it on the second device and fork the history into two halves that can
+never read each other. On a phone keyboard, for a string that has to match
+another machine exactly, that was the worst possible place to ask.
+
+So `syncstore.make_passphrase()` and `makeSyncPassphrase()` in
+`mobile/agent-core.js` generate one: four groups of five from the pairing code's
+no-lookalike alphabet, 100 bits. Same shape on both, so a code made on either
+can be copied to the other.
+
+Three cases, and only one involves typing:
+
+- **paired** — pairing already carries the key, so sync just works. This is the
+  common path and it has no dialog in it at all.
+- **nothing exists yet** — the device makes one. `open_sync` / `openSync`
+  already report `created`, and `central_has_store` / `syncStoreExists` are what
+  decide which case this is *before* generating.
+- **a store already exists** — the key is decided and cannot be guessed, so the
+  recovery code gets copied across. One field, no confirmation: it is a code
+  being copied off another screen, not a secret being invented.
+
+Never generate a key without checking for an existing store first. A fresh key
+against one that exists cannot read a single chat in it, and surfaces as `Wrong
+sync passphrase` — true, and useless, for a passphrase the user never chose.
+
+The trade this makes: nobody types a passphrase, and nobody has one memorised
+either. The only copies are the machine's credential store and any paired
+phone. So **the code is shown, not hidden** — desktop Settings → Your phone →
+"Show recovery code", and the same on the phone. Lose both devices without it
+and the chats stay ciphertext forever. "Change passphrase" is gone; it was never
+a useful thing to do, since a new key cannot read anything already uploaded.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by

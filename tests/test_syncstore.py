@@ -700,7 +700,7 @@ def test_sync_works_without_a_connected_repo(monkeypatch):
 
 def test_sync_set_passphrase_rejects_short_and_reports_verify_failure(monkeypatch):
     api = _bare_api()
-    assert "at least 6" in api.sync_set_passphrase("abc")["error"]
+    assert "too short" in api.sync_set_passphrase("abc")["error"]
 
     monkeypatch.setattr(gui_app.syncstore, "crypto_status", lambda: ("ok", ""))
     monkeypatch.setattr(gui_app.Api, "_active_repo_coords",

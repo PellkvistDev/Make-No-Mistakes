@@ -56,6 +56,7 @@ import base64
 import hashlib
 import json
 import os
+import secrets
 import time
 
 from .githubsync import GitHubError
@@ -526,6 +527,49 @@ class SyncStore:
 
 def _pass_account(host: str = "github.com") -> str:
     return encode_account("sync-passphrase", host)
+
+
+# The alphabet the pairing code already uses, for the same reason: these are
+# the characters that survive being read off a screen and typed somewhere else.
+RECOVERY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+RECOVERY_GROUPS, RECOVERY_GROUP_LEN = 4, 5
+
+
+def make_passphrase() -> str:
+    """A sync passphrase nobody has to invent.
+
+    Asking a person to make one up was the wrong question in the first place.
+    It is not a password anyone ever types to log in -- it is the key the chats
+    are encrypted under, and it has exactly one job: be the same on both
+    devices. Pairing already carries it to the phone, so the only thing the
+    human input added was a chance to pick something weak, or to mistype it on
+    the second device and quietly fork the history into two unreadable halves.
+
+    Grouped with dashes because the one time it IS read by a human -- bringing
+    a second computer in -- it gets copied by eye. 20 characters from a
+    32-symbol alphabet is 100 bits, which is far past anything a passphrase
+    someone thought up would carry.
+    """
+    return "-".join(
+        "".join(secrets.choice(RECOVERY_ALPHABET) for _ in range(RECOVERY_GROUP_LEN))
+        for _ in range(RECOVERY_GROUPS))
+
+
+def central_has_store(token: str | None = None, api=None) -> bool:
+    """Whether a sync store already exists in the dedicated repo.
+
+    This is what separates "first device, generate a key" from "second device,
+    and the key is already decided". Generating one against an existing store
+    would fail as `Wrong sync passphrase` -- technically correct and completely
+    unhelpful, since the user never chose a passphrase to get wrong.
+    """
+    token = token or load_token()
+    if not token:
+        raise SyncError("Connect a GitHub token first.")
+    owner, name = ensure_sync_repo(token, api=api)
+    repo = StateRepo(token, owner, name, branch=SYNC_REPO_BRANCH, api=api)
+    meta, _ = _read_json(repo, "sync.json")
+    return bool(meta and meta.get("v") == 1)
 
 
 def save_passphrase(passphrase: str, host: str = "github.com") -> None:

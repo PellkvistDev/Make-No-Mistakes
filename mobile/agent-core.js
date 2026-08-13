@@ -323,6 +323,30 @@
 
   // Connect a sync gh-client (branch=STATE_BRANCH) to a passphrase: verifies an
   // existing store or bootstraps a new one. Returns { key, store, created }.
+  /* A sync passphrase nobody has to invent. Mirrors syncstore.make_passphrase
+   * -- same alphabet, same shape -- so a code generated on either device looks
+   * like the other's and can be copied between them.
+   *
+   * It was never a password. It is the key the chats are encrypted under, and
+   * its only job is to be identical on both devices; pairing already carries
+   * it here. Asking for one bought nothing but a chance to pick something weak
+   * or mistype it and fork the history into two unreadable halves. */
+  const RECOVERY_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  function makeSyncPassphrase() {
+    const pick = () => Array.from(getRandom(5))
+      .map((b) => RECOVERY_ALPHABET[b % RECOVERY_ALPHABET.length]).join("");
+    return [pick(), pick(), pick(), pick()].join("-");
+  }
+
+  /* Whether a store already exists, which is what separates "first device,
+   * make a key" from "second device, the key is already decided". */
+  async function syncStoreExists(gh) {
+    try {
+      const meta = JSON.parse((await gh.getFile("sync.json")).text);
+      return !!(meta && meta.v === 1);
+    } catch (e) { return false; }
+  }
+
   async function openSync(gh, passphrase) {
     if (!passphrase || String(passphrase).length < 6)
       throw new Error("Sync passphrase must be at least 6 characters");
@@ -1420,7 +1444,7 @@
     NEEDS_DESKTOP_SCHEMA, pendingNote, PENDING_MARKER,
     openPairToken, normalizePairCode, pairTokenFrom, PAIR_TOKEN_MIN,
     SYSTEM_PROMPT, SUBAGENT_PROMPT,
-    openSync, makeSyncStore, ensureSyncRepo,
+    openSync, makeSyncStore, ensureSyncRepo, makeSyncPassphrase, syncStoreExists,
     SYNC_REPO_NAME, SYNC_REPO_BRANCH, STATE_BRANCH,
     DEVICE_LOCK_TTL_MS, DEVICE_LOCK_HEARTBEAT_S,
     IMAGE_RE, imageMime,
