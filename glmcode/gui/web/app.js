@@ -5908,11 +5908,26 @@ function handleVoiceEvent(ev) {
 }
 
 function setVoicePtt(on) {
+  // Close out anything the other mode had open, the way toggleMute and
+  // replayLastReply already do. Switching TO push-to-talk while hands-free was
+  // mid-utterance is what made the button dead: vadTick is the only thing that
+  // ends a hands-free recording, and it returns at its first line once ptt is
+  // set -- so voice.recording stayed true forever, and pttPress refuses while
+  // it is. The button did nothing for the rest of the session, and only if you
+  // switched while it was hearing something, which is exactly when you would.
+  //
+  // endUtterance rather than a silent drop: it already keeps a clip only if the
+  // VAD had confirmed real speech in it, so a half-heard room noise is
+  // discarded and an actual sentence is not thrown away mid-word.
+  if (voice.recording) endUtterance();
   voice.ptt = on;
   const t = $("voice-ptt-toggle");
   t.setAttribute("aria-checked", String(on));
   t.textContent = on ? "Push-to-talk" : "Hands-free";
   $("voice-ptt-btn").hidden = !on;
+  // A hold that was in progress is over: without this the button keeps its
+  // held styling and comes back green the next time push-to-talk is enabled.
+  $("voice-ptt-btn").classList.remove("held");
   if (voice.active) {
     if (on) { setVoiceStatus("Hold Space or the button to talk"); setVoiceOrb("idle"); }
     else { setVoiceStatus("Listening… just talk"); setVoiceOrb("listening"); }
