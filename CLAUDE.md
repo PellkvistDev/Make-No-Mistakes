@@ -65,6 +65,37 @@ there isn't one. The only real answer for work that must continue while the app
 is closed is to run it somewhere else — the desktop, via the handoff in
 `session.pending`.
 
+**This is a fact about the platform, not a rule about what to offer.** The
+phone's voice mode used to be restricted to reading plus `needs_desktop`
+*because* of the above, and that was the wrong inference: it meant asking for
+work got a note left for the computer instead of the work. It now has the same
+tools the desktop's voice mode has — the writing tools and the full
+`dispatch_worker` / `check_workers` / `steer_worker` / `stop_worker` /
+`worker_changes` / `revert_worker` set, mirrored from `CONVERSATIONAL_SCHEMAS`
+and pinned by `tests/test_phone_workers.py`.
+
+What the constraint actually requires is **honesty, not refusal**. A worker is a
+floating promise in the page, so it progresses only while the app is open and
+foregrounded, and a suspended tab kills the request in flight. So a worker
+killed that way is reported as `interrupted`, with the reason said out loud —
+never as `done`. Claiming work finished when it did not is the one outcome worse
+than not offering to do it.
+
+Two things about `dispatch_worker` on the phone are load-bearing:
+
+- **It must not be awaited.** Live function calling is synchronous: the model is
+  stopped until the tool returns, so a dispatch that waited for the work would
+  hold the spoken conversation silent for the whole of it.
+  `tests/mobile_ui/test_voice_workers.py` proves the return happens with the
+  worker's first model call still open, and races every tool call against a
+  timer so this regression fails instead of hanging the suite.
+- **Its writes snapshot the previous content first** (`beforeWrite` in
+  `makeTools`), because that is the only moment it is still knowable, and
+  `revert_worker` needs it. Reverting re-reads the *current* sha rather than
+  reusing a remembered one — GitHub rejects a write to an existing path without
+  it, and re-reading also means a file changed since fails loudly instead of
+  being silently clobbered.
+
 Speech-to-speech does not change this and must not be described as if it
 does. A Live session is a WebSocket opened by the page, so it is subject to
 exactly the same suspension: iOS freezes the tab, the socket dies, and the

@@ -938,6 +938,10 @@
     opts = opts || {};
     const confirmWrite = opts.confirmWrite || (async () => true);
     const onCommit = opts.onCommit || (() => {});
+    // Called with the path just before it is first written, so a caller can
+    // capture what was there. A worker needs that to be able to undo itself,
+    // and the only moment the previous content is still knowable is here.
+    const beforeWrite = opts.beforeWrite || (async () => {});
     const cache = new Map();     // path -> {text, sha}
     let treeCache = null;
     async function tree() { if (!treeCache) treeCache = await gh.tree(); return treeCache; }
@@ -1021,6 +1025,7 @@
       },
       async write_file(a) {
         if (!(await confirmWrite("write", a.path, a.content))) return "User declined to write " + a.path;
+        await beforeWrite(a.path);
         let sha; try { sha = (await gh.getFile(a.path)).sha; } catch { sha = undefined; }
         await gh.putFile(a.path, a.content, a.message || `Update ${a.path}`, sha);
         cache.set(a.path, { text: a.content, sha: undefined }); treeCache = null;
@@ -1035,6 +1040,7 @@
         const next = a.replace_all ? f.text.split(a.old_string).join(a.new_string)
           : f.text.replace(a.old_string, a.new_string);
         if (!(await confirmWrite("edit", a.path, next))) return "User declined to edit " + a.path;
+        await beforeWrite(a.path);
         await gh.putFile(a.path, next, a.message || `Edit ${a.path}`, f.sha);
         cache.set(a.path, { text: next, sha: undefined }); treeCache = null;
         onCommit(a.path);
@@ -1077,6 +1083,40 @@
   function bool(d) { return { type: "boolean", description: d }; }
 
   // Advertised only on the main agent's turn (never to sub-agents).
+  /* The worker tools, mirroring glmcode/tools.py CONVERSATIONAL_SCHEMAS exactly.
+   *
+   * Duplicated rather than fetched, for the same reason SETUP_PRESETS is: this
+   * file is loaded by a page with no Python behind it. tests/test_phone_workers.py
+   * compares the two, because a description that drifts changes how the model
+   * uses the tool without anything failing.
+   *
+   * These went to the phone because a spoken session there could read and hand
+   * off, and nothing else -- so asking it to do work got a note left for the
+   * desktop instead of the work. That is the right default for a device that
+   * cannot run in the background, and the wrong one to impose on someone who
+   * knows the trade and wants the work done anyway.
+   */
+  const WORKER_SCHEMAS = [
+    tool("dispatch_worker",
+         "Hand a piece of real work off to a background worker that runs on its own, immediately, WITHOUT blocking the conversation -- so you can keep talking to the user while it works. Use this for ANYTHING that takes real doing: writing or editing code, running commands or tests, searching or analyzing the codebase, multi-step tasks. The worker has the full tool set and works autonomously; it CANNOT ask questions and does NOT see this conversation, so give it a COMPLETE, self-contained mission with all the context and specifics it needs. Returns instantly with a worker id -- do not wait for it; just tell the user out loud you've started on it and carry on. The user will be told out loud when it finishes.",
+         {"name": {"type": "string", "description": "Short kebab-case label for this worker, e.g. 'add-dark-mode' or 'fix-login-bug'."}, "task": {"type": "string", "description": "The complete, self-contained mission for the worker, with all context it needs (it can't see this chat)."}}, ["task"]),
+    tool("check_workers",
+         "Check on the background workers you've dispatched -- what's still running, what finished, and what each one reported. Use this when the user asks how things are going, or before you claim something is done. Returns instantly.",
+         {}, []),
+    tool("steer_worker",
+         "Send a running worker a course-correction or extra instruction WITHOUT stopping it -- use when the user adds to or redirects a task in flight ('also add a dark theme', 'use the other library'). Identify the worker by its id (wk1) or its name.",
+         {"worker": {"type": "string", "description": "The worker's id (e.g. 'wk1') or name."}, "message": {"type": "string", "description": "The instruction to send it."}}, ["worker", "message"]),
+    tool("stop_worker",
+         "Stop a running worker -- use when the user says to cancel or abandon a task in flight. It stops at the next safe point. Identify the worker by its id (wk1) or name.",
+         {"worker": {"type": "string", "description": "The worker's id (e.g. 'wk1') or name."}}, ["worker"]),
+    tool("worker_changes",
+         "Describe exactly what files a finished worker changed (added/edited/deleted). Use when the user asks what a worker did or changed. Identify it by id (wk1) or name.",
+         {"worker": {"type": "string", "description": "The worker's id (e.g. 'wk1') or name."}}, ["worker"]),
+    tool("revert_worker",
+         "Undo a worker's file changes, rolling the project back to how it was right before that worker started. Use when the user says to undo or revert a worker's work. This is destructive, so CONFIRM with the user first. Identify it by id (wk1) or name.",
+         {"worker": {"type": "string", "description": "The worker's id (e.g. 'wk1') or name."}}, ["worker"]),
+  ];
+
   const SPAWN_SCHEMA = tool("spawn_agent",
     "Delegate one self-contained sub-task to a fresh sub-agent that works on its own and reports back " +
     "(e.g. 'add tests for X', 'refactor Y'). It can read and edit files but cannot spawn further sub-agents. " +
@@ -1374,6 +1414,14 @@
     "say its name the way a person would ('the sync store', not 'glmcode/syncstore.py').\n\n" +
     "You can read this repository with your tools, and you should — answer from what " +
     "is actually there rather than from memory.\n\n" +
+    "You can also CHANGE it. For anything that takes real doing — writing or editing " +
+    "code, multi-step work — call dispatch_worker and keep talking: it returns straight " +
+    "away and works on its own. Use check_workers before you claim anything is done, " +
+    "and steer_worker or stop_worker when the user redirects or cancels. Small, single " +
+    "edits you can just make yourself with write_file or edit_file.\n\n" +
+    "Workers here run inside this app, so they only make progress while it is open and " +
+    "on screen. If the user is about to put the phone away, say so plainly. Never claim " +
+    "a worker finished without checking.\n\n" +
     "You have NO shell here. This is a phone: nothing can be run, built, tested or " +
     "served. The moment something needs running, call needs_desktop to leave it for " +
     "the user's computer, then say out loud that you have done so. Do not pretend to " +
@@ -1445,6 +1493,7 @@
     openPairToken, normalizePairCode, pairTokenFrom, PAIR_TOKEN_MIN,
     SYSTEM_PROMPT, SUBAGENT_PROMPT,
     openSync, makeSyncStore, ensureSyncRepo, makeSyncPassphrase, syncStoreExists,
+    WORKER_SCHEMAS,
     SYNC_REPO_NAME, SYNC_REPO_BRANCH, STATE_BRANCH,
     DEVICE_LOCK_TTL_MS, DEVICE_LOCK_HEARTBEAT_S,
     IMAGE_RE, imageMime,
