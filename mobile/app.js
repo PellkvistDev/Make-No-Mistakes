@@ -1731,6 +1731,189 @@
     return report || "(the sub-agent finished without a report)";
   }
 
+  /* ---------------------------------------------------------------- workers
+   *
+   * Background workers, as the desktop's voice mode has them. A spoken session
+   * here used to get read tools and needs_desktop, so asking it to do work left
+   * a note for the computer instead of doing it. That is the right default for
+   * a device that cannot run in the background -- and the wrong thing to impose
+   * on someone who knows the trade and wants the work done anyway.
+   *
+   * The trade, stated once and honestly: this page IS the runtime. A worker is
+   * a floating promise in the tab, so it runs only while the app is open and
+   * foregrounded. iOS suspends a backgrounded tab and kills the fetch in
+   * flight, which is not something a PWA can prevent -- WebKit has never
+   * shipped Background Sync or Background Fetch. So a worker interrupted that
+   * way is REPORTED as interrupted rather than quietly abandoned, and picked up
+   * again when the app comes back if its history can be repaired. What is never
+   * done is claiming it finished.
+   *
+   * dispatch returns instantly and the work continues after the return. That is
+   * not a nicety: the Live API's function calling is synchronous, so a tool that
+   * awaited the work would hold the model silent for the whole of it.
+   */
+  const workers = {};        // id -> record
+  let workerSeq = 0;
+
+  function workerFind(ref) {
+    const key = String(ref || "").trim().toLowerCase();
+    if (!key) return null;
+    return workers[key]
+      || Object.values(workers).find((w) => (w.name || "").toLowerCase() === key)
+      || null;
+  }
+
+  function workerAge(w) {
+    const s = Math.round(((w.ended || Date.now()) - w.started) / 1000);
+    return s < 60 ? s + "s" : Math.round(s / 60) + "m";
+  }
+
+  function workerLine(w) {
+    const bits = [w.id + " (" + w.name + ")", w.state];
+    if (w.state === "running") bits.push("for " + workerAge(w));
+    else bits.push("after " + workerAge(w));
+    if (w.changes.length) bits.push(w.changes.length + " file(s) changed");
+    let s = bits.join(", ");
+    if (w.report) s += " — " + w.report;
+    return s;
+  }
+
+  /* Start one. Returns immediately; runAgent keeps going on its own. */
+  function dispatchWorker(name, task) {
+    if (!task) return "ERROR: a worker needs a task to do.";
+    if (!session || !session.gh) return "ERROR: no repository is open.";
+    workerSeq += 1;
+    const id = "wk" + workerSeq;
+    const w = {
+      id, name: (name || id).trim() || id, task,
+      state: "running", report: "", started: Date.now(), ended: 0,
+      steer: [], stop: false, changes: [], before: {},
+    };
+    workers[id] = w;
+    addBubble("system", "⚙️ " + w.id + " (" + w.name + "): " + task, false);
+    haptic(10);
+
+    // Its own tool set, so what it touches is recorded against it and a commit
+    // is not gated behind a modal nobody can see while the voice sheet is up.
+    const tools = AC.makeTools(session.gh, {
+      confirmWrite: async () => true,
+      onCommit: (p) => {
+        if (!w.changes.includes(p)) w.changes.push(p);
+        session.turnCommits = (session.turnCommits || 0) + 1;
+      },
+      viewImage, needsDesktop,
+      beforeWrite: async (path) => {
+        // Snapshot once, for revert_worker. null means "did not exist".
+        if (Object.prototype.hasOwnProperty.call(w.before, path)) return;
+        try { w.before[path] = (await session.gh.getFile(path)).text; }
+        catch (e) { w.before[path] = null; }
+      },
+    });
+
+    const messages = [
+      { role: "system", content: AC.SUBAGENT_PROMPT + "\n\nRepository: "
+        + session.repo.full_name + " (branch " + session.repo.branch + ")." },
+      { role: "user", content: task },
+    ];
+    // Deliberately NOT awaited. The caller is a Live function call and the
+    // model is stopped until it returns.
+    AC.runAgent({
+      model: session.model, tools, messages,
+      toolSchemas: visionSchemas(AC.TOOL_SCHEMAS), maxSteps: 16,
+      shouldStop: () => w.stop || stopFlag,
+      takeSteer: () => w.steer.shift() || "",
+      onEvent: (ev) => {
+        armIdle();
+        if (ev.type === "answer") w.report = ev.text || "";
+        else if (ev.type === "error") { w.state = "failed"; w.report = ev.text || "error"; }
+      },
+    }).then(() => {
+      if (w.state === "running") w.state = w.stop ? "stopped" : "done";
+    }).catch((e) => {
+      w.state = "failed";
+      w.report = e && e.message ? e.message : String(e);
+    }).finally(() => {
+      w.ended = Date.now();
+      // The page dying mid-worker is the expected failure here, not a surprise,
+      // so it is named as itself rather than as a network error.
+      if (w.state === "failed" && document.hidden) {
+        w.state = "interrupted";
+        w.report = "the app was backgrounded while this was running, and the "
+          + "phone kills work in a hidden tab";
+      }
+      addBubble("system", "⚙️ " + workerLine(w), false);
+      persistSession();
+      syncSave().catch(() => {});
+    });
+    return "Started " + w.id + " (" + w.name + "). It runs while this app is "
+      + "open — tell the user it is going, and carry on.";
+  }
+
+  function checkWorkers() {
+    const all = Object.values(workers);
+    if (!all.length) return "No workers have been dispatched yet.";
+    return all.map(workerLine).join("\n");
+  }
+
+  function steerWorker(ref, message) {
+    const w = workerFind(ref);
+    if (!w) return "ERROR: no worker called " + ref + ".";
+    if (w.state !== "running") return w.id + " is already " + w.state + ".";
+    if (!message) return "ERROR: nothing to tell it.";
+    w.steer.push(message);
+    return "Passed that to " + w.id + " — it picks it up after its current step.";
+  }
+
+  function stopWorker(ref) {
+    const w = workerFind(ref);
+    if (!w) return "ERROR: no worker called " + ref + ".";
+    if (w.state !== "running") return w.id + " is already " + w.state + ".";
+    w.stop = true;
+    return "Stopping " + w.id + " at its next safe point.";
+  }
+
+  function workerChanges(ref) {
+    const w = workerFind(ref);
+    if (!w) return "ERROR: no worker called " + ref + ".";
+    if (!w.changes.length) return w.id + " has not changed any files.";
+    return w.id + " changed: " + w.changes.join(", ");
+  }
+
+  /* Put the files back as they were before this worker started.
+   *
+   * Destructive, and the schema tells the model to confirm out loud first. A
+   * file it created is deleted; one it edited goes back to the text captured
+   * before its first write. */
+  async function revertWorker(ref) {
+    const w = workerFind(ref);
+    if (!w) return "ERROR: no worker called " + ref + ".";
+    if (w.state === "running") return "ERROR: " + w.id + " is still running — stop it first.";
+    if (!w.changes.length) return w.id + " changed nothing, so there is nothing to undo.";
+    const undone = [], failed = [];
+    for (const path of w.changes) {
+      const prev = w.before[path];
+      try {
+        // The CURRENT sha, read now rather than remembered: GitHub rejects a
+        // write to an existing path without it, and that is the whole
+        // compare-and-swap this app's writes are built on. Reading it here also
+        // means a file someone else has touched since fails loudly instead of
+        // being silently clobbered by the revert.
+        let sha;
+        try { sha = (await session.gh.getFile(path)).sha; } catch (e) { sha = undefined; }
+        if (prev === null || prev === undefined) {
+          if (sha) await session.gh.deleteFile(path, "revert " + w.id, sha);
+        } else {
+          await session.gh.putFile(path, prev, "revert " + w.id, sha);
+        }
+        undone.push(path);
+      } catch (e) { failed.push(path); }
+    }
+    w.changes = w.changes.filter((p) => failed.includes(p));
+    let out = "Reverted " + undone.length + " file(s) from " + w.id + ".";
+    if (failed.length) out += " Could not revert: " + failed.join(", ") + ".";
+    return out;
+  }
+
   // Wrap a run: manage the running state, stop control, errors, and the
   // cross-device lock. Returns a { locked, lockedBy, lockedSince } object if
   // another live device holds the chat and force wasn't set (fn never runs
@@ -3198,16 +3381,24 @@
     established: false, said: "", heard: "", muted: false,
   };
   const VOICE_MAX_TRIES = 5;
-  // The tools a spoken session gets: everything that reads, plus the one that
-  // moves work to the desktop. Deliberately not the writing tools -- a commit
-  // you cannot see the diff of, triggered by a sentence that might have been
-  // misheard, is not something to do hands-free.
-  const VOICE_TOOL_NAMES = ["list_dir", "glob", "read_file", "grep",
-                            "search_code", "needs_desktop"];
-
+  /* What a spoken session can do: the same as the desktop's.
+   *
+   * It used to be the read tools plus needs_desktop, so asking it to do
+   * anything left a note for the computer rather than doing it. The reasoning
+   * was sound for a default -- a phone cannot work in the background, and a
+   * commit you cannot see the diff of, triggered by a sentence that might have
+   * been misheard, is a real risk. But it is the user's risk to take, and
+   * being told "I've written that down for your computer" when you asked for
+   * work is its own kind of broken.
+   *
+   * So: everything. The writing tools, and the workers that do the real work
+   * off the conversation. needs_desktop stays, because handing off is still
+   * the right answer for anything that needs a shell -- there is genuinely no
+   * shell here, and no tool set can invent one.
+   */
   function voiceSchemas() {
-    return [...AC.TOOL_SCHEMAS, AC.NEEDS_DESKTOP_SCHEMA]
-      .filter((t) => VOICE_TOOL_NAMES.includes(t.function.name));
+    return [...AC.TOOL_SCHEMAS, AC.VIEW_IMAGE_SCHEMA, AC.NEEDS_DESKTOP_SCHEMA,
+            ...AC.WORKER_SCHEMAS];
   }
 
   function voiceLiveKey() {
@@ -3278,12 +3469,27 @@
 
   async function voiceCallTool(name, args) {
     if (name === "needs_desktop") return needsDesktop(args.task || "", args.why || "");
+    // The workers, which are the whole point of the parity: dispatch returns
+    // instantly and the work carries on after it, because a Live function call
+    // holds the model silent until the tool returns.
+    if (name === "dispatch_worker") return dispatchWorker(args.name || "", args.task || "");
+    if (name === "check_workers") return checkWorkers();
+    if (name === "steer_worker") return steerWorker(args.worker || "", args.message || "");
+    if (name === "stop_worker") return stopWorker(args.worker || "");
+    if (name === "worker_changes") return workerChanges(args.worker || "");
+    if (name === "revert_worker") return revertWorker(args.worker || "");
     const t = session.tools;
     if (!t) return "ERROR: this chat is not open.";
     const fn = t[name];
     if (typeof fn !== "function") return "ERROR: no tool named " + name;
     return fn(args);
   }
+
+  // The tool dispatcher, reachable from a test. Deliberately the REAL one the
+  // socket calls rather than a stand-in: what is worth testing about a worker
+  // is that dispatch returns before the work is done, and a stub of this would
+  // be the one thing that cannot show it.
+  window.__voiceTool = voiceCallTool;
 
   function voiceOnMessage(payload) {
     // The only thing that distinguishes "the session is up" from "the socket
