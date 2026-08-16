@@ -2167,7 +2167,13 @@ TOOL_SCHEMAS = [
         "the file tools), and NOT for anything that keeps running (dev servers, watch mode, "
         "tunnels) -- it blocks until the command exits, so it will just time out. Use "
         "run_background for those instead. Avoid interactive commands. Working directory is "
-        "the project cwd.",
+        "the project cwd."
+        # Naming the escape alongside the trap: the line above tells the model
+        # to quote paths with spaces, and quoting the EXECUTABLE without the
+        # call operator is a PowerShell parse error, not a command.
+        + (" A quoted program path must be invoked with the call operator: "
+           '& \"C:\\Program Files\\x\\y.exe\" args -- without & it is just a string.'
+           if os.name == "nt" else ""),
         {
             "command": {"type": "string", "description": f"{shell_name()} command to run"},
             "timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default 120, max 600)"},

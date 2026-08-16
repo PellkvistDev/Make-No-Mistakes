@@ -107,6 +107,27 @@ def test_nothing_tells_a_posix_machine_it_has_powershell():
 
 # ------------------------------------------------------------ the rename --
 
+def _run_command_description() -> str:
+    schema = next(s for s in tools.TOOL_SCHEMAS
+                  if s["function"]["name"] == "run_command")
+    return schema["function"]["description"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="a PowerShell parsing rule")
+def test_windows_guidance_names_the_call_operator():
+    """The description tells the model to quote paths with spaces. On
+    PowerShell, quoting the EXECUTABLE and stopping there is a parse error --
+    `"x.exe" "y"` is two string literals, not a command -- so the trap and its
+    escape have to be stated together. This cost a red CI leg to learn.
+    """
+    assert "call operator" in _run_command_description()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="PowerShell-only guidance")
+def test_posix_guidance_is_not_cluttered_with_powershell_rules():
+    assert "call operator" not in _run_command_description()
+
+
 def test_the_model_is_offered_the_new_name_only():
     names = {s["function"]["name"] for s in tools.TOOL_SCHEMAS}
     assert "run_command" in names
@@ -146,7 +167,12 @@ def _script(directory, body: str) -> str:
     """
     path = directory / f"job_{abs(hash(body)) % 10_000}.py"
     path.write_text(body, encoding="utf-8")
-    return f'"{sys.executable}" "{path}"'
+    # The call operator is required on Windows: a quoted string at the start of
+    # a PowerShell command is a string EXPRESSION, not an invocation, so
+    # `"python.exe" "job.py"` is a parse error (UnexpectedToken) rather than a
+    # program being run. Quoting the path is unavoidable here, so `&` is too.
+    call = "& " if os.name == "nt" else ""
+    return f'{call}"{sys.executable}" "{path}"'
 
 
 _SPINS = "import time\nprint('up', flush=True)\nwhile True: time.sleep(0.1)\n"
