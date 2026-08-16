@@ -84,3 +84,51 @@ def test_dispatch_still_promises_to_return_instantly():
     d = _phone()["dispatch_worker"]["description"]
     assert "WITHOUT blocking" in d
     assert "Returns instantly" in d or "returns instantly" in d
+
+
+# ---- the prompt, which is half of whether a tool gets used -----------------
+#
+# The tools were all declared and the phone still said it could not write files
+# or send out agents. The prompt is the other half: it carried an unqualified
+# "This is a phone: nothing can be run, built, tested or served", sitting right
+# beside the hand-off tool. Read as a capability statement -- which is exactly
+# how it reads when someone asks "can you do this?" -- it says no.
+#
+# The limit is real but narrow: no shell, so no commands. Everything else is
+# available, and the prompt has to say which is which.
+
+def _live_prompt():
+    out = subprocess.run(
+        ["node", "-e",
+         "const C=require(process.argv[1]); console.log(C.LIVE_VOICE_PROMPT);",
+         str(CORE_JS)],
+        capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, out.stderr
+    return out.stdout
+
+
+@needs_node
+def test_the_prompt_does_not_deny_doing_work_in_general():
+    """The sentence that produced "I can't write files": absolute, and about
+    the whole device rather than about the shell."""
+    p = _live_prompt().lower()
+    for denial in ("nothing can be run, built, tested or served",
+                   "you cannot change", "read-only"):
+        assert denial not in p, f"the prompt tells the model it cannot work: {denial!r}"
+
+
+@needs_node
+def test_the_prompt_scopes_the_limit_to_running_commands():
+    p = _live_prompt().lower()
+    assert "no shell" in p
+    assert "command" in p
+
+
+@needs_node
+def test_the_prompt_says_plainly_that_it_can_write_and_dispatch():
+    """Declaring a tool is not the same as telling the model it may use it,
+    and the failure looks identical from outside."""
+    p = _live_prompt()
+    assert "dispatch_worker" in p
+    assert "write" in p.lower()
+    assert "never say otherwise" in p.lower()

@@ -2731,6 +2731,20 @@
       ["voice", voiceAvailable() ? "ready" : voiceUnavailableReason()],
       ["apis", getProviders().map((p) => (p.name || "?")
         + (p.key ? "" : " (no key)")).join(", ") || "none"],
+      // What the spoken session was actually offered. The model claiming it
+      // cannot write files is a claim about this list, and this is the only
+      // place it can be checked against reality rather than against source.
+      ["voice tools", voice.sentTools === null
+        ? "voice not opened yet on this launch"
+        : voice.sentTools.length + " — " + (voice.sentTools.join(", ") || "none")],
+      // A property of the BUNDLE, so it is reported without needing a session:
+      // a tool that is declared but never mentioned in the prompt is one the
+      // model does not reach for, which looks identical to one that is missing.
+      ["voice prompt", (/dispatch_worker/.test(AC.LIVE_VOICE_PROMPT || "")
+        ? "mentions workers" : "NO worker instructions")
+        + (voice.sentPromptChars ? ", " + voice.sentPromptChars + " chars sent" : "")],
+      ["voice resumed", voice.sentTools === null ? "—" : String(voice.resumed)],
+      ["voice last close", voice.lastClose || "—"],
       ["standalone", String(!!(window.matchMedia("(display-mode: standalone)").matches ||
                                navigator.standalone))],
       ["platform", navigator.platform || "?"],
@@ -3385,6 +3399,8 @@
     ws: null, ctx: null, node: null, stream: null, on: false,
     playAt: 0, sources: [], handle: "", closing: false, tries: 0,
     established: false, said: "", heard: "", muted: false,
+    // Recorded from the last setup actually built, for the diagnostics panel.
+    sentTools: null, sentPromptChars: 0, resumed: false, lastClose: "",
   };
   const VOICE_MAX_TRIES = 5;
   /* What a spoken session can do: the same as the desktop's.
@@ -3505,6 +3521,13 @@
   // is that dispatch returns before the work is done, and a stub of this would
   // be the one thing that cannot show it.
   window.__voiceTool = voiceCallTool;
+  // Seams for the diagnostics tests: what the panel reports has to be driven
+  // from the same fields voiceOpen writes, or the test proves only that a
+  // string can be formatted.
+  window.__diagPoke = (names, chars) => {
+    voice.sentTools = names; voice.sentPromptChars = chars;
+  };
+  window.__diagClose = (s) => { voice.lastClose = s; };
 
   function voiceOnMessage(payload) {
     // The only thing that distinguishes "the session is up" from "the socket
@@ -3581,6 +3604,17 @@
     if (!key) return Promise.resolve(false);
     const setup = AC.liveSetup(AC.LIVE_MODEL, AC.LIVE_VOICE_PROMPT, voiceSchemas(),
       { resumeHandle: voice.handle });
+    // What actually went on the wire, kept for the diagnostics panel.
+    //
+    // "It says it can't write files" is a claim about the tool list, and until
+    // now the only way to check it was to reason about the source and hope the
+    // device was running it. Two rounds were lost to that. This reads the
+    // declarations out of the built message, on the phone, after the fact.
+    const decls = ((setup.setup.tools || [])[0] || {}).functionDeclarations || [];
+    voice.sentTools = decls.map((d) => d.name);
+    voice.sentPromptChars = ((setup.setup.systemInstruction || {}).parts || [{}])[0].text
+      ? setup.setup.systemInstruction.parts[0].text.length : 0;
+    voice.resumed = !!voice.handle;
     return new Promise((resolve) => {
       let ws;
       try { ws = new WebSocket(AC.liveWsUrl(key)); } catch (e) { resolve(false); return; }
@@ -3601,6 +3635,7 @@
         // throwing that away leaves "kept losing the connection" as the only
         // thing the app can say about a message it built wrong itself.
         const why = (ev && ev.reason ? ev.reason : "").trim();
+        voice.lastClose = (ev && ev.code ? ev.code : "?") + (why ? " " + why : "");
         if (!voice.established) {
           // Closed before the session opened. Retrying cannot help: the same
           // setup is rejected the same way every time.

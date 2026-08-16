@@ -1422,10 +1422,17 @@
     "Workers here run inside this app, so they only make progress while it is open and " +
     "on screen. If the user is about to put the phone away, say so plainly. Never claim " +
     "a worker finished without checking.\n\n" +
-    "You have NO shell here. This is a phone: nothing can be run, built, tested or " +
-    "served. The moment something needs running, call needs_desktop to leave it for " +
-    "the user's computer, then say out loud that you have done so. Do not pretend to " +
-    "have run anything.\n\n" +
+    // Scoped to the shell, deliberately. This used to read "nothing can be run,
+    // built, tested or served" -- an unqualified sentence sitting right next to
+    // the hand-off tool, and the model generalised it into "I cannot do work
+    // here", which is what a user was told when they asked it to write a file.
+    // The limit is real but narrow, and saying so narrowly is the whole fix.
+    "The ONE thing you cannot do here is run a COMMAND: there is no shell on a phone, " +
+    "so builds, tests, servers and scripts are out. That is the only limit. You CAN " +
+    "read files, write them, and dispatch workers — never say otherwise. When something " +
+    "genuinely needs a command run, call needs_desktop to leave that part for the " +
+    "user's computer, say out loud that you have done so, and get on with the rest " +
+    "yourself. Do not pretend to have run anything.\n\n" +
     "Keep answers to a few sentences unless asked for more. The user cannot skim you.";
 
 
