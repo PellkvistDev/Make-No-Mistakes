@@ -10,7 +10,7 @@ the terminal. It uses z.ai's free GLM models:
 | Vision (screenshots, mockups, diagrams) | `glm-4.6v-flash` (9B VLM) | free |
 
 It works like Claude Code: an agentic loop with real tools — it reads and edits
-files, searches your codebase, runs PowerShell commands, keeps a todo list,
+files, searches your codebase, runs shell commands, keeps a todo list,
 searches the web and fetches docs, and asks for your permission before doing
 anything destructive (unless you put it in auto mode).
 
@@ -24,6 +24,31 @@ backup snapshot) for self-review; and if a turn edits files without running
 anything, a one-time **verify nudge** pushes it to test its changes before
 finishing. In the chat, file paths in `inline code` are **clickable** — they
 open in whatever your OS associates with them.
+
+## Which machines this runs on
+
+The agent itself is cross-platform: `run_command` runs PowerShell on Windows
+and bash (or `/bin/sh`) on macOS and Linux, and the system prompt names
+whichever one this machine actually has, so the model writes for the right
+shell. Everything else — the file tools, git, the backups, sync, the desktop
+app — was already portable.
+
+What is still Windows-only is the **setup**: `install.ps1` is a PowerShell
+script and the launchers it writes are `.cmd` files. On macOS or Linux, skip
+it and run from a checkout:
+
+```sh
+pip install -r requirements.txt
+python -m glmcode         # terminal — works with the pip deps alone
+python -m glmcode.gui     # desktop app — also needs a system webview
+```
+
+The desktop app is pywebview, which renders through the OS's own web view:
+built in on macOS, but on Linux it needs GTK + WebKit installed from your
+package manager (`gir1.2-webkit2-4.1` and `python3-gi` on Debian/Ubuntu).
+The terminal version has no such dependency. Neither macOS nor Linux is
+tested on real hardware yet — CI covers Windows and Ubuntu, and the shell
+tool is now exercised for real on both.
 
 ## Setup (once)
 
@@ -211,7 +236,7 @@ you any existing image file with `show_image`, without analyzing it.
 ### Browser preview
 
 The agent can start a dev server itself with `run_background` (unlike
-`run_powershell`, which blocks until a command exits, this keeps running so
+`run_command`, which blocks until a command exits, this keeps running so
 it can be checked on later) and then actually look at the result with
 `preview_page`: it loads a URL in headless Chromium and takes a screenshot,
 shown inline in the chat, instead of just assuming a web UI change looks
@@ -482,7 +507,7 @@ files are snapshotted to a hidden git repo (`~/.makenomistakes/backups/`) — se
 from any git repo the project already has, so it never touches your real
 history, branches, or commits. Since it's just diffing the directory's
 current state, it works no matter *how* something changed — a bad edit, a
-destructive `run_powershell` command, whatever — as long as the change
+destructive `run_command` command, whatever — as long as the change
 stayed inside the project folder (installs/effects outside it, or already-
 running processes, aren't something a file revert can undo).
 
@@ -608,7 +633,7 @@ glmcode/
   api.py          z.ai client: SSE streaming, tool-call merging, retries, vision
   agent.py        the agentic loop (model <-> tools), compaction, image routing
   tools.py        read_file, write_file, edit_file, list_dir, glob, grep,
-                  run_powershell, todo_write, web_search, fetch_url
+                  run_command, todo_write, web_search, fetch_url
   permissions.py  ask/autoedit/yolo modes, session allowlists, diff previews
   prompts.py      the system prompt, vision-analysis prompt, compaction prompt
   sessions.py     ~/.makenomistakes/sessions/*.json — chat history per project folder

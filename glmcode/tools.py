@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -967,9 +968,67 @@ def find_references(symbol: str, path: str = ".", glob: str = "",
 
 
 # --------------------------------------------------------------------- #
-# run_powershell (+ interruption)
+# Which shell the command tools run through.
 #
-# run_powershell BLOCKS the turn thread until the command exits. A command
+# This was hard-coded to `powershell`, which meant run_command could not even
+# START on macOS or Linux -- every command raised "Failed to start PowerShell"
+# -- while prompts.py was already telling the model it had a POSIX shell
+# there. run_check_command, eighty lines below, has had the platform branch
+# all along; this is the same branch, in the place the agent actually uses.
+#
+# CI never caught it because the ubuntu leg substitutes a fake Popen for the
+# absent PowerShell (tests/test_stop_command.py), so the one platform CI
+# exercises was the one where the real tool could not start. There are now
+# end-to-end tests that run a real command through the real tool on both.
+#
+# bash is preferred over /bin/sh where it exists: a model told it has "a POSIX
+# shell" writes bashisms ([[ ]], arrays, $'...') at some rate, and on
+# Debian-family systems /bin/sh is dash, which rejects them with syntax errors
+# that read as "the command was wrong" rather than "the interpreter was".
+
+_PS_ARGV = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass"]
+_PS_PREAMBLE = (
+    "$ErrorActionPreference='Continue'; "
+    "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+    "$OutputEncoding=[System.Text.Encoding]::UTF8; "
+)
+
+
+def _posix_shell() -> str:
+    for candidate in ("/bin/bash", "/usr/bin/bash", "/bin/sh"):
+        if Path(candidate).exists():
+            return candidate
+    return "/bin/sh"
+
+
+def shell_name() -> str:
+    """What to call this platform's shell when telling the model about it.
+
+    Named exactly rather than approximately: prompts.py puts this in the system
+    prompt, and naming the wrong shell is what makes the agent write commands
+    that cannot run here.
+    """
+    if os.name == "nt":
+        return "Windows PowerShell"
+    return "bash" if _posix_shell().endswith("bash") else "a POSIX shell (sh)"
+
+
+def _shell_argv(command: str) -> list[str]:
+    if os.name == "nt":
+        return _PS_ARGV + ["-Command", _PS_PREAMBLE + command]
+    return [_posix_shell(), "-c", command]
+
+
+# Start every shell in its own process group, so stopping one can kill what it
+# spawned rather than just the shell. Windows gets the same reach from
+# `taskkill /T` at kill time instead (see _terminate_process_tree).
+_NEW_GROUP_KWARGS = {} if sys.platform == "win32" else {"start_new_session": True}
+
+
+# --------------------------------------------------------------------- #
+# run_command (+ interruption)
+#
+# run_command BLOCKS the turn thread until the command exits. A command
 # that never returns on its own -- a dev server (`npm run dev`), a file
 # watcher, a tunnel -- would otherwise freeze the whole chat until the
 # timeout fires (up to 10 min). Two things guard against that: the tool
@@ -986,7 +1045,7 @@ _call_token = threading.local()
 
 def set_call_token(token) -> None:
     """The agent sets this on its turn thread before each top-level tool
-    dispatch; run_powershell reads it to register its process for stopping.
+    dispatch; run_command reads it to register its process for stopping.
     Thread-local so parallel chats never see each other's token."""
     _call_token.value = token
 
@@ -1010,26 +1069,20 @@ def stop_foreground(token: str) -> bool:
     return True
 
 
-def run_powershell(command: str, timeout_seconds: int = 120) -> str:
+def run_command(command: str, timeout_seconds: int = 120) -> str:
     timeout_seconds = max(1, min(int(timeout_seconds), 600))
-    wrapped = (
-        "$ErrorActionPreference='Continue'; "
-        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
-        "$OutputEncoding=[System.Text.Encoding]::UTF8; "
-        + command
-    )
     token = get_call_token()
     try:
         # Popen (not subprocess.run) so a Stop click from another thread can
         # reach in and kill the tree while communicate() waits.
         proc = subprocess.Popen(
-            ["powershell", "-NoProfile", "-NonInteractive",
-             "-ExecutionPolicy", "Bypass", "-Command", wrapped],
+            _shell_argv(command),
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            cwd=str(get_workdir()), **NO_WINDOW_KWARGS,
+            cwd=str(get_workdir()), **NO_WINDOW_KWARGS, **_NEW_GROUP_KWARGS,
         )
     except OSError as e:
-        raise ToolErrorBase(f"Failed to start PowerShell: {e}", ErrorSeverity.ERROR)
+        raise ToolErrorBase(f"Failed to start {shell_name()}: {e}", ErrorSeverity.ERROR)
+    _register_own_group(proc)
 
     if token:
         with _foreground_lock:
@@ -1091,24 +1144,26 @@ def run_powershell(command: str, timeout_seconds: int = 120) -> str:
     return _truncate("\n".join(parts))
 
 
+# The name the tool had while it could only ever be PowerShell. Kept because
+# saved sessions, per-tool session allowlists and any custom command aliases
+# refer to it by name, and none of those should break on upgrade.
+run_powershell = run_command
+
+
 def run_check_command(command: str, timeout_seconds: int = 180) -> tuple[int, str]:
     """Run a verification command in the working dir and return (exit_code,
-    combined stdout+stderr). Cross-platform: PowerShell on Windows, /bin/sh
-    elsewhere. Used by the 'make it green' loop to run the project's tests
-    deterministically (the model doesn't get to decide whether to run them)."""
+    combined stdout+stderr). Same shell as run_command. Used by the 'make it
+    green' loop to run the project's tests deterministically (the model
+    doesn't get to decide whether to run them)."""
     timeout_seconds = max(1, min(int(timeout_seconds), 600))
-    if os.name == "nt":
-        argv = ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy",
-                "Bypass", "-Command", "$ErrorActionPreference='Continue'; " + command]
-    else:
-        argv = ["/bin/sh", "-c", command]
     try:
         proc = subprocess.Popen(
-            argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            cwd=str(get_workdir()), **NO_WINDOW_KWARGS,
+            _shell_argv(command), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=str(get_workdir()), **NO_WINDOW_KWARGS, **_NEW_GROUP_KWARGS,
         )
     except OSError as e:
         return (127, f"Failed to start command: {e}")
+    _register_own_group(proc)
     try:
         out_b, _ = proc.communicate(timeout=timeout_seconds)
     except subprocess.TimeoutExpired:
@@ -1125,9 +1180,9 @@ def run_check_command(command: str, timeout_seconds: int = 180) -> tuple[int, st
 # --------------------------------------------------------------------- #
 # run_background / read_output / stop_process / list_processes
 #
-# run_powershell blocks until the command exits, so it can't be used for
+# run_command blocks until the command exits, so it can't be used for
 # anything long-lived (dev servers, watch mode, tunnels). These four tools
-# manage detached PowerShell processes instead: a background reader thread
+# manage detached shell processes instead: a background reader thread
 # per process continuously drains its (merged stdout+stderr) pipe into a
 # capped rolling buffer, so read_output never has to block waiting for more
 # output and a chatty server can't grow the buffer unbounded.
@@ -1175,10 +1230,62 @@ class _BackgroundProcess:
             return new
 
 
+# pid -> the Popen we started in its own session. Weak-valued would be neater,
+# but Popen is not weak-referenceable on every runtime; entries are dropped on
+# kill, and a stale one cannot misfire because the identity check in
+# _own_process_group also has to match the same object.
+_group_lock = threading.Lock()
+_own_group_pids: dict[int, subprocess.Popen] = {}
+
+
+def _register_own_group(proc: subprocess.Popen) -> None:
+    if sys.platform == "win32" or not _NEW_GROUP_KWARGS:
+        return
+    try:
+        pid = int(proc.pid)
+    except (AttributeError, TypeError, ValueError):
+        return
+    with _group_lock:
+        # Sweep finished commands on the way in, so a long chat that has run a
+        # thousand of them isn't still holding a thousand dead Popen objects.
+        # Cheap: only live commands are normally in here.
+        for dead in [p for p, q in _own_group_pids.items() if q.poll() is not None]:
+            _own_group_pids.pop(dead, None)
+        _own_group_pids[pid] = proc
+
+
+def _own_process_group(proc: subprocess.Popen) -> int | None:
+    """The process group this module created for `proc`, or None.
+
+    Membership is RECORDED at spawn time rather than inferred from the pid,
+    because every way of inferring it is wrong in a case that actually occurs:
+
+      - a process that has already exited has a pid the OS can recycle, and
+        killpg on a recycled pid signals a stranger's process tree;
+      - a fake process object -- which every other test of these tools
+        substitutes -- carries an invented pid that belongs to whatever really
+        holds it. Not hypothetical: an unguarded killpg here SIGTERM'd the test
+        runner itself, because pid 4321 from tests/test_stop_command.py
+        resolved to a live group.
+
+    So the only pids signalled as groups are ones this process put in their own
+    session, and the identity check confirms the object is still that process.
+    """
+    if sys.platform == "win32":
+        return None
+    try:
+        if proc.poll() is not None:
+            return None
+    except (AttributeError, TypeError, OSError):
+        return None
+    with _group_lock:
+        return proc.pid if _own_group_pids.get(proc.pid) is proc else None
+
+
 def _terminate_process_tree(proc: subprocess.Popen) -> None:
-    # proc.terminate() only signals the PowerShell process itself, not
-    # whatever it launched (node, python, etc.) -- taskkill /T walks the
-    # whole tree so the actual server process doesn't linger.
+    # proc.terminate() only signals the shell itself, not whatever it launched
+    # (node, python, etc.), so a stopped `npm run dev` would leave the actual
+    # server running invisibly. Both branches below reach the whole tree.
     if sys.platform == "win32":
         try:
             subprocess.run(
@@ -1187,6 +1294,16 @@ def _terminate_process_tree(proc: subprocess.Popen) -> None:
             )
             return
         except (OSError, subprocess.TimeoutExpired):
+            pass
+    elif _own_process_group(proc) is not None:
+        # Started with start_new_session=True, so the shell's pid is also its
+        # process-group id and signalling the group reaches its children.
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            with _group_lock:
+                _own_group_pids.pop(proc.pid, None)
+            return
+        except OSError:
             pass
     try:
         proc.terminate()
@@ -1206,22 +1323,16 @@ def run_background(command: str, cwd: str = "") -> str:
     work_dir = _resolve(cwd) if cwd else get_workdir()
     if not work_dir.is_dir():
         raise ToolErrorBase(f"Directory not found: {work_dir}", ErrorSeverity.ERROR)
-    wrapped = (
-        "$ErrorActionPreference='Continue'; "
-        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
-        "$OutputEncoding=[System.Text.Encoding]::UTF8; "
-        + command
-    )
     try:
         proc = subprocess.Popen(
-            ["powershell", "-NoProfile", "-NonInteractive",
-             "-ExecutionPolicy", "Bypass", "-Command", wrapped],
+            _shell_argv(command),
             cwd=str(work_dir), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", bufsize=1,
-            **NO_WINDOW_KWARGS,
+            **NO_WINDOW_KWARGS, **_NEW_GROUP_KWARGS,
         )
     except OSError as e:
-        raise ToolErrorBase(f"Failed to start PowerShell: {e}", ErrorSeverity.ERROR)
+        raise ToolErrorBase(f"Failed to start {shell_name()}: {e}", ErrorSeverity.ERROR)
+    _register_own_group(proc)
 
     with _bg_lock:
         bg_id = f"bg-{next(_bg_counter)}"
@@ -1607,7 +1718,7 @@ def git_status(path: str = ".") -> str:
 
     # Check if it's a git repo
     try:
-        result = run_powershell(f"git -C {p} status --porcelain --branch", timeout_seconds=30)
+        result = run_command(f"git -C {p} status --porcelain --branch", timeout_seconds=30)
         if result.startswith("fatal:"):
             return f"Not a git repository: {p}\nTo initialize: git init {p}"
     except ToolErrorBase:
@@ -1646,7 +1757,7 @@ def git_status(path: str = ".") -> str:
 def git_branch(path: str = ".") -> str:
     """Get current git branch name."""
     try:
-        result = run_powershell(f"git -C {path} rev-parse --abbrev-ref HEAD", timeout_seconds=10)
+        result = run_command(f"git -C {path} rev-parse --abbrev-ref HEAD", timeout_seconds=10)
         return result.strip()
     except ToolErrorBase:
         return "unknown"
@@ -1659,7 +1770,7 @@ def git_diff(path: str = ".", file_pattern: str = "") -> str:
         raise ToolErrorBase(f"Not a directory: {p}", ErrorSeverity.ERROR)
 
     try:
-        result = run_powershell(f"git -C {p} diff --color=never --no-index /dev/null /dev/null", timeout_seconds=10)
+        result = run_command(f"git -C {p} diff --color=never --no-index /dev/null /dev/null", timeout_seconds=10)
         if result.startswith("fatal:"):
             return f"Not a git repository: {p}"
     except ToolErrorBase:
@@ -1671,7 +1782,7 @@ def git_diff(path: str = ".", file_pattern: str = "") -> str:
     else:
         cmd += " --"
     try:
-        result = run_powershell(cmd, timeout_seconds=30)
+        result = run_command(cmd, timeout_seconds=30)
         if not result.strip():
             return f"{path}: no uncommitted changes"
         return result
@@ -1686,7 +1797,7 @@ def git_log(path: str = ".", max_count: int = 5) -> str:
         raise ToolErrorBase(f"Not a directory: {p}", ErrorSeverity.ERROR)
 
     try:
-        result = run_powershell(f"git -C {p} log --oneline -n {max_count}", timeout_seconds=10)
+        result = run_command(f"git -C {p} log --oneline -n {max_count}", timeout_seconds=10)
         if result.startswith("fatal:"):
             return f"Not a git repository: {p}"
         if not result.strip():
@@ -1706,7 +1817,7 @@ def git_commit(path: str = ".", message: str = "") -> str:
         return "ERROR: commit message required. Use: git_commit(path='.', message='your commit message')"
 
     try:
-        result = run_powershell(f'git -C {p} commit -m "{message}"', timeout_seconds=30)
+        result = run_command(f'git -C {p} commit -m "{message}"', timeout_seconds=30)
         if result.startswith("fatal:"):
             return f"git commit failed: {result}"
         return result
@@ -1724,7 +1835,7 @@ def git_push(path: str = ".", remote: str = "origin", branch: str = "") -> str:
         cmd = f"git -C {p} push {remote}"
         if branch:
             cmd += f" {branch}"
-        result = run_powershell(cmd, timeout_seconds=60)
+        result = run_command(cmd, timeout_seconds=60)
         if result.startswith("fatal:"):
             return f"git push failed: {result}"
         return result
@@ -1742,7 +1853,7 @@ def git_pull(path: str = ".", remote: str = "origin", branch: str = "") -> str:
         cmd = f"git -C {p} pull {remote}"
         if branch:
             cmd += f" {branch}"
-        result = run_powershell(cmd, timeout_seconds=60)
+        result = run_command(cmd, timeout_seconds=60)
         if result.startswith("fatal:"):
             return f"git pull failed: {result}"
         return result
@@ -1757,7 +1868,7 @@ def git_branch_list(path: str = ".") -> str:
         raise ToolErrorBase(f"Not a directory: {p}", ErrorSeverity.ERROR)
 
     try:
-        result = run_powershell(f"git -C {p} branch --color=never", timeout_seconds=10)
+        result = run_command(f"git -C {p} branch --color=never", timeout_seconds=10)
         if result.startswith("fatal:"):
             return f"Not a git repository: {p}"
         if not result.strip():
@@ -1788,7 +1899,10 @@ def list_tests(path: str = ".") -> str:
     for framework, commands in test_patterns:
         for cmd in commands:
             try:
-                result = run_powershell(f'cd {p}; {cmd} 2>&1 | Select-String -Pattern "test|spec" -CaseSensitive:$false', timeout_seconds=10)
+                # The Select-String pipeline this used to carry was PowerShell
+                # syntax (so it failed everywhere else) AND redundant: the
+                # same filter is applied to the result on the next line.
+                result = run_command(f'cd "{p}"; {cmd}', timeout_seconds=10)
                 if "test" in result.lower() or "spec" in result.lower():
                     found.append(f"{framework}: {cmd}")
                     break
@@ -1828,7 +1942,7 @@ def run_tests(path: str = ".", test_pattern: str = "") -> str:
 
     for cmd in test_commands:
         try:
-            result = run_powershell(f'cd {p}; {cmd}', timeout_seconds=120)
+            result = run_command(f'cd "{p}"; {cmd}', timeout_seconds=120)
             if "passed" in result.lower() or "failed" in result.lower() or "error" in result.lower():
                 return f"Running: {cmd}\n\n{result}"
         except ToolErrorBase:
@@ -1855,7 +1969,7 @@ def run_test_file(path: str = ".", file_pattern: str = "") -> str:
 
     for cmd in test_commands:
         try:
-            result = run_powershell(f'cd {p}; {cmd}', timeout_seconds=120)
+            result = run_command(f'cd "{p}"; {cmd}', timeout_seconds=120)
             if "passed" in result.lower() or "failed" in result.lower():
                 return f"Running: {cmd}\n\n{result}"
         except ToolErrorBase:
@@ -2042,29 +2156,34 @@ TOOL_SCHEMAS = [
         },
         ["number", "body"],
     ),
+    # The shell is named from the platform rather than hard-coded, because the
+    # description is what the model writes syntax against: telling it
+    # "PowerShell" on a Mac is how you get Select-String and $env: in a command
+    # that then fails for reasons the model cannot see.
     _schema(
-        "run_powershell",
-        "Run a Windows PowerShell command and return stdout/stderr/exit code. Use for running "
-        "programs, tests, git, package managers. NOT for reading/searching files (use the file "
-        "tools), and NOT for anything that keeps running (dev servers, watch mode, tunnels) -- "
-        "it blocks until the command exits, so it will just time out. Use run_background for "
-        "those instead. Avoid interactive commands. Working directory is the project cwd.",
+        "run_command",
+        f"Run a shell command ({shell_name()}) and return stdout/stderr/exit code. Use for "
+        "running programs, tests, git, package managers. NOT for reading/searching files (use "
+        "the file tools), and NOT for anything that keeps running (dev servers, watch mode, "
+        "tunnels) -- it blocks until the command exits, so it will just time out. Use "
+        "run_background for those instead. Avoid interactive commands. Working directory is "
+        "the project cwd.",
         {
-            "command": {"type": "string", "description": "PowerShell command to run"},
+            "command": {"type": "string", "description": f"{shell_name()} command to run"},
             "timeout_seconds": {"type": "integer", "description": "Timeout in seconds (default 120, max 600)"},
         },
         ["command"],
     ),
     _schema(
         "run_background",
-        "Start a long-lived PowerShell command (dev server, build watcher, tunnel, etc.) "
+        f"Start a long-lived {shell_name()} command (dev server, build watcher, tunnel, etc.) "
         "WITHOUT blocking -- it keeps running after this call returns. Returns a process id "
         "plus whatever output arrived in the first second (so immediate failures like a bad "
         "command or a port already in use show up right away). Use read_output to check on "
         "it later and stop_process when you're done with it. For anything that finishes on "
-        "its own (tests, builds, git, one-shot scripts), use run_powershell instead.",
+        "its own (tests, builds, git, one-shot scripts), use run_command instead.",
         {
-            "command": {"type": "string", "description": "PowerShell command to run in the background"},
+            "command": {"type": "string", "description": f"{shell_name()} command to run in the background"},
             "cwd": {"type": "string", "description": "Working directory (default: project cwd)"},
         },
         ["command"],
@@ -2670,6 +2789,12 @@ SHOW_HTTP_CAT_TOOL = "show_http_cat"
 PREVIEW_PAGE_TOOL = "preview_page"
 CHECK_PAGE_TOOL = "check_page"
 
+RUN_COMMAND_TOOL = "run_command"
+# Both names, in one place, because several callers have to recognise a shell
+# command by tool name -- the permission engine, the Stop button, the verify
+# nudge -- and a saved session can still hand them the old one.
+SHELL_TOOL_NAMES = frozenset({RUN_COMMAND_TOOL, "run_powershell"})
+
 
 TOOL_FUNCTIONS = {
     "read_file": read_file,
@@ -2685,7 +2810,10 @@ TOOL_FUNCTIONS = {
     "go_to_definition": go_to_definition,
     "scan_secrets": scan_secrets,
     "post_pr_comment": post_pr_comment,
-    "run_powershell": run_powershell,
+    "run_command": run_command,
+    # Old sessions replay tool calls by name, so the retired name still has to
+    # resolve -- it is not offered to the model, only accepted from history.
+    "run_powershell": run_command,
     "run_background": run_background,
     "read_output": read_output,
     "stop_process": stop_process,

@@ -427,6 +427,9 @@ const ICONS = {
   glob: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
   grep: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
   find_references: '<circle cx="12" cy="12" r="10"/><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/>',
+  run_command: '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
+  // The name this tool had while it could only be PowerShell. Old chats
+  // replay their saved tool calls, so both still have to render.
   run_powershell: '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
   todo_write: '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
   web_search: '<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
@@ -445,6 +448,7 @@ function toolIcon(name) {
 function toolSummary(name, args) {
   switch (name) {
     case "read_file": case "write_file": case "edit_file": return args.path || "";
+    case "run_command":
     case "run_powershell": return args.command || "";
     case "grep": return `/${args.pattern || ""}/` + (args.glob ? ` ${args.glob}` : "");
     case "find_references": return args.symbol || "";
@@ -479,7 +483,7 @@ function toolSummary(name, args) {
 // Tools that shell out and can block indefinitely (a dev server, a watch,
 // a hung test run). Their chat box gets a Stop button while running so a
 // never-ending command can't freeze the whole turn.
-const STOPPABLE_TOOLS = new Set(["run_powershell", "run_tests", "run_test_file"]);
+const STOPPABLE_TOOLS = new Set(["run_command", "run_powershell", "run_tests", "run_test_file"]);
 
 function buildToolEl(name, args, callId) {
   const el = document.createElement("div");
@@ -5796,7 +5800,8 @@ function workerActivity(kind, data) {
     const n = data.name || "working";
     const map = {
       edit_file: "editing", write_file: "writing", read_file: "reading",
-      run_powershell: "running a command", run_tests: "running tests",
+      run_command: "running a command", run_powershell: "running a command",
+      run_tests: "running tests",
       run_test_file: "running tests", grep: "searching", glob: "searching",
       list_dir: "looking around", web_search: "searching the web",
     };
