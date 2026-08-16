@@ -136,11 +136,24 @@ def test_the_permission_engine_recognises_both_names():
 
 # ------------------------------------------------- long-lived commands ----
 
+def _script(directory, body: str) -> str:
+    """Write a throwaway python script and return a command that runs it.
+
+    Deliberately a file rather than `python -c "..."`: the command is one
+    argument to Popen, and getting a multi-line, nested-quote string through
+    both Windows' list2cmdline AND PowerShell's own parser intact is a coin
+    toss. Nothing here is testing quoting, so it shouldn't be exposed to it.
+    """
+    path = directory / f"job_{abs(hash(body)) % 10_000}.py"
+    path.write_text(body, encoding="utf-8")
+    return f'"{sys.executable}" "{path}"'
+
+
+_SPINS = "import time\nprint('up', flush=True)\nwhile True: time.sleep(0.1)\n"
+
+
 def test_a_background_process_starts_reports_and_stops(_workdir):
-    started = tools.run_background(
-        f'{sys.executable} -c "import time' + "\n" +
-        'print(\'up\', flush=True)' + "\n" +
-        'while True: time.sleep(0.1)"')
+    started = tools.run_background(_script(_workdir, _SPINS))
     assert "status: running" in started
     bg_id = started.split("'")[1]
     try:
@@ -207,9 +220,7 @@ def test_stopping_a_background_process_kills_what_it_spawned(_workdir):
     """The reason the shell is started in its own process group. proc.terminate()
     signals only the shell, so a stopped `npm run dev` would leave the actual
     server holding the port -- invisibly, since the app believes it stopped it."""
-    started = tools.run_background(
-        f'{sys.executable} -c "import time' + "\n" +
-        'while True: time.sleep(0.1)" & echo spawned; wait')
+    started = tools.run_background(_script(_workdir, _SPINS) + " & echo spawned; wait")
     bg_id = started.split("'")[1]
     proc = tools._bg_processes[bg_id].proc
     pgid = os.getpgid(proc.pid)
