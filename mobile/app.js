@@ -3045,8 +3045,14 @@
         // deploy landing at that moment is pure bad luck they didn't cause.
         // Wait for the turn to finish — the new code is one reload away either
         // way, and this one can be a quiet one.
+        //
+        // A spoken session counts as mid-turn, and so does a running worker.
+        // Both live entirely in this page: reloading drops the socket in the
+        // middle of a sentence, or kills work the user was told had started.
         const whenIdle = () => {
-          if (currentRun || composing) return setTimeout(whenIdle, 1000);
+          const busy = currentRun || composing || voice.on
+            || Object.values(workers).some((w) => w.state === "running");
+          if (busy) return setTimeout(whenIdle, 1000);
           location.reload();
         };
         whenIdle();
@@ -3397,8 +3403,17 @@
    * shell here, and no tool set can invent one.
    */
   function voiceSchemas() {
-    return [...AC.TOOL_SCHEMAS, AC.VIEW_IMAGE_SCHEMA, AC.NEEDS_DESKTOP_SCHEMA,
-            ...AC.WORKER_SCHEMAS];
+    // Guarded because app.js and agent-core.js are cached as separate files by
+    // the service worker, so a deploy can briefly leave one new and the other
+    // old. Spreading an undefined export would throw here and take the whole
+    // voice session down with it -- an unexplained dead microphone, from a
+    // cache skew that resolves itself on the next load. Missing workers is the
+    // far better failure, and it is one the model can say out loud.
+    const workers = AC.WORKER_SCHEMAS || [];
+    if (!workers.length) {
+      console.warn("voice: WORKER_SCHEMAS missing — agent-core.js is older than app.js");
+    }
+    return [...AC.TOOL_SCHEMAS, AC.VIEW_IMAGE_SCHEMA, AC.NEEDS_DESKTOP_SCHEMA, ...workers];
   }
 
   function voiceLiveKey() {
