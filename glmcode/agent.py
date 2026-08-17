@@ -42,7 +42,7 @@ from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
 # Tools whose output tells the model whether its changes actually work --
 # used by the verify-nudge (see _run_turn): a turn that edits files but never
 # runs any of these gets one automatic push to verify before finishing.
-VERIFICATION_TOOLS = {"run_powershell", "run_background", "run_tests",
+VERIFICATION_TOOLS = {"run_command", "run_powershell", "run_background", "run_tests",
                       "run_test_file", "preview_page"}
 EDIT_TOOLS = {"write_file", "edit_file", "replace_in_files"}
 
@@ -1596,7 +1596,7 @@ class Agent:
 
             # A stable per-call token: the UI carries it on the tool box so a
             # Stop click can name exactly which running command to kill, and
-            # run_powershell registers its process under it (see tools.py).
+            # run_command registers its process under it (see tools.py).
             # Freshly generated (not the model's tc["id"]) so it's unique even
             # across parallel chats.
             run_token = uuid.uuid4().hex[:12]

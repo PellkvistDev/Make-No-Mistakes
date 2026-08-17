@@ -6,7 +6,7 @@ Modes:
   yolo      everything auto-approved
 
 "Always allow" answers are remembered for the session: per-tool for file tools,
-per command-prefix (first word, e.g. `git`, `npm`) for PowerShell.
+per command-prefix (first word, e.g. `git`, `npm`) for shell commands.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from .tools import (READONLY_TOOLS, FILE_WRITE_TOOLS, NETWORK_TOOLS, GIT_TOOLS,
-                    IMAGE_GEN_TOOLS, TTS_TOOLS, BROWSER_TOOLS,
+                    IMAGE_GEN_TOOLS, TTS_TOOLS, BROWSER_TOOLS, SHELL_TOOL_NAMES,
                     CONTROL_CHROME_TOOLS, BROWSER_ACTION_TOOLS, TOOL_FUNCTIONS)
 
 # Module-level command alias registry
@@ -294,7 +294,7 @@ class PermissionEngine:
         # counts as reading. It runs unprompted in plan mode -- exploring the
         # repo is the whole point of planning -- and in every normal mode
         # except "ask".
-        if name == "run_powershell" \
+        if name in SHELL_TOOL_NAMES \
                 and is_readonly_command(str(args.get("command", ""))):
             if self.plan_only or self.mode != "ask":
                 return Decision(True)
@@ -330,7 +330,7 @@ class PermissionEngine:
                 return Decision(True)
             return self._ask_file(name, args, asker)
 
-        if name in ("run_powershell", "run_background"):
+        if name in SHELL_TOOL_NAMES or name == "run_background":
             command = str(args.get("command", ""))
             prefix = command_prefix(command)
             # Resolve aliases (e.g., "npm run dev" -> "npm")
@@ -443,7 +443,7 @@ class PermissionEngine:
 
     def _ask_command(self, command: str, prefix: str, asker, background: bool = False) -> Decision:
         always = f"always allow `{prefix} ...` this session" if prefix else None
-        title = "Run in background:" if background else "Run PowerShell command:"
+        title = "Run in background:" if background else "Run command:"
         answer = asker(title, command, always_label=always)
         if _ans(answer) == "a" and prefix:
             self.allowed_prefixes.add(prefix)

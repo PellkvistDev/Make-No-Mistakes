@@ -117,7 +117,7 @@ def tool_call(name: str, args: dict) -> None:
 def _tool_summary(name: str, args: dict) -> str:
     if name in ("read_file", "write_file", "edit_file"):
         return str(args.get("path", ""))
-    if name == "run_powershell":
+    if name in ("run_command", "run_powershell"):
         cmd = str(args.get("command", "")).replace("\n", " ")
         return cmd[:100] + ("..." if len(cmd) > 100 else "")
     if name == "grep":

@@ -247,6 +247,45 @@ phone. So **the code is shown, not hidden** — desktop Settings → Your phone 
 and the chats stay ciphertext forever. "Change passphrase" is gone; it was never
 a useful thing to do, since a new key cannot read anything already uploaded.
 
+## The shell tool is named after the platform, not after PowerShell
+
+`run_command` execs PowerShell on Windows and bash (falling back to `/bin/sh`)
+everywhere else. It was hard-coded to `powershell`, which meant it could not
+**start** on macOS or Linux — every command raised "Failed to start
+PowerShell" — while `prompts.py` was already telling the model it had a POSIX
+shell there, and `run_check_command` eighty lines below had the platform branch
+all along.
+
+Two things about that are worth keeping in mind:
+
+- **The name is part of the interface.** The tool description and the
+  `Shell:` line in the system prompt are both generated from
+  `tools.shell_name()`, so they cannot drift from what actually gets exec'd.
+  Telling the model "PowerShell" on a Mac is how you get `Select-String` and
+  `$env:` in a command that then fails for reasons the model cannot see. The
+  same goes for bash-vs-`sh`: a model told "a POSIX shell" writes `[[ ]]` and
+  arrays at some rate, and on Debian `/bin/sh` is dash, which rejects them with
+  syntax errors that read as "the command was wrong".
+- **`run_powershell` still resolves**, in `TOOL_FUNCTIONS` and in the
+  permission engine's `SHELL_TOOL_NAMES`, because saved sessions replay tool
+  calls by name and session allowlists are keyed on it. It is accepted from
+  history, never offered to the model.
+
+Why this survived so long is the more useful lesson. CI runs `ubuntu-latest`
+and was green, because `tests/test_stop_command.py` substitutes a `FakePopen`
+for the PowerShell that is "absent on Linux CI" — so the one platform CI
+actually exercises was the one where the real tool could not start.
+`tests/test_shell_platform.py` now runs a real command through the real tool,
+mocking nothing, on whichever platform it finds itself on. **Do not let that
+file grow mocks**; every other test of these tools already fakes the process,
+and this one exists to be the one that doesn't.
+
+The POSIX shell is started with `start_new_session=True` so its pid is also
+its process-group id, and a stop signals the group. `proc.terminate()` reaches
+only the shell, so a stopped `npm run dev` would leave the actual server
+holding the port — invisibly, since the app believes it stopped it. That is
+the same reach `taskkill /T` gives on Windows.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by
