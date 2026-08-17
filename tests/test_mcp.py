@@ -41,7 +41,9 @@ def test_call_roundtrip(manager):
     assert manager.owns("mcp_fake_echo")
     assert not manager.owns("read_file")
     out = manager.call("mcp_fake_echo", {"text": "hello mcp"})
-    assert out == "HELLO MCP"
+    # Server output now carries an untrusted-data note (see
+    # tests/test_untrusted_input.py), so this is a containment check.
+    assert out.startswith("HELLO MCP")
 
 
 def test_large_result_is_capped(manager):
@@ -50,6 +52,10 @@ def test_large_result_is_capped(manager):
     filesystem read once ballooned a chat to ~1.5M tokens)."""
     from glmcode.tools import MAX_TOOL_OUTPUT
     out = manager.call("mcp_fake_echo", {"text": "a" * 500_000})
+    # The slack is for _truncate's own "[output truncated at N characters]"
+    # suffix, which lands past the limit it is given. The untrusted-data note
+    # does NOT add to it: room is reserved for the note before truncating, so
+    # the total is exactly what it was before the note existed.
     assert len(out) <= MAX_TOOL_OUTPUT + 100
     assert "truncated" in out
 
@@ -97,7 +103,7 @@ def test_agent_dispatches_mcp_tool(scripted_agent, manager):
     assert "mcp_fake_echo" in seen_tools["names"]
     # ...and its result landed in the conversation as a tool reply
     tool_replies = [m for m in agent.messages if m.get("role") == "tool"]
-    assert any(m["content"] == "FROM THE MODEL" for m in tool_replies)
+    assert any(m["content"].startswith("FROM THE MODEL") for m in tool_replies)
 
 
 def test_sanitize():

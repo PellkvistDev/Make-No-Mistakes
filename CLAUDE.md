@@ -247,6 +247,44 @@ phone. So **the code is shown, not hidden** — desktop Settings → Your phone 
 and the chats stay ciphertext forever. "Change passphrase" is gone; it was never
 a useful thing to do, since a new key cannot read anything already uploaded.
 
+## Everything the agent reads is data; only the conversation gives orders
+
+`fetch_url` and `web_search` already said so. Nothing else did — which left the
+two channels that matter most completely unmarked:
+
+- **MCP tool output.** Third-party code, started from a command line the user
+  pasted, whose text goes straight into context with no line numbers and no
+  structure around it. A sentence in it reads exactly like a message. The note
+  names the server, because "which server said this" is the first question when
+  a result looks wrong.
+- **The `@`-mention block**, which is appended to the *user's own message*.
+  Anything arriving there sits in the most trusted position in the
+  conversation, and the user pointed at the file without writing what is in it.
+  The label goes **before** the content: a warning after ten thousand
+  characters of attacker-controlled text has already been read in the wrong
+  frame.
+
+`read_file` is deliberately left alone. Its output is line-numbered
+(`  12 | text`), which already frames it as file content rather than speech,
+and it is the hottest tool in the app — the rule is stated once in the system
+prompt, where it is always in context and costs nothing per call.
+
+Two things worth keeping:
+
+- **The note counts inside `MAX_TOOL_OUTPUT`, not on top of it.** Appending
+  after the truncate put MCP results back over the cap — the one thing that cap
+  exists to prevent, after an uncapped result once ballooned a chat to ~1.5M
+  tokens. Room is reserved before truncating, so the total is what it was
+  before the note existed. (`_truncate` also lands ~43 characters past the
+  limit it is given; that is pre-existing and why the cap test carries slack.)
+- **`UNTRUSTED_INPUT_RULE` is a named constant on both devices**, and
+  `tests/test_untrusted_input.py` pins them word for word. This is how the gap
+  was found: the desktop prompt was fixed and nothing failed, because the phone
+  had no such rule at all. Both devices work on the same repository — the phone
+  reads it over the GitHub API and every write it makes is a commit — so a rule
+  that holds on only one of them is worth much less than it looks. Paraphrasing
+  it on one side is a different instruction with nothing to say so.
+
 ## The shell tool is named after the platform, not after PowerShell
 
 `run_command` execs PowerShell on Windows and bash (falling back to `/bin/sh`)
