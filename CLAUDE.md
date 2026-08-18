@@ -380,6 +380,29 @@ save one file. The block needs none of them.
 This does not retire the node parity tests and must not be read as doing so.
 They cover the half that is still written twice.
 
+## The Api class comes apart along subjects, not at a line count
+
+`gui/app.py` held one `Api` class of 190 methods across ~3,600 lines, and every
+feature landed in it. `glmcode/gui/devices_api.py` is the first seam taken:
+sync, pairing, Web Push and the CI runner are one subject — reaching a machine
+that is not this one — and they share their whole vocabulary.
+
+- **A mixin, not a collaborator object.** These methods reach all over the
+  instance (`self._cfg`, `self._chats`, `self._active`, `self._store`,
+  `self._save_chat`). More importantly, **pywebview exposes the Api instance's
+  public methods by inspection**: an inherited method is found exactly like a
+  defined one, and a method moved onto a *collaborator* would not be — failing
+  only at runtime, in the app, on the one path nobody re-tests.
+- **The proof is the untouched tests.** The sync, push, CI and GitHub suites
+  were not modified and still pass. A refactor that needed its tests rewritten
+  would not have been behaviour-preserving.
+- **Nothing is left behind.** A copy still defined on `Api` would shadow the
+  mixin's, and which one wins depends on the MRO — `tests/test_api_split.py`
+  fails if a name exists in both.
+
+The next seams, when it is worth it, are the same shape: a subject with its own
+vocabulary. Do not split by size.
+
 ## The history is a tree; rewinding is only one way down it
 
 `backup.py` commits a snapshot of the work tree before **every** user turn, and
