@@ -19,7 +19,8 @@ from .config import Config
 from .events import AgentEvents
 from .permissions import PermissionEngine
 from . import providers
-from .prompts import (ATTEMPT_TASK, BROWSER_AGENT_SYSTEM, BROWSER_RESUME_NOTE,
+from .prompts import (ATTEMPT_TASK, BROWSER_AGENT_SYSTEM, BROWSER_AGENT_TASK,
+                      BROWSER_RESUME_NOTE,
                       COMPACT_PROMPT, CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM,
                       FRESH_CRITIC_SYSTEM, GREEN_GIVEUP_NUDGE, GREEN_NUDGE,
                       REFINE_NUDGE, STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE,
@@ -1653,6 +1654,24 @@ class Agent:
             if name == "todo_write":
                 self.events.todos(self.todos)
 
+    def set_system_prompt(self, text: str) -> None:
+        """Replace this agent's system prompt for good.
+
+        Assigning _base_system_prompt does NOT do this, and looked like it did:
+        __init__ has already run rebuild_system_prompt(), so messages[0] is
+        written before any caller can touch the attribute -- and messages[0] is
+        what _messages_for_call sends. A sub-agent given a specialised prompt
+        that way ran with the coding agent's one instead, and anything carried
+        only in the specialised prompt (the Browser Agent's GOAL) reached the
+        model nowhere at all.
+        """
+        self._base_system_prompt = text
+        sys_msg = {"role": "system", "content": text}
+        if self.messages and self.messages[0].get("role") == "system":
+            self.messages[0] = sys_msg
+        else:
+            self.messages.insert(0, sys_msg)
+
     def system_prompt_text(self) -> str:
         """The stable system prompt, without the per-turn context note.
 
@@ -2255,13 +2274,18 @@ class Agent:
         # Restrict the sub-agent to ONLY the browser action tools, and give it
         # the specialized browser system prompt in place of the coding one.
         sub.tool_schemas = list(BROWSER_AGENT_SCHEMAS)
-        sub._base_system_prompt = BROWSER_AGENT_SYSTEM.format(goal=goal)
+        sub.set_system_prompt(BROWSER_AGENT_SYSTEM.format(goal=goal))
         with self._active_subagents_lock:
             self._active_subagents[aid] = sub
         self._browser_agent_aid = aid
         try:
-            sub.run_turn({"role": "user", "content": "Begin. Work toward the goal, "
-                          "one action at a time, and report when done or blocked."})
+            # The goal goes in the TURN, not only in the system prompt. A task
+            # belongs where the conversation is -- it is what the model is being
+            # asked, and the sub-agent preamble has always done it this way. It
+            # was in the system prompt alone here, so "Begin. Work toward the
+            # goal" was the entire conversation and the goal was a thing the
+            # model had to have retained from its instructions.
+            sub.run_turn({"role": "user", "content": BROWSER_AGENT_TASK.format(goal=goal)})
         finally:
             with self._active_subagents_lock:
                 self._active_subagents.pop(aid, None)

@@ -380,6 +380,33 @@ save one file. The block needs none of them.
 This does not retire the node parity tests and must not be read as doing so.
 They cover the half that is still written twice.
 
+## Setting a system prompt means `set_system_prompt`, not the attribute
+
+`Agent.__init__` calls `rebuild_system_prompt()`, so `messages[0]` is written
+before any caller can touch `_base_system_prompt` — and `messages[0]` is what
+`_messages_for_call` sends. Assigning the attribute afterwards updates a cache
+nothing re-reads: the change looks applied and is not.
+
+That is how the Browser Agent ran with the **coding** agent's system prompt.
+And since its goal lived only in that specialised prompt, the goal reached the
+model nowhere at all — the user turn said "Begin. Work toward the goal", so the
+conversation contained no goal to work toward. It answered by asking what the
+task was, on every provider, which is why it looked like the Gemini sub-agent
+bug and was not.
+
+Two rules came out of it:
+
+- **`set_system_prompt(text)` installs it**, into the cache *and* into
+  `messages[0]`. Nothing should assign `_base_system_prompt` from outside.
+- **A task goes in the TURN, not only in the system prompt.**
+  `SUBAGENT_PREAMBLE` always did this; `BROWSER_AGENT_TASK` now does too. A
+  system prompt is what the model *is*; the turn is what it was *asked*. Some
+  providers treat the first as background, and a request whose conversation
+  contains no request is answered with a question.
+
+`tests/test_browser_agent_task.py` checks what reaches the wire rather than
+what the code appears to set — the whole bug lived in that gap.
+
 ## A request ends on the turn, not on a note about it
 
 The context-usage figure is sent at the END of the message list, not inside the
