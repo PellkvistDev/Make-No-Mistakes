@@ -285,6 +285,33 @@ Two things worth keeping:
   that holds on only one of them is worth much less than it looks. Paraphrasing
   it on one side is a different instruction with nothing to say so.
 
+## Values both devices need are generated, not restated
+
+`scripts/gen_mobile_core.py` writes a marked block inside
+`mobile/agent-core.js` from the Python that defines those values —
+wire-format version bytes, PBKDF2 iterations, the sync repo and branch names,
+device-lock timings, the Live sample rates, `CONVERSATIONAL_SCHEMAS`, and
+`UNTRUSTED_INPUT_RULE`. Change the **Python** and run the script; editing the
+block by hand only makes the phone disagree with the desktop.
+`python scripts/gen_mobile_core.py --check` runs in CI and
+`tests/test_generated_core.py` fails if the committed block is stale.
+
+**Only data goes in the block.** The crypto, the agent loop and the sync store
+stay hand-written on both sides, pinned by the node tests. Generating a
+*function* across two languages is a different and much worse idea than
+generating the numbers it operates on — a test asserts everything collected is
+plain data, so this line does not quietly move.
+
+**It is a block, not a separate file, on purpose.** The phone has no build step
+and that is deliberate: a folder of static files with no toolchain to rot. A
+generated `.js` of its own would need a script tag in `index.html`, an entry in
+the service worker's precache list, and a module lookup that works under both a
+plain `<script>` and `node --test` — three new ways to half-deploy a phone, to
+save one file. The block needs none of them.
+
+This does not retire the node parity tests and must not be read as doing so.
+They cover the half that is still written twice.
+
 ## The live voice engine has to be wired IN, not alongside
 
 Four separate desktop bugs turned out to be one mistake: `startLiveVoice` was
