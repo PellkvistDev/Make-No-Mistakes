@@ -33,7 +33,7 @@ def _phone():
         ["node", "-e",
          "const C=require(process.argv[1]);"
          "console.log(JSON.stringify(C.SETUP_PRESETS));", str(CORE_JS)],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert out.returncode == 0, out.stderr
     return {p["key"]: p for p in json.loads(out.stdout)}
 

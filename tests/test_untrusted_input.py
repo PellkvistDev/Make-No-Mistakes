@@ -73,11 +73,17 @@ def test_the_rule_survives_into_the_built_prompt():
 
 
 def _phone_prompt() -> str:
+    # encoding="utf-8" is not optional: node writes UTF-8, and text=True alone
+    # decodes with the locale codec -- cp1252 on Windows, which turns the em
+    # dash in this rule into "?". The two prompts then differ by decoding
+    # rather than by content, and the Windows CI leg fails a parity test that
+    # is actually passing. Every node-shelling test here has the same hazard
+    # the moment a pinned string stops being ASCII.
     out = subprocess.run(
         ["node", "-e",
          "const C=require(process.argv[1]); console.log(C.SYSTEM_PROMPT);",
          str(_CORE_JS)],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert out.returncode == 0, out.stderr
     return out.stdout
 
