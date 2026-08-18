@@ -312,6 +312,30 @@ save one file. The block needs none of them.
 This does not retire the node parity tests and must not be read as doing so.
 They cover the half that is still written twice.
 
+## A request ends on the turn, not on a note about it
+
+The context-usage figure is sent at the END of the message list, not inside the
+system prompt. That much is right and must stay: the figure changes every turn,
+so putting it first gave every request a different prefix from the last, and a
+prefix cache only matches an identical run of *leading* tokens. This app
+re-sends ~12,400 tokens of system prompt and tool schemas on every request.
+
+Dead last was wrong, though. A request must end on the user's turn or a tool
+result. Google's OpenAI-compatibility layer does not treat a trailing `system`
+message the way z.ai does, and sub-agents showed it at its worst: their first
+request is `[system prompt, user(the mission), system(context usage)]`, so the
+last thing the model read was a sentence about token budgets — and it answered
+*that*, with the mission sitting directly above it. A coordinator handing out
+three missions got back three sub-agents asking what the task was, on Gemini
+only, which is exactly what makes it look like a model problem rather than a
+message-ordering one.
+
+The note goes **next-to-last** now. In any conversation long enough for the
+cache to matter this leaves the same stable prefix, so nothing was given up.
+`tests/test_request_ends_on_the_turn.py` pins both halves — that the request
+ends on the turn, and that the prefix before the newest turn is unchanged
+between requests.
+
 ## The live voice engine has to be wired IN, not alongside
 
 Four separate desktop bugs turned out to be one mistake: `startLiveVoice` was

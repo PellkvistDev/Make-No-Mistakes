@@ -388,9 +388,27 @@ class Agent:
         tools and every completed turn form an append-only prefix, which is the
         shape a prefix cache wants. Appended to a COPY: self.messages is what
         gets saved and synced, and a per-turn note does not belong in it.
+
+        NEXT-TO-LAST, not last. A request must END on the user's turn (or a
+        tool result). Google's OpenAI-compatibility layer does not treat a
+        trailing `system` message the way z.ai does, and the symptom was
+        brutal in sub-agents: their very first request is
+        [system prompt, user(the mission), system(this note)], so the last
+        thing the model read was a sentence about token budgets and it
+        answered THAT -- "I'm Gemini, what would you like me to do?" -- with
+        the mission sitting right above it, ignored. A coordinator handing out
+        work got back a row of sub-agents asking what the task was.
+
+        It cost nothing to fix: in any conversation long enough for a prefix
+        cache to matter, inserting before the final message leaves exactly the
+        same stable prefix -- everything up to the newest turn -- while the
+        request now ends where every provider expects it to.
         """
         note = {"role": "system", "content": self._usage_note()}
-        return self._readable(self.messages) + [note]
+        history = self._readable(self.messages)
+        if not history:
+            return [note]
+        return history[:-1] + [note, history[-1]]
 
     def _readable(self, messages: list) -> list:
         """The history with anything this chat's model cannot receive taken out.

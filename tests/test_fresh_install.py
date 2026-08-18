@@ -599,23 +599,45 @@ def test_the_system_message_is_identical_between_turns(tmp_path):
     """The whole point. A prefix cache matches an identical run of leading
     tokens; a system message that changes every turn means nothing after byte
     zero can ever hit."""
-    ag = _agent_with_history(tmp_path, [])
+    ag = _agent_with_history(tmp_path, [{"role": "user", "content": "hi"}])
     first = ag._messages_for_call()[0]["content"]
 
     ag.messages.append({"role": "user", "content": "x" * 5000})
     second = ag._messages_for_call()[0]["content"]
     assert first == second
+    assert first.startswith("You are Make No Mistakes")
 
 
 def test_the_conversation_prefix_only_ever_grows(tmp_path):
     """Append-only is the shape a cache wants: turn two must start with
-    everything turn one sent."""
+    everything turn one sent, up to that turn's own newest message.
+
+    The usage note sits next-to-last rather than last, because a request has to
+    END on the user's turn -- Google answers a trailing `system` message
+    instead of the mission above it (see the sub-agent case in
+    tests/test_request_ends_on_the_turn.py). So the guaranteed stable prefix is
+    everything before the note, which is everything up to the newest turn: one
+    message shorter than it was, and still the whole conversation.
+    """
     ag = _agent_with_history(tmp_path, [{"role": "user", "content": "hello"}])
-    before = [m["content"] for m in ag._messages_for_call()[:-1]]
+    before = [m["content"] for m in ag._messages_for_call()]
+    stable = before[:-2]          # drop the note and the newest turn
 
     ag.messages.append({"role": "assistant", "content": "hi"})
-    after = [m["content"] for m in ag._messages_for_call()[:-1]]
-    assert after[:len(before)] == before
+    after = [m["content"] for m in ag._messages_for_call()]
+
+    assert stable, "there should be a prefix to share at all"
+    assert after[:len(stable)] == stable
+
+
+def test_the_note_is_never_the_last_thing_the_model_reads(tmp_path):
+    """A request ends on the user's turn or a tool result. z.ai tolerated a
+    trailing system message; Google answers it, which turned every sub-agent
+    into one asking what its task was."""
+    ag = _agent_with_history(tmp_path, [{"role": "user", "content": "do the thing"}])
+    built = ag._messages_for_call()
+    assert built[-1]["role"] == "user"
+    assert "Context usage" in built[-2]["content"]
 
 
 def test_the_model_still_sees_a_current_usage_figure(tmp_path):
