@@ -328,6 +328,85 @@ class SyncStore:
     def __init__(self, repo: StateRepo, key: bytes):
         self.repo, self.key = repo, key
 
+    # ---------------------------------------------------------------- #
+    # Push subscriptions.
+    #
+    # How the desktop reaches a phone that is not running. The subscription is
+    # a URL the push service will accept messages at, plus the keys that
+    # encrypt them -- so it goes in the encrypted store like everything else,
+    # never in the index (which is a cache read far more often than this).
+    #
+    # A list, not a single value: one desktop can be paired with more than one
+    # phone, and a phone that reinstalls arrives as a new endpoint rather than
+    # an update to the old one.
+
+    PUSH_PATH = "devices/push.json"
+    # The desktop's VAPID public key, which the phone needs BEFORE it can
+    # subscribe. It travels here rather than in the pairing QR: that payload is
+    # read by a camera and its module count is what decides whether scanning
+    # works at all, so adding a field to it spends a margin that was measured.
+    VAPID_PATH = "devices/vapid.json"
+
+    def vapid_public_key(self) -> str:
+        obj, _ = _read_json(self.repo, self.VAPID_PATH)
+        if not obj:
+            return ""
+        try:
+            return str(aes_decrypt(obj, self.key).get("public") or "")
+        except SyncError:
+            return ""
+
+    def set_vapid_public_key(self, public_key: str) -> None:
+        """Publish it, but only when it changed. This is called on a timer, and
+        a write per tick would be a commit per tick in the user's sync repo."""
+        if not public_key or self.vapid_public_key() == public_key:
+            return
+        _, sha = _read_json(self.repo, self.VAPID_PATH)
+        blob = aes_encrypt({"v": 1, "public": public_key}, self.key)
+        self.repo.put_file(self.VAPID_PATH, json.dumps(blob),
+                           "Publish push key", sha)
+
+    def push_subscriptions(self) -> list:
+        obj, _ = _read_json(self.repo, self.PUSH_PATH)
+        if not obj:
+            return []
+        try:
+            data = aes_decrypt(obj, self.key)
+        except SyncError:
+            return []
+        subs = data.get("subscriptions")
+        return subs if isinstance(subs, list) else []
+
+    def add_push_subscription(self, subscription: dict) -> int:
+        """Register a device, replacing any entry with the same endpoint.
+
+        Keyed on the endpoint because that is what identifies a device to the
+        push service: re-subscribing on the same phone (a new key, a browser
+        that rotated it) must update the row rather than leave a stale one
+        behind that every later send fails against.
+        """
+        endpoint = str((subscription or {}).get("endpoint") or "")
+        if not endpoint:
+            raise SyncError("a push subscription needs an endpoint")
+        subs = [s for s in self.push_subscriptions()
+                if s.get("endpoint") != endpoint]
+        subs.append(dict(subscription))
+        return self._write_push(subs)
+
+    def drop_push_subscription(self, endpoint: str) -> int:
+        """Forget a device the push service says is gone (404/410). Retrying a
+        dead endpoint forever is the alternative."""
+        subs = [s for s in self.push_subscriptions()
+                if s.get("endpoint") != endpoint]
+        return self._write_push(subs)
+
+    def _write_push(self, subs: list) -> int:
+        _, sha = _read_json(self.repo, self.PUSH_PATH)
+        blob = aes_encrypt({"v": 1, "subscriptions": subs}, self.key)
+        self.repo.put_file(self.PUSH_PATH, json.dumps(blob),
+                           "Update push devices", sha)
+        return len(subs)
+
     def _read_index(self) -> tuple[dict, str | None]:
         obj, sha = _read_json(self.repo, "index.json")
         if not obj:

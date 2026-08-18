@@ -955,6 +955,31 @@ function handle(ev) {
     }
   }
   switch (ev.type) {
+    /* A spoken exchange, rendered into the CODING chat.
+     *
+     * The overlay has always shown the conversation while it was open, and
+     * that was all: closing it left the chat window showing whatever had been
+     * typed before, as if the last ten minutes had not happened. The phone put
+     * spoken turns straight into the conversation from the start
+     * (voiceRecordTurn), and moving between talking and typing should not be a
+     * change of subject.
+     */
+    case "voice_chat_turn": {
+      if (ev.user) addUserMessage(ev.user, [], "Spoken", false);
+      if (ev.assistant) {
+        const wrap = newAssistantBlock();
+        const bubble = document.createElement("div");
+        bubble.className = "bubble-assistant";
+        bubble.dataset.raw = ev.assistant;   // Copy yields the markdown source
+        const body = document.createElement("div");
+        body.className = "md";
+        body.innerHTML = md(ev.assistant);
+        bubble.appendChild(body);
+        wrap.appendChild(bubble);
+      }
+      scrollDown();
+      return;
+    }
     case "stream_start": {
       // NOTE: this fires once per agentic LLM round-trip, not once per
       // visible user turn -- a turn that uses tools mid-way gets several

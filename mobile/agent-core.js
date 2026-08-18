@@ -540,6 +540,15 @@
     return { key, store: makeSyncStore(gh, key), created: true };
   }
 
+  // Where push subscriptions live in the store. Same path the desktop
+  // reads (SyncStore.PUSH_PATH); a mismatch is a phone that registers
+  // successfully and is never pushed to.
+  const PUSH_PATH = "devices/push.json";
+  // The desktop's VAPID public key. Read from the store rather than carried in
+  // the pairing QR, whose module count is what decides whether a camera can
+  // read it at all.
+  const VAPID_PATH = "devices/vapid.json";
+
   // The encrypted session store over a sync gh-client + derived key.
   function makeSyncStore(gh, key) {
     async function readIndex() {
@@ -578,6 +587,41 @@
       return { data, sha: f.sha };
     }
     return {
+      /* Push devices: how the DESKTOP reaches this phone when it isn't
+       * running. Written here and read there, through the same encrypted
+       * store, so no server is introduced to carry it.
+       *
+       * Keyed on the endpoint: a browser that rotates its keys re-subscribes
+       * at the same one, and appending would leave a stale row that every
+       * later send fails against. Mirrors SyncStore.add_push_subscription. */
+      // The desktop's push key, or "" if no desktop has published one yet
+      // (in which case there is nothing on the other end to notify from).
+      async pushKey() {
+        try {
+          const f = await gh.getFile(VAPID_PATH);
+          const data = await aesDecrypt(JSON.parse(f.text), key);
+          return (data && data.public) || "";
+        } catch (e) { return ""; }
+      },
+
+      async registerPush(subscription) {
+        if (!subscription || !subscription.endpoint) {
+          throw new Error("a push subscription needs an endpoint");
+        }
+        let subs = [], sha = null;
+        try {
+          const f = await gh.getFile(PUSH_PATH);
+          sha = f.sha;
+          const data = await aesDecrypt(JSON.parse(f.text), key);
+          if (data && Array.isArray(data.subscriptions)) subs = data.subscriptions;
+        } catch (e) { /* first device, or unreadable: start clean */ }
+        subs = subs.filter((s) => s && s.endpoint !== subscription.endpoint);
+        subs.push(subscription);
+        const blob = await aesEncrypt({ v: 1, subscriptions: subs }, key);
+        await gh.putFile(PUSH_PATH, JSON.stringify(blob), "Update push devices", sha);
+        return subs.length;
+      },
+
       // Newest-first list of chat summaries (id, title, updated, preview).
       async list() {
         const { data } = await readIndex();
@@ -1639,6 +1683,7 @@
     openPairToken, normalizePairCode, pairTokenFrom, PAIR_TOKEN_MIN,
     SYSTEM_PROMPT, SUBAGENT_PROMPT,
     openSync, makeSyncStore, ensureSyncRepo, makeSyncPassphrase, syncStoreExists,
+    PUSH_PATH, VAPID_PATH,
     WORKER_SCHEMAS,
     SYNC_REPO_NAME, SYNC_REPO_BRANCH, STATE_BRANCH,
     DEVICE_LOCK_TTL_MS, DEVICE_LOCK_HEARTBEAT_S,

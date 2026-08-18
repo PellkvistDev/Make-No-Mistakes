@@ -1,12 +1,18 @@
 # Make No Mistakes — run the agent from your phone, with your computer off.
 #
 # SETUP (once per repo you want to control):
+#   Easiest: the desktop app installs this for you -- it writes the file and
+#   tells you the one thing it cannot do, which is add the key as a secret.
+#   By hand:
 #   1. Copy this file to  .github/workflows/agent.yml  in that repo.
 #   2. Add a repository secret named  ZAI_API_KEY  (free key at https://z.ai):
 #        repo → Settings → Secrets and variables → Actions → New repository secret.
 #   3. (Optional) point AGENT_REPO below at your own fork of the agent.
 #
-# USE (from the GitHub mobile app, or anywhere):
+# USE (from the app, or from GitHub):
+#   From the desktop app: hand a task to a runner and it works with your
+#   machine switched off -- which the desktop hand-off cannot promise, since
+#   the desktop has to be awake.
 #   Comment  /agent <what you want done>  on any issue or pull request, e.g.
 #     /agent add a dark-mode toggle to the settings screen and cover it with a test
 #   A runner does the work on a new branch and opens a DRAFT pull request; you get
@@ -23,6 +29,16 @@ name: Agent
 on:
   issue_comment:
     types: [created]
+  # Started from the app itself, rather than by leaving a comment. Same job,
+  # same gate: workflow_dispatch is already restricted to people who can write
+  # to the repository, which is the check the comment path has to make for
+  # itself.
+  workflow_dispatch:
+    inputs:
+      task:
+        description: What the agent should do
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -36,11 +52,13 @@ env:
 jobs:
   agent:
     if: >-
-      startsWith(github.event.comment.body, '/agent') &&
-      contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      github.event_name == 'workflow_dispatch' ||
+      (startsWith(github.event.comment.body, '/agent') &&
+       contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-latest
     steps:
       - name: Acknowledge the request
+        if: github.event_name == 'issue_comment'
         uses: actions/github-script@v7
         with:
           script: |
@@ -73,7 +91,9 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/agent
           ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MNM_TASK: ${{ github.event.comment.body }}
+          # The dispatch input carries the task on its own; a comment carries
+          # it after the /agent trigger, which parse_task strips either way.
+          MNM_TASK: ${{ inputs.task || github.event.comment.body }}
           MNM_ISSUE: ${{ github.event.issue.number }}
           MNM_REPO: ${{ github.repository }}
           MNM_BASE: ${{ github.event.repository.default_branch }}
