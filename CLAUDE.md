@@ -285,6 +285,57 @@ Two things worth keeping:
   that holds on only one of them is worth much less than it looks. Paraphrasing
   it on one side is a different instruction with nothing to say so.
 
+## Values both devices need are generated, not restated
+
+`scripts/gen_mobile_core.py` writes a marked block inside
+`mobile/agent-core.js` from the Python that defines those values —
+wire-format version bytes, PBKDF2 iterations, the sync repo and branch names,
+device-lock timings, the Live sample rates, `CONVERSATIONAL_SCHEMAS`, and
+`UNTRUSTED_INPUT_RULE`. Change the **Python** and run the script; editing the
+block by hand only makes the phone disagree with the desktop.
+`python scripts/gen_mobile_core.py --check` runs in CI and
+`tests/test_generated_core.py` fails if the committed block is stale.
+
+**Only data goes in the block.** The crypto, the agent loop and the sync store
+stay hand-written on both sides, pinned by the node tests. Generating a
+*function* across two languages is a different and much worse idea than
+generating the numbers it operates on — a test asserts everything collected is
+plain data, so this line does not quietly move.
+
+**It is a block, not a separate file, on purpose.** The phone has no build step
+and that is deliberate: a folder of static files with no toolchain to rot. A
+generated `.js` of its own would need a script tag in `index.html`, an entry in
+the service worker's precache list, and a module lookup that works under both a
+plain `<script>` and `node --test` — three new ways to half-deploy a phone, to
+save one file. The block needs none of them.
+
+This does not retire the node parity tests and must not be read as doing so.
+They cover the half that is still written twice.
+
+## A request ends on the turn, not on a note about it
+
+The context-usage figure is sent at the END of the message list, not inside the
+system prompt. That much is right and must stay: the figure changes every turn,
+so putting it first gave every request a different prefix from the last, and a
+prefix cache only matches an identical run of *leading* tokens. This app
+re-sends ~12,400 tokens of system prompt and tool schemas on every request.
+
+Dead last was wrong, though. A request must end on the user's turn or a tool
+result. Google's OpenAI-compatibility layer does not treat a trailing `system`
+message the way z.ai does, and sub-agents showed it at its worst: their first
+request is `[system prompt, user(the mission), system(context usage)]`, so the
+last thing the model read was a sentence about token budgets — and it answered
+*that*, with the mission sitting directly above it. A coordinator handing out
+three missions got back three sub-agents asking what the task was, on Gemini
+only, which is exactly what makes it look like a model problem rather than a
+message-ordering one.
+
+The note goes **next-to-last** now. In any conversation long enough for the
+cache to matter this leaves the same stable prefix, so nothing was given up.
+`tests/test_request_ends_on_the_turn.py` pins both halves — that the request
+ends on the turn, and that the prefix before the newest turn is unchanged
+between requests.
+
 ## The live voice engine has to be wired IN, not alongside
 
 Four separate desktop bugs turned out to be one mistake: `startLiveVoice` was

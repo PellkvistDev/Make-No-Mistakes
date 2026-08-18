@@ -1,0 +1,6 @@
+{
+  "task": "`python -m pytest` fails. The cause is not in the test file. Track it down and fix it.",
+  "check": "python -m pytest -q",
+  "protect": ["test_cart.py"],
+  "timeout": 240
+}
