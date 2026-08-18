@@ -96,4 +96,7 @@ def test_the_icons_are_precached_so_they_survive_an_offline_install():
         assert f'"./{name}"' in sw, f"{name} missing from the precached shell"
     # A changed shell needs a changed cache name, or a phone sitting on the old
     # one never fetches the new files.
-    assert 'const CACHE = "mnm-shell-v6"' in sw
+    # v7 adds the push + notificationclick handlers. A phone still running v6
+    # has a worker that receives a push and does nothing with it, and iOS
+    # revokes the subscription of a worker that does that.
+    assert 'const CACHE = "mnm-shell-v7"' in sw

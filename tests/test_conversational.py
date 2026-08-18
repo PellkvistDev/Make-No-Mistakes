@@ -336,16 +336,37 @@ class _RecTranscript:
 
 
 def _fake_cs(reply_text, tr):
+    """A chat with the pieces _persist_voice_turn touches.
+
+    It writes to the transcript AND into the chat itself now -- a spoken
+    exchange that leaves no trace in the conversation is what made talking and
+    typing feel like two different chats -- so the fake needs the turn lock it
+    takes before appending, and somewhere to append to.
+    """
+    import threading
     convo = types.SimpleNamespace(messages=[
         {"role": "user", "content": "do the thing"},
         {"role": "assistant", "content": reply_text},
     ])
-    agent = types.SimpleNamespace(transcript=tr)
-    return types.SimpleNamespace(agent=agent, convo_agent=convo)
+    agent = types.SimpleNamespace(
+        transcript=tr, messages=[], workdir=".", todos=[],
+        session_usage=types.SimpleNamespace(prompt_tokens=0, completion_tokens=0))
+    return types.SimpleNamespace(
+        sid="s1", agent=agent, convo_agent=convo,
+        events=types.SimpleNamespace(emit=lambda *a, **k: None),
+        title="", provider="", model="", auto_backup=True, turn_snapshots=[],
+        turn_lock=threading.Lock(),
+        voice_turns=[], voice_turns_lock=threading.Lock())
+
+
+def _api_for_voice():
+    api = gui_app.Api.__new__(gui_app.Api)
+    api._store = types.SimpleNamespace(save=lambda *a, **k: None)
+    return api
 
 
 def test_persist_voice_turn_logs_user_and_reply():
-    api = gui_app.Api.__new__(gui_app.Api)
+    api = _api_for_voice()
     tr = _RecTranscript()
     cs = _fake_cs("Sure, on it.", tr)
     api._persist_voice_turn(cs, "please do the thing")
@@ -354,7 +375,7 @@ def test_persist_voice_turn_logs_user_and_reply():
 
 
 def test_persist_voice_turn_skips_user_for_announcements():
-    api = gui_app.Api.__new__(gui_app.Api)
+    api = _api_for_voice()
     tr = _RecTranscript()
     cs = _fake_cs("The build finished.", tr)
     api._persist_voice_turn(cs, "")   # announcement: no user utterance

@@ -294,7 +294,10 @@ def test_a_spoken_exchange_is_written_back_into_the_conversation():
     convo = _Convo()
     api, cs = _api(Config(), convo)
     persisted = []
-    api._persist_voice_turn = lambda c, t: persisted.append(t)
+    # reply= is passed now: the live engine HAS Gemini's transcript of both
+    # halves and hands them over, rather than having the reply dug back out
+    # of the delegator's history.
+    api._persist_voice_turn = lambda c, t, reply=None: persisted.append(t)
 
     api.live_voice_turn("what's failing?", "the login test")
     assert convo.messages == [

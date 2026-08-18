@@ -266,3 +266,67 @@ def test_streamed_partials_update_one_block_rather_than_adding_many(desktop):
     rows = _transcript(p)
     assert len(rows) == 1
     assert rows[0]["you"] == "add dark mode"
+
+
+# ------------------------------------- 5. it reaches the text chat too ----
+#
+# Reported after the transcript landed in the overlay: it is still only IN the
+# overlay. Close it and the chat window shows whatever had been typed before,
+# as if the conversation had not happened -- and the coding agent, asked about
+# it by typing, had never heard any of it. The phone has always put spoken
+# turns straight into the conversation (voiceRecordTurn).
+
+# The event carries the CODING chat's sid in the app (WebEvents.emit stamps
+# it), and handle() routes a sid that is not the active chat to the sidebar
+# instead of the transcript -- correctly: a background chat must not draw into
+# the window you are looking at. This harness never opens a chat, so
+# activeSessionId is null and every sid would take that branch. The events here
+# are therefore emitted without one, which exercises the handler itself; that
+# it is emitted on the coding sink rather than the overlay's is pinned in
+# tests/test_voice_in_the_chat.py, where both sinks exist.
+
+def _chat_messages(p):
+    return p.evaluate(
+        """() => [...document.querySelectorAll('#chat .msg')].map(m => ({
+             who: m.className.includes('msg-user') ? 'user' : 'assistant',
+             text: (m.querySelector('.md') || m).textContent.trim() }))""")
+
+
+def test_a_spoken_exchange_appears_in_the_text_chat(desktop):
+    p = _open(desktop)
+    p.evaluate("""() => window.GLM.emit({ type: 'voice_chat_turn',
+                    user: 'rename the click handler',
+                    assistant: 'Renamed it in two files.' })""")
+    p.wait_for_timeout(200)
+
+    rows = _chat_messages(p)
+    assert any(r["who"] == "user" and "rename the click handler" in r["text"]
+               for r in rows), f"the spoken question is missing: {rows}"
+    assert any(r["who"] == "assistant" and "Renamed it in two files." in r["text"]
+               for r in rows), f"the spoken answer is missing: {rows}"
+    assert desktop.errors == []
+
+
+def test_spoken_turns_accumulate_alongside_typed_ones(desktop):
+    """The point of the whole change: talking and typing are one conversation,
+    so they interleave rather than living in two places."""
+    p = _open(desktop)
+    for said in ("first spoken thing", "second spoken thing"):
+        p.evaluate("""(t) => window.GLM.emit({ type: 'voice_chat_turn',
+                        user: t, assistant: 'ok' })""", said)
+        p.wait_for_timeout(120)
+
+    text = " ".join(r["text"] for r in _chat_messages(p))
+    assert "first spoken thing" in text and "second spoken thing" in text
+
+
+def test_an_answer_with_no_question_still_renders(desktop):
+    """A worker announcement is spoken without anything being asked."""
+    p = _open(desktop)
+    p.evaluate("""() => window.GLM.emit({ type: 'voice_chat_turn',
+                    user: '', assistant: 'The tidy worker finished.' })""")
+    p.wait_for_timeout(200)
+
+    rows = _chat_messages(p)
+    assert any("tidy worker finished" in r["text"] for r in rows)
+    assert desktop.errors == []

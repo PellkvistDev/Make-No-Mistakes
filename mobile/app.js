@@ -2829,6 +2829,102 @@
   $("btn-chat-settings").addEventListener("click", openSettings);
   $("btn-chats-settings").addEventListener("click", openSettings);
   $("btn-settings-done").addEventListener("click", closeSettings);
+  /* ---------------------------------------------------------------- push --
+   *
+   * The phone genuinely cannot work in the background, so the desktop finishes
+   * turns it was suspended through -- and until now never told it. A push
+   * cannot RUN anything here either; it just says so, which is the gap.
+   *
+   * Everything below can fail for reasons that are not errors: Safari only
+   * offers push to an app installed to the home screen, the user can decline
+   * the permission, and there may be no desktop paired yet. Each of those gets
+   * said plainly rather than reported as a failure.
+   */
+  async function enablePush() {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      return { error: "This browser can't do notifications. On iPhone, add the app to your home screen first." };
+    }
+    if (Notification.permission === "denied") {
+      return { error: "Notifications are blocked for this app in your browser settings." };
+    }
+    const store = await ensureSyncStore();
+    if (!store) return { error: "Turn on chat sync first — that's how your desktop reaches this phone." };
+
+    const key = await store.pushKey();
+    if (!key) {
+      return { error: "No desktop has published a push key yet. Open the desktop app once with sync on, then try again." };
+    }
+    if ((await Notification.requestPermission()) !== "granted") {
+      return { error: "Not enabled — you'll still see everything when you open the app." };
+    }
+    const reg = await navigator.serviceWorker.ready;
+    // Re-subscribing with a DIFFERENT key silently fails on some browsers, so
+    // an existing subscription for another desktop is dropped first.
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && !sameKey(sub, key)) { try { await sub.unsubscribe(); } catch (e) {} sub = null; }
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        // Required by Safari and Chrome alike: a worker that receives a push
+        // and shows nothing gets its subscription revoked.
+        userVisibleOnly: true,
+        applicationServerKey: b64urlToBytes(key),
+      });
+    }
+    await store.registerPush(JSON.parse(JSON.stringify(sub)));
+    return { ok: true };
+  }
+
+  function sameKey(sub, key) {
+    try {
+      const raw = sub.options && sub.options.applicationServerKey;
+      if (!raw) return false;
+      return bytesToB64Url(new Uint8Array(raw)) === key;
+    } catch (e) { return false; }
+  }
+
+  function b64urlToBytes(text) {
+    const pad = text.replace(/-/g, "+").replace(/_/g, "/");
+    const raw = atob(pad + "=".repeat((4 - pad.length % 4) % 4));
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  function bytesToB64Url(bytes) {
+    let s = "";
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  const pushToggle = $("set-push");
+  if (pushToggle) {
+    pushToggle.addEventListener("change", async () => {
+      if (!pushToggle.checked) {
+        // Left registered on purpose: unsubscribing here would need a write to
+        // the store to match, and a toggle flicked by accident should not cost
+        // a round trip. The desktop drops dead endpoints on its own.
+        setPushHint("Off — turn it back on any time.");
+        return;
+      }
+      pushToggle.disabled = true;
+      setPushHint("Asking…");
+      let res;
+      try { res = await enablePush(); } catch (e) { res = { error: String(e && e.message || e) }; }
+      pushToggle.disabled = false;
+      if (res && res.ok) {
+        setPushHint("On — your desktop can reach this phone.");
+      } else {
+        pushToggle.checked = false;
+        setPushHint((res && res.error) || "Couldn't turn that on.");
+      }
+    });
+  }
+
+  function setPushHint(text) {
+    const el = $("set-push-hint");
+    if (el) el.textContent = text;
+  }
+
   $("settings-backdrop").addEventListener("click", (e) => { if (e.target === $("settings-backdrop")) closeSettings(); });
   $("btn-settings-lock").addEventListener("click", () => { closeSettings(); lock(); });
   /* The API picker, and the model list that follows from it. Drawn from the

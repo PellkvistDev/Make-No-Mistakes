@@ -37,6 +37,7 @@ from ..config import (BUILTIN_PROVIDER_NAME, CONFIG_DIR, PERMISSION_MODES, Confi
                       provider_key as cfg_provider_key)
 from ..events import AgentEvents
 from .. import githubsync
+from .. import secretstore
 from .. import live
 from .. import pairing
 from .. import qrcode_util
@@ -640,6 +641,12 @@ class ChatState:
         # the next send turn, which holds the turn lock.
         self.worker_reports: list[str] = []
         self.worker_reports_lock = threading.Lock()
+        # Spoken exchanges waiting to join the CODING agent's history, so that
+        # typing after talking continues the same conversation. Queued for the
+        # same reason worker reports are: a voice turn finishes on the
+        # delegator's thread, and the coding agent may be mid-turn.
+        self.voice_turns: list[dict] = []
+        self.voice_turns_lock = threading.Lock()
 
 
 class Api:
@@ -2653,6 +2660,14 @@ class Api:
         store, err = self._open_sync_store()
         if err or store is None:
             return quiet
+        # The phone cannot subscribe until it knows this desktop's push key,
+        # and this timer is the only thing that runs regularly with the store
+        # open. set_vapid_public_key writes only when it changed, so this is
+        # not a commit per tick.
+        try:
+            store.set_vapid_public_key(self.webpush_keys()["public"])
+        except Exception:
+            pass
         try:
             rows = store.list()
         except (syncstore.SyncError, githubsync.GitHubError):
@@ -2678,6 +2693,79 @@ class Api:
                 return res
         return quiet
 
+    # ------------------------------------------------------------------ #
+    # Telling the phone. The desktop finishes turns the phone was suspended
+    # through, and the phone was never told -- you found out by opening the app
+    # and looking. Web Push closes exactly that gap: it cannot run anything on
+    # the phone, but it can say so.
+
+    VAPID_ACCOUNT = "webpush-vapid"
+
+    def webpush_keys(self) -> dict:
+        """This desktop's VAPID keypair, made once and kept.
+
+        The public half is handed to the phone at subscribe time and the push
+        service pins the subscription to it -- so regenerating it silently
+        invalidates every subscription already out there, and this must never
+        be a "create if missing" that mistakes a read failure for missing.
+        """
+        from .. import webpush
+        store = secretstore.get_store()
+        raw = store.get(self.VAPID_ACCOUNT)
+        if raw:
+            try:
+                keys = json.loads(raw)
+                if keys.get("private") and keys.get("public"):
+                    return keys
+            except (json.JSONDecodeError, ValueError):
+                pass          # unreadable: replaced below, subscriptions rebuild
+        keys = webpush.generate_keys()
+        store.set(self.VAPID_ACCOUNT, json.dumps(keys))
+        return keys
+
+    def webpush_public_key(self):
+        """What the phone needs to subscribe. Never the private half."""
+        try:
+            from .. import webpush   # noqa: F401  (import guards cryptography)
+        except Exception as e:
+            return {"error": f"push needs the cryptography package: {e}"}
+        try:
+            return {"ok": True, "key": self.webpush_keys()["public"]}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _notify_phone(self, title: str, body: str, chat_id: str = "") -> None:
+        """Best effort, always. A missed notification must never affect the
+        turn that produced it -- this runs at the end of a turn that has
+        already done real work."""
+        try:
+            from .. import webpush
+        except Exception:
+            return
+        if not self._cfg.sync_finish_interrupted:
+            return
+        store, err = self._open_sync_store()
+        if err or store is None:
+            return
+        try:
+            subs = store.push_subscriptions()
+        except Exception:
+            return
+        if not subs:
+            return
+        keys = self.webpush_keys()
+        message = {"title": title, "body": body[:180],
+                   "chatId": chat_id, "tag": chat_id or "mnm"}
+        for sub in subs:
+            result = webpush.send(sub, message, keys)
+            # A dead endpoint is forgotten rather than retried forever: the
+            # phone uninstalled the app, or the browser rotated its keys.
+            if result.get("gone"):
+                try:
+                    store.drop_push_subscription(sub.get("endpoint") or "")
+                except Exception:
+                    pass
+
     def _finish_one_interrupted(self, cid: str, chat: dict):
         """Take one abandoned chat and start its turn here. None = not taken."""
         # Pull first: this rebuilds the session locally, applies the handoff
@@ -2698,10 +2786,24 @@ class Api:
         if self._try_acquire_device_lock(cid, force=False) is not None:
             cs.turn_lock.release()
             return None
+        # A named method taking the same (cs, message, paths, plan) shape the
+        # thread always took, rather than a closure: the turn's arguments stay
+        # inspectable from outside, which is how the pickup tests check that
+        # what gets started is the pickup note and not something else.
         threading.Thread(
-            target=self._run_send_turn,
-            args=(cs, syncstore.pickup_note(), [], False), daemon=True).start()
+            target=self._finish_picked_up_turn,
+            args=(cs, syncstore.pickup_note(), [], False,
+                  cid, chat.get("title") or "your chat"), daemon=True).start()
         return {"ok": True, "picked": cid, "title": chat.get("title") or ""}
+
+    def _finish_picked_up_turn(self, cs: "ChatState", message, paths: list,
+                               plan: bool, cid: str, title: str) -> None:
+        self._run_send_turn(cs, message, paths, plan)
+        # The point of the whole feature: the phone could not finish this, so
+        # it is not running to notice that we did. Sent AFTER the turn -- "I
+        # picked it up" is not news; "it is done" is.
+        self._notify_phone("Finished on your desktop",
+                           f"\u201c{title}\u201d is done \u2014 the answer is waiting.", cid)
 
     def sync_pull_chat(self, chat_id: str):
         """Download one synced chat into the local session store and open it."""
@@ -3411,9 +3513,11 @@ class Api:
         try:
             events.emit("chat_busy")
             # Anything a voice-dispatched worker reported while this agent was
-            # idle. Done here, under the turn lock, because this is the one
-            # moment its history is not being written by anyone else.
+            # idle, and any spoken exchange that landed while it was busy. Done
+            # here, under the turn lock, because this is the one moment its
+            # history is not being written by anyone else.
             self._drain_worker_reports(cs)
+            self._drain_voice_turns(cs)
             # @-mentioned files. Two things happen here: the "@" is stripped from
             # every mention that resolves to a real file (so the model gets a
             # clean path like generated/x.jpg, not "@generated/x.jpg" which it
@@ -3630,7 +3734,7 @@ class Api:
                 convo.messages.append({"role": "user", "content": user_text})
             if reply_text:
                 convo.messages.append({"role": "assistant", "content": reply_text})
-        self._persist_voice_turn(cs, user_text or "")
+        self._persist_voice_turn(cs, user_text or "", reply=reply_text or "")
         return {"ok": True}
 
     def _prewarm_speech(self) -> None:
@@ -3828,22 +3932,86 @@ class Api:
             self._persist_voice_turn(cs, user_text)
             ev.emit("voice_turn_complete", ok=ok)
 
-    def _persist_voice_turn(self, cs: "ChatState", user_text: str) -> None:
-        """Append a completed voice exchange to the chat's searchable transcript
-        (the same append-only log the coding agent uses), so a voice
-        conversation isn't lost when the overlay closes -- and the coding agent
-        can even grep it later. Best-effort."""
+    def _persist_voice_turn(self, cs: "ChatState", user_text: str,
+                            reply: str | None = None) -> None:
+        """Record a completed spoken exchange in the two places it belongs.
+
+        The append-only transcript, which survives compaction and can be
+        grepped later -- and, since this is a conversation and not a log entry,
+        the CHAT itself. It used to go only to the transcript, so a spoken
+        exchange left no trace in the chat you were looking at: you could talk
+        for ten minutes, close the overlay, and the window still showed
+        whatever had been typed before. The phone has always put spoken turns
+        straight into the conversation (voiceRecordTurn), and switching between
+        talking and typing should not be a change of subject.
+        """
+        # The live engine already HAS both halves -- Gemini transcribes the
+        # speech in each direction and hands them over -- so it passes them in
+        # rather than having them dug back out of the delegator's history,
+        # which is a copy and can be absent entirely.
+        if reply is None:
+            try:
+                reply = self._last_convo_reply(cs)
+            except Exception:
+                reply = ""
+        reply = reply or ""
         tr = getattr(cs.agent, "transcript", None)
-        if tr is None:
-            return
+        if tr is not None:
+            try:
+                if user_text:
+                    tr.user(user_text, label="Voice")
+                if reply:
+                    tr.assistant(reply)
+            except Exception:
+                pass
+        if user_text or reply:
+            self._record_voice_exchange(cs, user_text, reply)
+
+    def _record_voice_exchange(self, cs: "ChatState", user_text: str,
+                               reply: str) -> None:
+        """Put a spoken exchange into the coding chat: on screen now, and in
+        the model's history the moment that is safe.
+
+        Appending straight to agent.messages is only safe while no turn is
+        running -- doing it underneath one is how you get a tool_call with no
+        matching reply. So the lock is TRIED, and a busy chat queues instead;
+        _drain_voice_turns picks it up at the top of the next turn.
+        """
+        pair = {"user": user_text, "assistant": reply}
+        if cs.turn_lock.acquire(blocking=False):
+            try:
+                self._append_voice_messages(cs, pair)
+                self._save_chat(cs)
+            finally:
+                cs.turn_lock.release()
+        else:
+            with cs.voice_turns_lock:
+                cs.voice_turns.append(pair)
+                del cs.voice_turns[:-40]
+        # On screen either way, and on the CODING chat's sid -- the voice sid
+        # drives the overlay, which is not where this belongs.
         try:
-            reply = self._last_convo_reply(cs)
-            if user_text:
-                tr.user(user_text, label="Voice")
-            if reply:
-                tr.assistant(reply)
+            cs.events.emit("voice_chat_turn", user=user_text, assistant=reply)
         except Exception:
             pass
+
+    @staticmethod
+    def _append_voice_messages(cs: "ChatState", pair: dict) -> None:
+        if pair.get("user"):
+            cs.agent.messages.append({"role": "user", "content": pair["user"]})
+        if pair.get("assistant"):
+            cs.agent.messages.append(
+                {"role": "assistant", "content": pair["assistant"]})
+
+    def _drain_voice_turns(self, cs: "ChatState") -> None:
+        """Called with the turn lock held, like _drain_worker_reports."""
+        with cs.voice_turns_lock:
+            pending, cs.voice_turns = cs.voice_turns, []
+        for pair in pending:
+            try:
+                self._append_voice_messages(cs, pair)
+            except Exception:
+                pass
 
     @staticmethod
     def _last_convo_reply(cs: "ChatState") -> str:

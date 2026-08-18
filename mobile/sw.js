@@ -9,8 +9,11 @@
  * to the model API and GitHub (cross-origin, and/or non-GET) bypass the SW
  * entirely and are never stored.
  */
-const CACHE = "mnm-shell-v6";   // bumped: forces a fresh shell onto phones that
-                                // are sitting on an HTTP-cached copy of the old one
+const CACHE = "mnm-shell-v7";   // bumped: forces a fresh shell onto phones that
+                                // are sitting on an HTTP-cached copy of the old
+                                // one. v7: adds the push handlers -- a phone on
+                                // v6 has a worker that receives a push and does
+                                // nothing with it.
 const SHELL = [
   "./index.html",
   "./app.js",
@@ -38,6 +41,58 @@ self.addEventListener("activate", (e) => {
       .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
+});
+
+/* Web Push.
+ *
+ * The one thing a suspended PWA can still do. It cannot RUN anything -- WebKit
+ * has never shipped Background Sync or Background Fetch and this does not
+ * change that -- but the desktop finishing a turn the phone was suspended
+ * through is exactly the case where a notification is the whole answer. Before
+ * this, you found out by opening the app and looking.
+ *
+ * The payload arrives encrypted (RFC 8291) and the browser has already
+ * decrypted it by the time it reaches here. The push service never saw it.
+ */
+self.addEventListener("push", (e) => {
+  let data = {};
+  // A push with no body, or a body that isn't ours, still has to raise
+  // something: iOS revokes the subscription of a service worker that receives
+  // a push and shows nothing (userVisibleOnly is a promise, not a hint).
+  try { data = e.data ? e.data.json() : {}; } catch (err) { data = {}; }
+  const title = data.title || "Make No Mistakes";
+  e.waitUntil(self.registration.showNotification(title, {
+    body: data.body || "Something finished on your desktop.",
+    icon: "./icon-192.png",
+    badge: "./icon-192.png",
+    // Same tag replaces rather than stacks: three finished workers should not
+    // leave three notifications to dismiss one at a time.
+    tag: data.tag || "mnm",
+    data: { chatId: data.chatId || "" },
+  }));
+});
+
+/* Tapping it should land you where the thing happened, not on a cold start of
+ * whatever was open last. An already-running window is focused rather than
+ * replaced -- opening a second one would leave the chat you were reading
+ * behind in a window you can no longer see. */
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const chatId = (e.notification.data || {}).chatId || "";
+  const url = chatId ? `./?chat=${encodeURIComponent(chatId)}` : "./";
+  e.waitUntil((async () => {
+    const open = await self.clients.matchAll({ type: "window",
+                                               includeUncontrolled: true });
+    for (const client of open) {
+      if ("focus" in client) {
+        if (chatId && "navigate" in client) {
+          try { await client.navigate(url); } catch (err) { /* cross-origin */ }
+        }
+        return client.focus();
+      }
+    }
+    return self.clients.openWindow(url);
+  })());
 });
 
 self.addEventListener("fetch", (e) => {

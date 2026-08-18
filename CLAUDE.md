@@ -285,6 +285,43 @@ Two things worth keeping:
   that holds on only one of them is worth much less than it looks. Paraphrasing
   it on one side is a different instruction with nothing to say so.
 
+## Web Push is the one thing a suspended phone can still do
+
+The desktop finishes turns the phone was suspended through, and for a long time
+never told it — you found out by opening the app and looking. Web Push closes
+exactly that: it cannot **run** anything on iOS (WebKit still has no Background
+Sync or Background Fetch, and that section above stands), but it can deliver a
+notification, and a notification was the whole missing piece.
+
+**No server is introduced.** The desktop is the sender: `glmcode/webpush.py`
+implements RFC 8291 (message encryption) and RFC 8292 (VAPID) against
+`cryptography`, which is already a dependency. The subscription and the
+desktop's VAPID public key travel in the encrypted sync store the two devices
+already share (`devices/push.json`, `devices/vapid.json`).
+
+Things that are load-bearing:
+
+- **The RFC's own worked example is the test.** Hand-rolling push encryption is
+  only defensible if it is checked against the specification rather than
+  against one's reading of it, so `tests/test_webpush.py` runs RFC 8291 §5 —
+  their keys, their salt, their plaintext, their exact output bytes. If that
+  test ever fails, do not adjust it to match the code.
+- **Salt and ephemeral key are random per message.** Reusing the pair against
+  one subscription reuses the AES-GCM nonce, which leaks the plaintext. That is
+  the worst mistake available here and there is a test for it.
+- **The VAPID `aud` is the endpoint's ORIGIN,** not the endpoint. Sending the
+  full URL earns a 401 that names no field.
+- **The key goes through the sync store, not the pairing QR.** That payload is
+  read by a camera and its module count decides whether scanning works at all.
+- **`userVisibleOnly` is a promise, not a hint.** A worker that receives a push
+  and shows nothing gets its subscription revoked, so `sw.js` raises a
+  notification even for an empty or unreadable payload.
+- **A 404/410 means forget the device; a 500 does not.** Dropping a
+  subscription over a transient server error silences that phone for good.
+- **The service worker's `CACHE` name must be bumped** whenever its handlers
+  change (`tests/test_phone_icons.py` pins it, so the bump is deliberate). A
+  phone on the old worker receives the push and does nothing with it.
+
 ## Values both devices need are generated, not restated
 
 `scripts/gen_mobile_core.py` writes a marked block inside
@@ -369,6 +406,35 @@ engine owns was simply absent when the toggle said "Gemini Live".
   live path assigned `textContent` on the whole caption element, which wiped
   every earlier turn — including the local engine's, so switching engines
   mid-session erased the conversation. It appends through the same helpers now.
+
+## Talking and typing are one conversation
+
+A spoken exchange used to reach the append-only transcript file and nothing
+else. You could talk for ten minutes, close the overlay, and the chat window
+still showed whatever had been typed before — and the coding agent, asked about
+it by typing, had never heard any of it.
+
+The phone did the right thing from the start: `voiceRecordTurn` pushes both
+halves into `session.messages` and renders them as bubbles.
+`_persist_voice_turn` now does the same on the desktop — transcript *and*
+chat — and emits `voice_chat_turn` on the **coding** chat's sink, since the
+voice sid drives the overlay, which is not where a chat message belongs.
+
+- **The turn lock is tried, not taken.** Appending to `agent.messages`
+  underneath a running turn is how you get a `tool_call` with no matching
+  reply. An idle chat is written to and saved immediately, so it survives a
+  reload; a busy one queues, and `_drain_voice_turns` picks it up at the top of
+  the next turn — the same shape as the worker reports beside it.
+- **The live engine passes its transcript in.** Gemini transcribes both
+  directions and hands them over, so `reply=` is explicit rather than dug back
+  out of the delegator's history — which is a copy at best, and absent
+  entirely once voice mode closes and `convo_agent` is dropped.
+
+Worth knowing about **whose transcription this is**, because it is asked: with
+the live engine both devices already use Gemini's own `inputTranscription` /
+`outputTranscription`. There is nothing to switch. With the local engine there
+is no Gemini in the loop at all — Whisper hears, the delegator answers — so the
+question does not arise there either.
 
 ## A worker's report outlives the voice session
 
