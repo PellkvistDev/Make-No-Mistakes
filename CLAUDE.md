@@ -247,6 +247,100 @@ phone. So **the code is shown, not hidden** — desktop Settings → Your phone 
 and the chats stay ciphertext forever. "Change passphrase" is gone; it was never
 a useful thing to do, since a new key cannot read anything already uploaded.
 
+## Everything the agent reads is data; only the conversation gives orders
+
+`fetch_url` and `web_search` already said so. Nothing else did — which left the
+two channels that matter most completely unmarked:
+
+- **MCP tool output.** Third-party code, started from a command line the user
+  pasted, whose text goes straight into context with no line numbers and no
+  structure around it. A sentence in it reads exactly like a message. The note
+  names the server, because "which server said this" is the first question when
+  a result looks wrong.
+- **The `@`-mention block**, which is appended to the *user's own message*.
+  Anything arriving there sits in the most trusted position in the
+  conversation, and the user pointed at the file without writing what is in it.
+  The label goes **before** the content: a warning after ten thousand
+  characters of attacker-controlled text has already been read in the wrong
+  frame.
+
+`read_file` is deliberately left alone. Its output is line-numbered
+(`  12 | text`), which already frames it as file content rather than speech,
+and it is the hottest tool in the app — the rule is stated once in the system
+prompt, where it is always in context and costs nothing per call.
+
+Two things worth keeping:
+
+- **The note counts inside `MAX_TOOL_OUTPUT`, not on top of it.** Appending
+  after the truncate put MCP results back over the cap — the one thing that cap
+  exists to prevent, after an uncapped result once ballooned a chat to ~1.5M
+  tokens. Room is reserved before truncating, so the total is what it was
+  before the note existed. (`_truncate` also lands ~43 characters past the
+  limit it is given; that is pre-existing and why the cap test carries slack.)
+- **`UNTRUSTED_INPUT_RULE` is a named constant on both devices**, and
+  `tests/test_untrusted_input.py` pins them word for word. This is how the gap
+  was found: the desktop prompt was fixed and nothing failed, because the phone
+  had no such rule at all. Both devices work on the same repository — the phone
+  reads it over the GitHub API and every write it makes is a commit — so a rule
+  that holds on only one of them is worth much less than it looks. Paraphrasing
+  it on one side is a different instruction with nothing to say so.
+
+## The live voice engine has to be wired IN, not alongside
+
+Four separate desktop bugs turned out to be one mistake: `startLiveVoice` was
+added next to the local engine rather than into it, so everything the local
+engine owns was simply absent when the toggle said "Gemini Live".
+
+- **Push-to-talk is enforced in `onaudioprocess`,** because that is the only
+  path audio takes to the model. It was enforced nowhere: the mic streamed
+  continuously whatever the toggle said, and the *button* ran the local
+  recorder — so live + push-to-talk gave you a hands-free live session with a
+  local transcribe-and-send bolted on top. `pttPress`/`pttRelease` branch on
+  the engine now, and release sends `audioStreamEnd` to flush the turn (that
+  pauses the input stream; sending audio again resumes it — it does not close
+  the session).
+- **`voice.speaking` is a LOCAL-engine flag.** The live engine schedules
+  playback straight onto an AudioContext and sets nothing. Anything that must
+  not talk over the assistant has to ask `liveSpeaking()` too, or it is right
+  in one mode and wrong in the other — which is what let finished workers talk
+  over the model.
+- **Worker announcements go through the live session,** as a text turn into
+  its own socket. Routing them to the local convo agent is what put two voices
+  in the room at once, one of them reading from a conversation the live model
+  had never seen.
+- **`liveSpeaking()` alone is not enough to serialise announcements.** Audio
+  takes a moment to come back, and it is false for that whole gap, so two
+  workers finishing together both got through. `liveVoice.pendingTurn` covers
+  the gap and is **time-boxed** (`LIVE_TURN_WAIT_MS`): `turnComplete` is the
+  only thing that clears it, and a plain boolean would silence every later
+  announcement for the rest of the session if that frame never arrived.
+- **The transcript is the local engine's `.voice-you`/`.voice-it` blocks.** The
+  live path assigned `textContent` on the whole caption element, which wiped
+  every earlier turn — including the local engine's, so switching engines
+  mid-session erased the conversation. It appends through the same helpers now.
+
+## A worker's report outlives the voice session
+
+Work dispatched by voice used to report back only to the delegator, which is a
+separate voice-only agent. Close the overlay, type "what did that change?", and
+the agent you are typing to had never been told anything happened.
+
+`worker_report_note()` is filed in two places: the delegator's history, so a
+spoken follow-up can be answered, and `ChatState.worker_reports`, drained into
+the coding agent at the top of its next turn.
+
+**Queued, not appended.** A worker finishes on its own daemon thread at a
+moment nothing controls, and the coding agent may be mid-turn — writing into
+`agent.messages` underneath it produces a `tool_call` with no matching reply,
+which OpenAI-compatible APIs reject outright. `_drain_worker_reports` runs
+inside `_run_send_turn`, under the turn lock, which is the one moment that
+history is not being written by anyone else. The queue is bounded, because
+every entry is spent from the coding agent's context the moment it next runs.
+
+The note carries `WORKER_REPORT_PREFIX` so `sessions.to_display` keeps it out
+of the rendered chat: it arrives in the `user` role (the role this app injects
+plumbing under) and nothing else would distinguish it from something typed.
+
 ## The shell tool is named after the platform, not after PowerShell
 
 `run_command` execs PowerShell on Windows and bash (falling back to `/bin/sh`)

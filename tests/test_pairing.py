@@ -337,7 +337,7 @@ def _merge(existing, incoming):
          "console.log(JSON.stringify(C.mergeProviders("
          "JSON.parse(process.argv[2]),JSON.parse(process.argv[3]))));",
          str(_CORE), _json.dumps(existing), _json.dumps(incoming)],
-        capture_output=True, text=True, timeout=30)
+        capture_output=True, text=True, encoding="utf-8", timeout=30)
     assert js.returncode == 0, js.stderr
     return _json.loads(js.stdout)
 
@@ -349,7 +349,7 @@ def _node(expr, *args):
          "(async()=>{console.log(JSON.stringify(await (" + expr + ")))})()"
          ".catch(e=>{console.log(JSON.stringify({__err:String(e.message||e)}))})",
          str(_CORE), *[str(a) for a in args]],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert js.returncode == 0, js.stderr
     return _json.loads(js.stdout)
 

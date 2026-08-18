@@ -38,7 +38,7 @@ def _phone():
         ["node", "-e",
          "const C=require(process.argv[1]);"
          "console.log(JSON.stringify(C.WORKER_SCHEMAS));", str(CORE_JS)],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert out.returncode == 0, out.stderr
     return {s["function"]["name"]: s["function"] for s in json.loads(out.stdout)}
 
@@ -102,7 +102,7 @@ def _live_prompt():
         ["node", "-e",
          "const C=require(process.argv[1]); console.log(C.LIVE_VOICE_PROMPT);",
          str(CORE_JS)],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert out.returncode == 0, out.stderr
     return out.stdout
 

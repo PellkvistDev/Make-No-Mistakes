@@ -326,7 +326,7 @@ def _phone(expr, *args):
          "const a=JSON.parse(process.argv[2]);"
          f"console.log(JSON.stringify({expr}));",
          str(_CORE_JS), json.dumps(list(args))],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert out.returncode == 0, out.stderr
     return json.loads(out.stdout)
 
