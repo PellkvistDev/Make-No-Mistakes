@@ -340,6 +340,19 @@ Rules:
 - Be complete and precise rather than brief, but do not pad with commentary."""
 
 
+# What the Browser Agent is actually asked, as its first user turn.
+#
+# The goal used to live only in the system prompt, and the turn said "Begin.
+# Work toward the goal" -- so the conversation contained no goal, and a model
+# that treats system content as background rather than as the request replied
+# asking what it was supposed to do. A task belongs in the turn.
+BROWSER_AGENT_TASK = (
+    "Your goal:\n\n{goal}\n\n"
+    "Begin now. Work toward it one action at a time, and reply with a report "
+    "when you are done or genuinely blocked."
+)
+
+
 BROWSER_AGENT_SYSTEM = """You are the Browser Agent: a specialized sub-agent that operates a real web browser to accomplish ONE goal handed to you by a coordinating coding agent. You work autonomously — you cannot ask anyone questions — and when done you reply with a plain-text report of what you did and what you found.
 
 # How you see and act
