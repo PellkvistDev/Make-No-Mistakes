@@ -380,6 +380,31 @@ save one file. The block needs none of them.
 This does not retire the node parity tests and must not be read as doing so.
 They cover the half that is still written twice.
 
+## The history is a tree; rewinding is only one way down it
+
+`backup.py` commits a snapshot of the work tree before **every** user turn, and
+edit-and-resend already reverts both the conversation and the files to one. So
+the structure underneath has always been a tree. It was offered as a line:
+`rewind_to` truncates in place and the branch you were on is gone.
+
+`fork_at` is the other move — the original chat is untouched, and a new one
+opens holding the conversation up to that message with the files reverted to
+the same snapshot. For an agent that is wrong a fair share of the time, "try it
+both ways and compare" is a better primitive than undo, and it costs no extra
+storage because those commits are already being written.
+
+- **Up to, not including.** The fork starts where that turn was about to be
+  sent, so its text is still yours to retype or change.
+- **The files are reverted BEFORE the new chat is built,** so its own
+  `BackupRepo` records the state the fork actually starts from rather than the
+  parent's latest. A failed revert returns an error and creates nothing: half a
+  fork — a new chat whose files belong to the other branch — is worse than none.
+- **The inherited snapshots come with it,** so the new chat can be rewound or
+  forked again. The tree keeps branching instead of flattening at the first
+  fork.
+- **Same turn ordinal as the edit path** (position among user bubbles), so the
+  two cannot disagree about which message was meant.
+
 ## Setting a system prompt means `set_system_prompt`, not the attribute
 
 `Agent.__init__` calls `rebuild_system_prompt()`, so `messages[0]` is written
