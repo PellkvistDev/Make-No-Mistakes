@@ -392,8 +392,11 @@ its whole vocabulary:
   conversation: the delegator agent, its `<sid>::voice` event sink, the convo
   lock, and the two queues that carry work done by voice back to the coding
   agent.
+- `glmcode/gui/github_api.py` — cloning and connecting a project, the token,
+  the clone root, push and pull, and reviewing a pull request: everything that
+  speaks `githubsync` about the chat's own repository.
 
-Both follow the same rules.
+All three follow the same rules.
 
 - **A mixin, not a collaborator object.** These methods reach all over the
   instance (`self._cfg`, `self._chats`, `self._active`, `self._store`,
@@ -431,10 +434,30 @@ cycle. Two things follow:
   and `tests/test_tts_engine.py` still import them from `glmcode.gui.app`, were
   not touched, and still pass.
 
-`speech.py` and `media.py` are leaves and must stay leaves: they exist so that
-`events.py` and `voice_api.py` can each have what they need without importing
-the other. An import back up the stack recreates exactly the cycle they were
-carved out to break.
+`speech.py`, `media.py` and `paths.py` are leaves and must stay leaves: they
+exist so that `events.py`, `voice_api.py` and `github_api.py` can each have
+what they need without importing the other. An import back up the stack
+recreates exactly the cycle they were carved out to break.
+
+**Not every GitHub call belongs to the GitHub seam.** Chat sync, pairing and
+the CI runner also talk to GitHub, and they stay in `devices_api.py`, because
+their subject is reaching a machine that is not this one — GitHub is the
+transport they happen to use, not what they are about. `sync_env` calling
+`self._gh_token()` across that line is two mixins sharing one instance, which
+is what a mixin is for, and `tests/test_api_split.py` pins it so nobody
+"fixes" it later by duplicating the helper.
+
+The same question moved `get_phone_app` and `get_pair_phone` in the other
+direction: setting the phone up *is* reaching the other machine, and they had
+been left in `app.py` by the first split. Expect a seam to correct the one
+before it — that is the subject boundary being found, not churn.
+
+**A dead-looking import may be a lookup path.** `pyflakes` called `pairing`
+and `qrcode_util` unused in `app.py` once their methods moved, and removing
+them broke four pairing tests: they monkeypatch `gui_app.qrcode_util.qr_svg`,
+which needs the name to still resolve there. Re-exported with `# noqa: F401`,
+same as `WebEvents` and the rest. The test failing is the good outcome —
+check what reaches a name through `gui.app` before deleting it.
 
 The next seams, when it is worth it, are the same shape: a subject with its own
 vocabulary. Do not split by size.
