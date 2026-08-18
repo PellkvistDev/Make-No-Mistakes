@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .config import CONFIG_DIR
 from .prompts import (CONTINUE_NUDGE, EXECUTE_PLAN_MESSAGE, FILE_CONTEXT_MARKER,
+                      WORKER_REPORT_PREFIX,
                       FRESH_REVIEW_HEADER, PLAN_MODE_PREAMBLE, REFINE_NUDGE,
                       STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE, VERIFY_NUDGE,
                       WRAP_UP_NUDGE)
@@ -24,6 +25,7 @@ _INTERNAL_NUDGES = {CONTINUE_NUDGE, STEP_LIMIT_NUDGE, VERIFY_NUDGE,
 # findings, test output), so exact-match isn't enough -- match their stable
 # leading text too.
 _INTERNAL_NUDGE_PREFIXES = (VERIFY_NUDGE, REFINE_NUDGE, FRESH_REVIEW_HEADER,
+                            WORKER_REPORT_PREFIX,
                             "[Automatic test run -- not from the user]")
 # STEER_NUDGE_TEMPLATE-wrapped messages ARE from the user -- shown as the
 # same "You steered" note the live view used, not as a framed wall of text.

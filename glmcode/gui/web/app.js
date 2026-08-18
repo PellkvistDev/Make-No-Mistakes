@@ -5302,7 +5302,7 @@ async function boot() {
    the whole VAD when a mic or room makes hands-free unreliable. */
 
 const voice = {
-  active: false, ptt: false, stream: null, ctx: null, analyser: null, data: null,
+  active: false, ptt: false, pttHeld: false, stream: null, ctx: null, analyser: null, data: null,
   timer: 0, rec: null, chunks: [], recording: false, confirmed: false, discard: false,
   speaking: false, thinking: false, transcribing: false, turnComplete: true,
   voiceFrames: 0, voicedMs: 0, silenceMs: 0, recMs: 0, peak: 0,
@@ -5733,11 +5733,47 @@ function onVoiceTtsIdle() {
 // as short convo turns; if the agent is busy, hold and retry when it frees up.
 function processAnnounceQueue() {
   if (!voice.active || voice.speaking || voice.transcribing || voice.recording) return;
+  // Two workers finishing close together used to talk over each other, and in
+  // live mode they talked over the assistant as well. Both were the same hole:
+  // this guard only knew about the LOCAL engine's speech. voice.speaking is
+  // never set by the live engine, so every check above passed while Gemini was
+  // mid-sentence, and a second announcement started on top of the first.
+  if (liveSpeaking() || voice.pttHeld) return;
+  // An announcement already sent and not yet answered. Audio takes a moment to
+  // come back, and liveSpeaking() is false for the whole of that gap -- so two
+  // workers finishing together both sailed through and the model was handed
+  // two things to say at once.
+  if (liveAwaitingReply()) return;
   if (!voice.announceQ.length) return;
+
+  if (liveEngineOn() && liveVoice.ws && liveVoice.established) {
+    // Said BY the live session rather than by the local convo agent. Routing
+    // it locally is what produced two voices at once: the local text-to-speech
+    // reading the summary while Gemini carried on with its own turn, from a
+    // conversation that had never heard of the worker.
+    const a = voice.announceQ.shift();
+    liveVoice.pendingTurn = Date.now();
+    liveSend({ realtimeInput: { text: workerNote(a) } });
+    // The result still has to reach the delegator's history and the coding
+    // agent's, which the live path would otherwise never touch.
+    try { api().record_worker_result(a.name, a.status, a.result); } catch (e) { /* ignore */ }
+    return;
+  }
+
   const a = voice.announceQ.shift();
   api().announce_worker(a.name, a.status, a.result).then((res) => {
     if (res && res.error === "busy") { voice.announceQ.unshift(a); setTimeout(processAnnounceQueue, 600); }
   }).catch(() => {});
+}
+
+// The same wording the local path builds server-side (Api.announce_worker), so
+// the assistant says the same kind of thing whichever engine is running.
+function workerNote(a) {
+  const outcome = a.status === "done" ? "finished successfully" : "failed";
+  return `[System note — not from the user] The background worker '${a.name}' just ` +
+         `${outcome}. Its result:\n${String(a.result || "").slice(0, 2000)}\n\n` +
+         `Briefly tell the user out loud what happened, in plain spoken language. ` +
+         `Do not read code or paths aloud.`;
 }
 
 // -- approve-by-voice: a worker needs an OK for a gated action ------------- //
@@ -5924,7 +5960,13 @@ function setVoicePtt(on) {
   // endUtterance rather than a silent drop: it already keeps a clip only if the
   // VAD had confirmed real speech in it, so a half-heard room noise is
   // discarded and an actual sentence is not thrown away mid-word.
+  //
+  // Only the local engine has a recording to close out. The live engine has a
+  // held flag instead, and leaving it set while switching to hands-free would
+  // be harmless, while leaving it set while switching TO push-to-talk would
+  // stream the room until the first press and release.
   if (voice.recording) endUtterance();
+  voice.pttHeld = false;
   voice.ptt = on;
   const t = $("voice-ptt-toggle");
   t.setAttribute("aria-checked", String(on));
@@ -5937,6 +5979,9 @@ function setVoicePtt(on) {
     if (on) { setVoiceStatus("Hold Space or the button to talk"); setVoiceOrb("idle"); }
     else { setVoiceStatus("Listening… just talk"); setVoiceOrb("listening"); }
   }
+  // A worker that finished while the button was down has been waiting for the
+  // mic to free up.
+  processAnnounceQueue();
 }
 
 function applyGateToggleUI() {
@@ -5957,7 +6002,20 @@ function setVoiceGated(on) {
 }
 
 function pttPress() {
-  if (!voice.active || !voice.ptt || voice.recording || voice.transcribing) return;
+  if (!voice.active || !voice.ptt) return;
+  // The live engine holds the conversation itself: there is no local recorder
+  // to start and no clip to transcribe. Holding the button simply opens the
+  // stream that startLiveVoice() is otherwise dropping on the floor.
+  if (liveEngineOn() && liveVoice.ws) {
+    if (voice.pttHeld) return;
+    if (liveSpeaking()) liveStopPlayback();   // barge-in, same as talking over it
+    voice.pttHeld = true;
+    $("voice-ptt-btn").classList.add("held");
+    setVoiceOrb("hearing");
+    setVoiceStatus("Listening…");
+    return;
+  }
+  if (voice.recording || voice.transcribing) return;
   if (voice.speaking || voice.thinking) interruptReply();
   // In PTT we drive the recorder directly, bypassing the energy gate -- keep
   // whatever was captured (confirmed) regardless of measured energy.
@@ -5966,6 +6024,19 @@ function pttPress() {
   $("voice-ptt-btn").classList.add("held");
 }
 function pttRelease() {
+  if (liveEngineOn() && liveVoice.ws) {
+    if (!voice.pttHeld) return;
+    voice.pttHeld = false;
+    $("voice-ptt-btn").classList.remove("held");
+    // Ends the input stream so the server answers now instead of waiting for
+    // its own endpointer to time out on silence it is no longer being sent.
+    // Sending audio again resumes it -- this pauses the stream, it does not
+    // close the session.
+    liveSend({ realtimeInput: { audioStreamEnd: true } });
+    setVoiceOrb("thinking");
+    setVoiceStatus("Thinking…");
+    return;
+  }
   if (!voice.ptt || !voice.recording) return;
   $("voice-ptt-btn").classList.remove("held");
   endUtterance();
@@ -6275,7 +6346,7 @@ else window.addEventListener("pywebviewready", bootSafely);
 const liveVoice = {
   ws: null, ctx: null, node: null, stream: null,
   playAt: 0, sources: [], handle: "", closing: false, reconnects: 0,
-  established: false, said: "", heard: "",
+  established: false, said: "", heard: "", userEl: null, pendingTurn: 0,
 };
 
 const LIVE_MAX_RECONNECTS = 5;
@@ -6343,7 +6414,13 @@ function livePlay(bytes) {
   liveVoice.sources.push(src);
   src.onended = () => {
     liveVoice.sources = liveVoice.sources.filter((s) => s !== src);
-    if (!liveVoice.sources.length && voice.active) setVoiceOrb("idle");
+    if (!liveVoice.sources.length && voice.active) {
+      setVoiceOrb("idle");
+      // The live engine's equivalent of the local drain callback: a worker
+      // announcement held back while it was talking goes now. Without this the
+      // queue only moves when something else happens to poke it.
+      processAnnounceQueue();
+    }
   };
 }
 
@@ -6382,10 +6459,15 @@ function liveOnMessage(payload) {
   if (sc.interrupted) liveStopPlayback();
   if (sc.inputTranscription && sc.inputTranscription.text) {
     liveVoice.heard += sc.inputTranscription.text;
-    $("voice-caption").textContent = liveVoice.heard;
+    liveCaptionUser(liveVoice.heard);
   }
   if (sc.outputTranscription && sc.outputTranscription.text) {
     liveVoice.said += sc.outputTranscription.text;
+    // Into the same reply element the local engine streams into, so the
+    // overlay reads as one conversation rather than resetting to a single
+    // line whenever the live engine says anything.
+    voiceReplyEl().textContent = liveVoice.said;
+    $("voice-caption").scrollTop = $("voice-caption").scrollHeight;
   }
   // One event can carry several parts at once -- audio and a transcript
   // together -- so every part is looked at rather than the first one.
@@ -6405,15 +6487,42 @@ function liveOnMessage(payload) {
       // holds the conversation. Both halves go back so the chat's transcript
       // and the delegator's own history stay true.
       try { api().live_voice_turn(heard, said); } catch (e) { /* ignore */ }
-      appendVoiceTurn(heard, said);
     }
+    liveEndCaptionTurn();
+    // The model is free now: whatever it was answering is finished.
+    liveVoice.pendingTurn = 0;
+    processAnnounceQueue();
   }
 }
 
-function appendVoiceTurn(heard, said) {
-  const box = $("voice-caption");
-  if (!box) return;
-  box.textContent = said || heard || "";
+/* The live engine's half of the on-screen transcript.
+ *
+ * The local engine has built a scrolling log of .voice-you / .voice-it blocks
+ * in #voice-caption all along. The live engine wrote over the whole element
+ * with a single line of plain text, which is why the desktop appeared to have
+ * no transcript in live mode while the phone did -- and why switching engines
+ * mid-session wiped what had been said.
+ *
+ * Partial transcriptions stream in, so the user's block is created once per
+ * turn and then updated in place rather than appended to.
+ */
+function liveCaptionUser(text) {
+  if (!liveVoice.userEl) {
+    addVoiceTurn(text, false);
+    const block = voice.curTurnEl;
+    liveVoice.userEl = block ? block.querySelector(".voice-you") : null;
+  } else {
+    liveVoice.userEl.textContent = text;
+  }
+  const cap = $("voice-caption");
+  if (cap) cap.scrollTop = cap.scrollHeight;
+}
+
+// One exchange is over: the next transcription starts a new block.
+function liveEndCaptionTurn() {
+  liveVoice.userEl = null;
+  voice.replyEl = null;
+  voice.curTurnEl = null;
 }
 
 async function liveReconnect() {
@@ -6489,6 +6598,8 @@ async function startLiveVoice() {
   liveVoice.established = false;
   liveVoice.handle = "";
   liveVoice.said = liveVoice.heard = "";
+  liveVoice.userEl = null;
+  liveVoice.pendingTurn = 0;
   if (!(await liveOpenSocket())) return false;
   const Ctx = window.AudioContext || window.webkitAudioContext;
   liveVoice.ctx = new Ctx();
@@ -6501,6 +6612,13 @@ async function startLiveVoice() {
   const node = liveVoice.ctx.createScriptProcessor(4096, 1, 1);
   node.onaudioprocess = (e) => {
     if (!voice.active || voice.muted) return;
+    // Push-to-talk has to be enforced HERE, on the only path audio takes to
+    // the model. It used to be enforced nowhere in this engine: the mic
+    // streamed continuously no matter what the toggle said, and the button
+    // ran the LOCAL recorder instead -- so picking "Gemini Live" plus
+    // push-to-talk gave you a hands-free live session with a local
+    // transcribe-and-send bolted on top of it.
+    if (voice.ptt && !voice.pttHeld) return;
     const pcm = livePcm16(e.inputBuffer.getChannelData(0), rate);
     liveSend({ realtimeInput: { audio: {
       data: liveB64(pcm), mimeType: "audio/pcm;rate=16000" } } });
@@ -6514,8 +6632,39 @@ async function startLiveVoice() {
   node.connect(sink);
   sink.connect(liveVoice.ctx.destination);
   liveVoice.node = node;
-  setVoiceStatus("Listening — just talk.");
+  if (voice.ptt) {
+    setVoiceStatus("Hold Space or the button to talk");
+  } else {
+    setVoiceStatus("Listening — just talk.");
+  }
   setVoiceOrb("idle");
+  return true;
+}
+
+/* True while the model still has audio scheduled to play.
+ *
+ * The local engine has voice.speaking for this; the live engine sets nothing,
+ * because its playback is scheduled straight onto an AudioContext. Anything
+ * that must not talk over the assistant has to ask BOTH, or it will be right
+ * half the time and wrong in exactly the mode the user picked. */
+function liveSpeaking() {
+  return liveEngineOn() && liveVoice.sources.length > 0;
+}
+
+/* An announcement is out and the model has not finished answering it.
+ *
+ * Time-boxed rather than a plain flag: turnComplete is the only thing that
+ * clears it, and if that never arrives -- a dropped socket, a model that
+ * simply says nothing -- a boolean would silence every later announcement for
+ * the rest of the session. Waiting too long for one worker is recoverable;
+ * never speaking again is not. */
+const LIVE_TURN_WAIT_MS = 30000;
+function liveAwaitingReply() {
+  if (!liveVoice.pendingTurn) return false;
+  if (Date.now() - liveVoice.pendingTurn > LIVE_TURN_WAIT_MS) {
+    liveVoice.pendingTurn = 0;
+    return false;
+  }
   return true;
 }
 

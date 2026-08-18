@@ -43,7 +43,8 @@ from .. import qrcode_util
 from .. import syncstore
 from .. import usage as usage_mod
 from ..notify import APP_NAME, notify
-from ..prompts import EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT
+from ..prompts import (EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT,
+                       worker_report_note)
 from ..sessions import SessionStore, new_id, to_display
 from ..transcript import Transcript, search_sessions
 from ..tools import (CONVERSATIONAL_SCHEMAS, configure_search,
@@ -631,6 +632,14 @@ class ChatState:
         self.convo_agent: Agent | None = None
         self.convo_events: WebEvents | None = None
         self.convo_lock = threading.Lock()  # one voice turn at a time
+        # Final reports from workers dispatched by voice, waiting to be handed
+        # to the CODING agent. Queued rather than appended straight to
+        # agent.messages because a worker finishes on its own thread and the
+        # coding agent may be mid-turn -- mutating its history underneath it is
+        # how you get a tool_call with no matching reply. Drained at the top of
+        # the next send turn, which holds the turn lock.
+        self.worker_reports: list[str] = []
+        self.worker_reports_lock = threading.Lock()
 
 
 class Api:
@@ -3401,6 +3410,10 @@ class Api:
         ok = False
         try:
             events.emit("chat_busy")
+            # Anything a voice-dispatched worker reported while this agent was
+            # idle. Done here, under the turn lock, because this is the one
+            # moment its history is not being written by anyone else.
+            self._drain_worker_reports(cs)
             # @-mentioned files. Two things happen here: the "@" is stripped from
             # every mention that resolves to a real file (so the model gets a
             # clean path like generated/x.jpg, not "@generated/x.jpg" which it
@@ -3741,10 +3754,56 @@ class Api:
                 f"'{name}' just {outcome}. Its result:\n{result}\n\n"
                 f"Briefly tell the user out loud what happened, in plain "
                 f"spoken language. Do not read code or paths aloud.")
+        # Also filed for the coding agent, so the report survives the voice
+        # session: announce_worker only ever reached the delegator.
+        self._queue_worker_report(cs, worker_report_note(name, status, result))
         threading.Thread(target=self._run_convo_turn,
                          args=(cs, {"role": "user", "content": note}),
                          daemon=True).start()
         return {"ok": True, "started": True}
+
+    def record_worker_result(self, name: str, status: str, result: str):
+        """File a finished worker's report without speaking it.
+
+        The live engine says these itself (the announcement is sent into its
+        own session), so the local announce path would be a second voice. But
+        the RESULT still has to be recorded, and in two places:
+
+          - the delegator's history, so a follow-up question in the same
+            spoken conversation has the report to answer from;
+          - the coding agent's queue, so switching back to typing can ask
+            about work that was dispatched by voice. Without this the report
+            existed only as speech: the model that did the work is gone, and
+            the model you are typing to never heard about it.
+        """
+        cs = self._active
+        if cs is None:
+            return {"ok": False}
+        note = worker_report_note(name, status, result)
+        convo = cs.convo_agent
+        if convo is not None:
+            convo.messages.append({"role": "user", "content": note})
+        self._queue_worker_report(cs, note)
+        return {"ok": True}
+
+    def _queue_worker_report(self, cs: "ChatState", note: str) -> None:
+        with cs.worker_reports_lock:
+            # Bounded: a long voice session can dispatch a lot of workers, and
+            # every one of these is spent from the coding agent's context the
+            # moment it next runs.
+            cs.worker_reports.append(note)
+            del cs.worker_reports[:-20]
+
+    def _drain_worker_reports(self, cs: "ChatState") -> None:
+        """Hand queued worker reports to the coding agent. Called with the turn
+        lock held, so appending to its history is safe here and nowhere else."""
+        with cs.worker_reports_lock:
+            notes, cs.worker_reports = cs.worker_reports, []
+        for note in notes:
+            try:
+                cs.agent.messages.append({"role": "user", "content": note})
+            except Exception:
+                pass
 
     def _run_convo_turn(self, cs: "ChatState", msg: dict,
                         user_text: str = "") -> None:
