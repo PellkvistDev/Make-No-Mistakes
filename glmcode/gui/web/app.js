@@ -587,6 +587,16 @@ function addUserMessage(text, images, note, plan) {
   edit.setAttribute("aria-label", "Edit and resend this message");
   edit.innerHTML = PENCIL_SVG;
   edit.addEventListener("click", () => startEditUser(wrap));
+  // Fork: the same rewind point, but the original chat is kept. Editing and
+  // resending DISCARDS everything after this message; often what you actually
+  // want is to try the other way and compare, and the pre-turn snapshot that
+  // makes that possible is already on disk.
+  const fork = document.createElement("button");
+  fork.className = "user-edit user-fork";
+  fork.title = "Branch a new chat from here";
+  fork.setAttribute("aria-label", "Branch a new chat from this message");
+  fork.innerHTML = FORK_SVG;
+  fork.addEventListener("click", () => forkFromUser(wrap));
   const copy = document.createElement("button");
   copy.className = "user-edit user-copy";
   copy.title = "Copy message";
@@ -598,6 +608,7 @@ function addUserMessage(text, images, note, plan) {
       .catch(() => toast("Couldn't copy to clipboard.", "error", 3000));
   });
   wrap.appendChild(copy);
+  wrap.appendChild(fork);
   wrap.appendChild(edit);
   const b = document.createElement("div");
   b.className = "bubble-user";
@@ -642,6 +653,31 @@ function addUserMessage(text, images, note, plan) {
 /* Edit & resend a past message: rewind the chat to just before it (the
    backend reverts the project files to that turn's snapshot and truncates
    the conversation), then resend the edited text as a fresh turn. */
+/* Branch a new chat at this message, leaving this one exactly as it is.
+ *
+ * Same turn ordinal the edit path uses -- position among user bubbles, which
+ * is the send-turn order the backend counts -- so the two cannot disagree
+ * about which message was meant. */
+async function forkFromUser(wrap) {
+  if (busy) { toast("Can't fork a chat while the agent is working.", "warn", 3500); return; }
+  const ordinal = [...document.querySelectorAll(".msg-user")].indexOf(wrap);
+  let res;
+  try { res = await api().fork_at(ordinal); }
+  catch (e) { toast("Bridge error: " + e, "error", 6000); return; }
+  if (!res || res.error) { toast((res && res.error) || "Couldn't fork.", "error", 5000); return; }
+  // applySession is what open_session's payload goes through, and fork_at
+  // returns the same shape -- so the new chat opens exactly the way switching
+  // to any other one does, sidebar included.
+  applySession(res);
+  renderSidebar();
+  if (res.reverted) {
+    toast("Forked. Files are back to how they were before that message; the original chat is untouched.",
+          "info", 5000);
+  } else {
+    toast("Forked. The original chat is untouched.", "info", 4000);
+  }
+}
+
 function startEditUser(wrap) {
   if (busy) { toast("Can't edit a message while the agent is working.", "warn", 3500); return; }
   if (wrap.querySelector(".user-edit-box")) return; // already editing this one
@@ -2849,6 +2885,7 @@ function refreshModelFoot(res) {
     `${res.chat_model} via ${res.chat_provider}` + (note ? ` — ${note}` : "");
 }
 
+const FORK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="4" r="2"/><circle cx="6" cy="20" r="2"/><circle cx="18" cy="9" r="2"/><path d="M6 6v12"/><path d="M18 11c0 4-6 3-6 7"/></svg>';
 const PENCIL_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>';
 const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 const CROSS_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';

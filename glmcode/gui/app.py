@@ -3356,6 +3356,77 @@ class Api:
             return {"error": str(e)}
         return {"ok": True}
 
+    def fork_at(self, turn_ordinal):
+        """Branch the conversation at one of your past messages.
+
+        The history underneath has always been a TREE and was only ever offered
+        as a line: backup.py commits a snapshot of the work tree before every
+        user turn, and rewind_to reverts to one -- discarding everything after
+        it, permanently. For an agent that is wrong a fair share of the time,
+        "try it both ways and compare" is a better primitive than undo, and the
+        storage for it is already being written.
+
+        So this keeps the original chat untouched and opens a NEW one holding
+        the conversation up to that point, with the project files reverted to
+        the same snapshot. The two then diverge.
+
+        `turn_ordinal` is the message's send-turn number, resolved to an
+        absolute position through the same display mapping the JS sees -- the
+        same contract rewind_to uses, so the two cannot disagree about which
+        message was meant.
+        """
+        cs = self._active
+        if not cs:
+            return {"error": "no active chat"}
+        if cs.agent.busy:
+            return {"error": "can't fork a chat while the agent is working"}
+        try:
+            turn_ordinal = int(turn_ordinal)
+        except (TypeError, ValueError):
+            return {"error": "bad message reference"}
+
+        msg_index = next((it["msg_index"] for it in to_display(cs.agent.messages)
+                          if it.get("kind") == "user"
+                          and it.get("turn_ordinal") == turn_ordinal), None)
+        if msg_index is None or not (0 <= msg_index < len(cs.agent.messages)) \
+                or cs.agent.messages[msg_index].get("role") != "user":
+            return {"error": "that message is no longer available"}
+
+        # Everything BEFORE the chosen message: the fork starts where that turn
+        # was about to be sent, so its own text is available to retype or edit
+        # rather than already spent.
+        history = [dict(m) for m in cs.agent.messages[:msg_index]]
+        snapshots = [dict(t) for t in cs.turn_snapshots[:turn_ordinal]]
+        parent_title = cs.title or "Chat"
+        source_sid = cs.sid
+
+        # Revert the FILES before the new chat's BackupRepo is built, so its
+        # first snapshot records the state the fork actually starts from
+        # rather than the parent's latest.
+        commit = (cs.turn_snapshots[turn_ordinal]["commit"]
+                  if 0 <= turn_ordinal < len(cs.turn_snapshots) else None)
+        reverted = False
+        if commit and cs.backup_repo:
+            try:
+                cs.backup_repo.revert_to(commit)
+                reverted = True
+            except Exception as e:
+                return {"error": f"couldn't revert the project files: {e}"}
+
+        payload = self._activate_session(
+            new_id(), history, str(cs.agent.workdir),
+            0, 0, [], title=f"{parent_title} (fork)",
+            auto_backup=cs.auto_backup,
+            model_provider=cs.provider, model=cs.model,
+            turn_snapshots=snapshots)
+        if payload.get("error"):
+            return payload
+        payload["forked_from"] = source_sid
+        payload["reverted"] = reverted
+        payload["had_snapshot"] = bool(commit)
+        payload["sessions"] = self.list_sessions()
+        return payload
+
     def rewind_to(self, turn_ordinal):
         """Edit & resend: rewind the active chat to just before one of your
         past messages -- revert the project files to that turn's pre-turn
