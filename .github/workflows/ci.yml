@@ -39,6 +39,11 @@ jobs:
       # skipped assertion is indistinguishable from a passing one.
       - run: pip install requests pytest cryptography segno
       - run: python -m pytest tests/ -q
+      # The eval CASES must not rot: each one only measures something
+      # while its check still fails before the agent touches it, and a
+      # fixture accidentally repaired elsewhere would turn into a free
+      # pass for every configuration. tests/test_evals.py re-checks that
+      # offline; nothing here calls a model or spends quota.
       # The phone's logic layer: crypto, the sync store, context budgeting,
       # the agent loop. It had never run here, so every green check on every
       # phone change was green without it.

@@ -1,0 +1,6 @@
+{
+  "task": "The test suite fails. Find the bug in the source and fix it so the tests pass. Do not change the tests.",
+  "check": "python -m pytest -q",
+  "protect": ["test_stats.py"],
+  "timeout": 180
+}

@@ -643,6 +643,9 @@ glmcode/
   cli.py          REPL, slash commands, image detection, first-run setup
   config.py       ~/.makenomistakes/config.json
   gui/            desktop app: pywebview shell (app.py) + HTML/CSS/JS (web/)
+evals/            task fixtures + `python -m glmcode.evals`: does the
+                  scaffolding actually help? (calls a real model; see
+                  evals/README.md)
 tests/            pytest suite (no network, no GUI deps): agent loop, retry/
                   backoff, steering, sub-agents, backups, sessions, memory
 ```
