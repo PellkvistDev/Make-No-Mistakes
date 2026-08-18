@@ -383,9 +383,17 @@ They cover the half that is still written twice.
 ## The Api class comes apart along subjects, not at a line count
 
 `gui/app.py` held one `Api` class of 190 methods across ~3,600 lines, and every
-feature landed in it. `glmcode/gui/devices_api.py` is the first seam taken:
-sync, pairing, Web Push and the CI runner are one subject — reaching a machine
-that is not this one — and they share their whole vocabulary.
+feature landed in it. Two seams are taken so far, each a subject that shares
+its whole vocabulary:
+
+- `glmcode/gui/devices_api.py` — sync, pairing, Web Push, the CI runner:
+  reaching a machine that is not this one.
+- `glmcode/gui/voice_api.py` — speech-to-text, text-to-speech, and the spoken
+  conversation: the delegator agent, its `<sid>::voice` event sink, the convo
+  lock, and the two queues that carry work done by voice back to the coding
+  agent.
+
+Both follow the same rules.
 
 - **A mixin, not a collaborator object.** These methods reach all over the
   instance (`self._cfg`, `self._chats`, `self._active`, `self._store`,
@@ -399,6 +407,34 @@ that is not this one — and they share their whole vocabulary.
 - **Nothing is left behind.** A copy still defined on `Api` would shadow the
   mixin's, and which one wins depends on the MRO — `tests/test_api_split.py`
   fails if a name exists in both.
+
+**The voice seam is one subject and must not be halved.** The app has two
+speech engines and the choice is per-session: Gemini Live hears and speaks for
+itself, while the local engine is Whisper plus Kokoro/Piper with this app in
+between. `voice_mode` readies one, `live_voice_config` readies the other, and
+`_persist_voice_turn` records the result identically whichever ran. Splitting
+"the spoken conversation" from "the speech engines" would cut through the
+middle of that rather than along a seam.
+
+Cutting the voice seam is also what moved `WebEvents` out of `app.py`, into
+`glmcode/gui/events.py`. It was never part of the `Api` class — it is the other
+side of the bridge — and `_ensure_convo` builds a second one for the spoken
+conversation, which a mixin in its own module cannot do without an import
+cycle. Two things follow:
+
+- **A lazy `from .app import X` inside a function is not the fix.** It works,
+  and it is the seam leaking back: the cycle is still there, hidden until the
+  next split. `tests/test_api_split.py` fails on that string.
+- **`app.py` re-exports what it used to define** — `WebEvents`, `_TtsFeeder`,
+  `_tts_engine_voice`, `_data_uri`, `_thumb_uri`. That is why
+  `tests/test_webevents.py`, `tests/test_read_aloud.py`, `tests/test_background.py`
+  and `tests/test_tts_engine.py` still import them from `glmcode.gui.app`, were
+  not touched, and still pass.
+
+`speech.py` and `media.py` are leaves and must stay leaves: they exist so that
+`events.py` and `voice_api.py` can each have what they need without importing
+the other. An import back up the stack recreates exactly the cycle they were
+carved out to break.
 
 The next seams, when it is worth it, are the same shape: a subject with its own
 vocabulary. Do not split by size.
