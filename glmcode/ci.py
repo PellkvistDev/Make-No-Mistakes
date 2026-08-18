@@ -147,6 +147,77 @@ def run_ci_task(task: str, *, workdir: Path, owner: str, repo: str, token: str,
     return {"changed": True, "pr": pr, "report": report}
 
 
+# --------------------------------------------------------------------- #
+# Installing and starting it from the app.
+#
+# All of the above has existed for a while, and was unreachable: the workflow
+# was a file in docs/ you were told to copy into another repository by hand,
+# so the honest description of the feature was "you can do this yourself".
+#
+# This is the difference between a runner that exists and one that is used --
+# and it matters more than convenience. The phone hands work to the desktop,
+# but the desktop has to be awake. A runner is the only machine in this system
+# that is never off.
+
+WORKFLOW_PATH = ".github/workflows/agent.yml"
+WORKFLOW_SOURCE = Path(__file__).resolve().parent.parent / "docs" / "agent-workflow.yml"
+SECRET_HELP = ("Add your model key as a repository secret named {var}: "
+               "https://github.com/{owner}/{repo}/settings/secrets/actions/new")
+
+
+def workflow_source() -> str:
+    """The workflow this app installs. Read from the shipped file rather than
+    duplicated as a string, so the copy people are told to install by hand and
+    the copy the button installs cannot drift apart."""
+    return WORKFLOW_SOURCE.read_text(encoding="utf-8")
+
+
+def workflow_status(token: str, owner: str, repo: str) -> dict:
+    """Whether this repo already has the agent workflow, and whether it is the
+    version we would install. An out-of-date one is worth saying: a workflow
+    installed before workflow_dispatch existed cannot be started from here, and
+    would otherwise look like a button that does nothing."""
+    from . import githubsync as gh
+    try:
+        text = gh.read_repo_file(token, owner, repo, WORKFLOW_PATH)
+    except gh.GitHubError as e:
+        return {"installed": False, "error": str(e)}
+    if text is None:
+        return {"installed": False}
+    return {"installed": True, "current": text == workflow_source(),
+            "dispatchable": "workflow_dispatch" in text}
+
+
+def install_workflow(token: str, owner: str, repo: str) -> dict:
+    """Write the workflow into the target repository."""
+    from . import githubsync as gh
+    body = workflow_source()
+    try:
+        gh.write_repo_file(token, owner, repo, WORKFLOW_PATH, body,
+                           "Add the Make No Mistakes agent workflow")
+    except gh.GitHubError as e:
+        return {"error": str(e)}
+    return {"ok": True, "path": WORKFLOW_PATH,
+            "next": SECRET_HELP.format(var="ZAI_API_KEY", owner=owner, repo=repo)}
+
+
+def dispatch(token: str, owner: str, repo: str, task: str,
+             ref: str = "") -> dict:
+    """Start a run. Returns as soon as GitHub accepts it -- the work happens on
+    the runner and lands as a draft pull request, which is the review gate."""
+    from . import githubsync as gh
+    task = (task or "").strip()
+    if not task:
+        return {"error": "give the agent something to do"}
+    try:
+        gh.dispatch_workflow(token, owner, repo, WORKFLOW_PATH.rsplit("/", 1)[-1],
+                             ref or "", {"task": task})
+    except gh.GitHubError as e:
+        return {"error": str(e)}
+    return {"ok": True,
+            "url": f"https://github.com/{owner}/{repo}/actions"}
+
+
 def main() -> int:
     task = parse_task(os.environ.get("MNM_TASK", ""))
     if not task:

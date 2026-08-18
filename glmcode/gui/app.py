@@ -2701,6 +2701,48 @@ class Api:
 
     VAPID_ACCOUNT = "webpush-vapid"
 
+    # ------------------------------------------------------------------ #
+    # The runner. Work that continues with every device off -- which the
+    # desktop pickup cannot promise, since the desktop has to be awake.
+
+    def ci_status(self):
+        """Whether this chat's repo can run the agent on a GitHub runner."""
+        from .. import ci
+        coords = self._active_repo_coords()
+        if not coords:
+            return {"ok": False, "reason": "This chat's folder has no GitHub remote."}
+        _host, owner, repo = coords
+        token = githubsync.load_token("github.com") or ""
+        if not token:
+            return {"ok": False, "reason": "Add a GitHub token in Settings first."}
+        out = ci.workflow_status(token, owner, repo)
+        out.update({"ok": True, "owner": owner, "repo": repo})
+        return out
+
+    def ci_install(self):
+        from .. import ci
+        coords = self._active_repo_coords()
+        if not coords:
+            return {"error": "This chat's folder has no GitHub remote."}
+        _host, owner, repo = coords
+        token = githubsync.load_token("github.com") or ""
+        if not token:
+            return {"error": "Add a GitHub token in Settings first."}
+        return ci.install_workflow(token, owner, repo)
+
+    def ci_dispatch(self, task: str):
+        """Hand a task to a runner. Returns as soon as GitHub accepts it: the
+        work lands as a draft pull request, which is the review gate."""
+        from .. import ci
+        coords = self._active_repo_coords()
+        if not coords:
+            return {"error": "This chat's folder has no GitHub remote."}
+        _host, owner, repo = coords
+        token = githubsync.load_token("github.com") or ""
+        if not token:
+            return {"error": "Add a GitHub token in Settings first."}
+        return ci.dispatch(token, owner, repo, task)
+
     def webpush_keys(self) -> dict:
         """This desktop's VAPID keypair, made once and kept.
 

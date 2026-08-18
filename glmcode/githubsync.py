@@ -20,6 +20,7 @@ Security model (this is the whole point of the module):
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -618,6 +619,48 @@ def pull_review_comments(token: str, owner: str, repo: str, number: int) -> list
                     "author": (c.get("user") or {}).get("login", ""),
                     "body": c.get("body", "")})
     return out
+
+
+def read_repo_file(token: str, owner: str, repo: str, path: str) -> str | None:
+    """A file's text, or None when it simply is not there.
+
+    Missing is not an error here -- "has this repo got the workflow yet" is the
+    question being asked, and a 404 IS the answer."""
+    try:
+        obj = _api("GET", f"/repos/{owner}/{repo}/contents/{path}", token)
+    except GitHubError as e:
+        if "Not found" in str(e):
+            return None
+        raise
+    content = (obj or {}).get("content") or ""
+    return base64.b64decode(content).decode("utf-8", errors="replace")
+
+
+def write_repo_file(token: str, owner: str, repo: str, path: str, text: str,
+                    message: str) -> str:
+    """Create or replace a file. The existing sha is looked up first, because
+    GitHub rejects a write over an existing path without it -- and re-reading
+    also means a file changed since is a loud failure, not a silent clobber."""
+    body = {"message": message,
+            "content": base64.b64encode(text.encode("utf-8")).decode("ascii")}
+    try:
+        current = _api("GET", f"/repos/{owner}/{repo}/contents/{path}", token)
+        if isinstance(current, dict) and current.get("sha"):
+            body["sha"] = current["sha"]
+    except GitHubError:
+        pass          # not there yet: a create, which needs no sha
+    out = _api("PUT", f"/repos/{owner}/{repo}/contents/{path}", token, body)
+    return ((out or {}).get("commit") or {}).get("sha", "")
+
+
+def dispatch_workflow(token: str, owner: str, repo: str, workflow: str,
+                      ref: str, inputs: dict) -> None:
+    """Start a workflow_dispatch run. GitHub answers 204 with no body."""
+    if not ref:
+        info = _api("GET", f"/repos/{owner}/{repo}", token)
+        ref = (info or {}).get("default_branch") or "main"
+    _api("POST", f"/repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches",
+         token, {"ref": ref, "inputs": inputs})
 
 
 def post_issue_comment(token: str, owner: str, repo: str, number: int, body: str) -> str:

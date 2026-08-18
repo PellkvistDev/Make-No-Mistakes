@@ -285,6 +285,37 @@ Two things worth keeping:
   that holds on only one of them is worth much less than it looks. Paraphrasing
   it on one side is a different instruction with nothing to say so.
 
+## The runner is the only machine that is never off
+
+`glmcode/ci.py` has been able to run the agent headless on a GitHub runner for
+a long time — a `/agent` comment, work on a branch, a draft pull request, a
+comment back with the link. All of it finished, and none of it reachable: the
+workflow was a file in `docs/` you were told to copy into another repository by
+hand, so the honest description of the feature was "you can do this yourself".
+
+That gap is worth more than convenience. The phone hands work to the desktop,
+and the desktop has to be awake; a runner does not.
+
+- **The workflow is read from `docs/agent-workflow.yml`, never duplicated as a
+  string.** The copy people install by hand and the copy the app installs would
+  otherwise drift into two different workflows.
+- **`workflow_dispatch` is gated by GitHub already** (it needs write access),
+  which is why the job's `if:` lets it through unconditionally. The
+  `issue_comment` path is NOT gated by GitHub and must keep checking
+  `author_association` for itself — a stranger opening an issue must not be
+  able to start a runner.
+- **`MNM_TASK` reads `inputs.task || github.event.comment.body`.** Two trigger
+  paths, one variable; a dispatch that left it empty would start a runner with
+  nothing to do and say so ten minutes later.
+- **The acknowledgement step is skipped on a dispatch run,** because reacting
+  to `context.payload.comment.id` with no comment fails the step.
+- **`workflow_status` reports "installed but out of date".** A workflow
+  installed before `workflow_dispatch` existed cannot be started from the app,
+  and saying nothing would make the button look broken.
+- **The app cannot set the Actions secret** and says so rather than appearing
+  to have finished — a feature that silently needs one more step is one that
+  looks broken the first time it is used.
+
 ## Web Push is the one thing a suspended phone can still do
 
 The desktop finishes turns the phone was suspended through, and for a long time
