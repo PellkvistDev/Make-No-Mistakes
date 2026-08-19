@@ -623,6 +623,52 @@ The note carries `WORKER_REPORT_PREFIX` so `sessions.to_display` keeps it out
 of the rendered chat: it arrives in the `user` role (the role this app injects
 plumbing under) and nothing else would distinguish it from something typed.
 
+## The reasons are in git, and the agent could not reach them
+
+This repository writes down *why*. Nearly every non-obvious decision carries the
+failure that produced it — in the comment above the code, and in the commit
+body, which for a squash-merged PR is the whole PR description. `CLAUDE.md`
+opens a section with "Do not re-litigate these. Each cost a round trip to a real
+phone."
+
+The agent read none of it. It reads **code**, which is the one artefact that
+cannot say what was tried and reverted: a line that came back looks identical to
+a line never touched. So it proposes the thing that was measured on a device and
+undone, and the only defence is that a human remembers.
+
+`why(path, line)` is the fix, and it is mostly a reading of `git log -L`.
+
+- **It answers even when git cannot.** The comment block is computed and
+  returned first; a file outside a repository, or one never committed, still
+  gets what the code says about itself, with a sentence explaining the absence.
+  A tool that returns nothing for an uncommitted file is useless exactly when
+  the agent has just written it.
+- **A blank line ends a comment run, and indentation gates the enclosing
+  block.** A comment separated from its code is usually about something else,
+  and the nearest `def` *above* a line is frequently the one that already ended
+  — a comment between two functions belongs to the one below. Handing back a
+  neighbour's docstring reads exactly like an answer, which is worse than
+  returning nothing, so both heuristics fail closed.
+- **The docstring is not at `def + 1`.** Signatures here wrap routinely, so the
+  scan walks to the end of the header (parens balanced, line ending in a colon)
+  before looking. In this codebase the reason sits in the docstring at least as
+  often as in a comment above it; looking only upwards finds half of it.
+- **`_git()` takes an argv list, not a shell string.** The other git helpers
+  interpolate into a shell command, which is fine for the paths they take.
+  `git log -L` takes a `start,end:path` argument with a colon in it and a path
+  that may hold spaces — quoting that for two different shells is a worse
+  problem than using neither.
+- **Trailers are stripped.** `Co-Authored-By` is plumbing, not a reason, and it
+  costs context on every call.
+- **The output ends by saying what it is.** Without the closing line it reads as
+  a changelog, and a changelog is something you skim rather than act on. A
+  commit that says an approach was tried and reverted is an instruction.
+
+The system prompt names the trigger, because a tool the model never thinks to
+call is not a feature: reach for it when a line looks *unnecessary* — a magic
+constant, a workaround, a retry, an ordering that looks arbitrary, a guard that
+looks redundant.
+
 ## The agent's browser and the user's browser are two different things
 
 `control_chrome` launches its own Chromium — a throwaway profile, or the
