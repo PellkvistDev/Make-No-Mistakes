@@ -20,7 +20,7 @@ from .events import AgentEvents
 from .permissions import PermissionEngine
 from . import providers
 from .prompts import (ATTEMPT_TASK, BROWSER_AGENT_SYSTEM, BROWSER_AGENT_TASK,
-                      BROWSER_RESUME_NOTE,
+                      BROWSER_ATTACHED_NOTE, BROWSER_RESUME_NOTE,
                       COMPACT_PROMPT, CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM,
                       FRESH_CRITIC_SYSTEM, GREEN_GIVEUP_NUDGE, GREEN_NUDGE,
                       REFINE_NUDGE, STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE,
@@ -2184,15 +2184,27 @@ class Agent:
         from .browser_session import BrowserSession
         sess = self.browser_session
         if sess is None or not sess.is_open:
-            headless = bool(getattr(self.cfg, "browser_headless", False))
-            # Opt-in persistent profile: a dedicated agent profile directory
-            # (NEVER the user's own browser) whose logins survive restarts.
-            user_data_dir = None
-            if getattr(self.cfg, "browser_keep_logins", False):
-                from .config import CONFIG_DIR
-                user_data_dir = str(CONFIG_DIR / "browser-profile")
-            sess = BrowserSession(headless=headless, status=self.events.info,
-                                  user_data_dir=user_data_dir)
+            connect_url = (getattr(self.cfg, "browser_connect_url", "") or "").strip()
+            if connect_url:
+                # Attaching to the user's own running browser. headless and the
+                # saved-profile directory are meaningless here -- the window,
+                # its profile and its visibility are theirs -- so they are not
+                # passed rather than passed and ignored.
+                sess = BrowserSession(status=self.events.info,
+                                      connect_url=connect_url)
+                self.events.info(
+                    f"Browser: attaching to your running browser at {connect_url} "
+                    "-- it acts as you, in your logged-in session.")
+            else:
+                headless = bool(getattr(self.cfg, "browser_headless", False))
+                # Opt-in persistent profile: a dedicated agent profile directory
+                # (NEVER the user's own browser) whose logins survive restarts.
+                user_data_dir = None
+                if getattr(self.cfg, "browser_keep_logins", False):
+                    from .config import CONFIG_DIR
+                    user_data_dir = str(CONFIG_DIR / "browser-profile")
+                sess = BrowserSession(headless=headless, status=self.events.info,
+                                      user_data_dir=user_data_dir)
             sess.start()  # raises here (surfaced to the model) if launch fails
             self.browser_session = sess
         return sess
@@ -2274,7 +2286,12 @@ class Agent:
         # Restrict the sub-agent to ONLY the browser action tools, and give it
         # the specialized browser system prompt in place of the coding one.
         sub.tool_schemas = list(BROWSER_AGENT_SCHEMAS)
-        sub.set_system_prompt(BROWSER_AGENT_SYSTEM.format(goal=goal))
+        system = BROWSER_AGENT_SYSTEM.format(goal=goal)
+        if getattr(session, "is_attached", False):
+            # Appended AFTER the format(), so the note is free to contain braces
+            # without becoming a format field.
+            system += BROWSER_ATTACHED_NOTE
+        sub.set_system_prompt(system)
         with self._active_subagents_lock:
             self._active_subagents[aid] = sub
         self._browser_agent_aid = aid

@@ -394,6 +394,11 @@ class Config:
     reduce_effects: bool = True      # desktop app: blur-free fast theme (default); glass is opt-in
     browser_headless: bool = False   # control_chrome: hide the browser window (default: watch it)
     browser_keep_logins: bool = False  # control_chrome: persistent agent profile (logins survive restarts)
+    # control_chrome: attach to a browser the USER is already running (CDP
+    # endpoint, e.g. http://localhost:9222). "" = launch our own, which is
+    # the default and the safe one -- attaching hands the agent their live
+    # logged-in session.
+    browser_connect_url: str = ""
     browser_provider: str = ""       # control_chrome: dedicated Browser Agent provider ("" = same as chat)
     browser_model: str = ""          # control_chrome: dedicated Browser Agent model ("" = same as chat)
     # How voice mode runs. "local" is the default and stays it: Whisper and

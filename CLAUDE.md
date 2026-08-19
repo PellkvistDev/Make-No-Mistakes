@@ -623,6 +623,53 @@ The note carries `WORKER_REPORT_PREFIX` so `sessions.to_display` keeps it out
 of the rendered chat: it arrives in the `user` role (the role this app injects
 plumbing under) and nothing else would distinguish it from something typed.
 
+## The agent's browser and the user's browser are two different things
+
+`control_chrome` launches its own Chromium — a throwaway profile, or the
+dedicated agent profile behind "Remember browser logins". Nothing it does can
+touch the browser the user is signed into, and **that stays the default**.
+
+`browser_connect_url` is the opt-in opposite: attach over CDP to a browser the
+user is already running and drive the window in front of them, as them. It is
+strictly more dangerous and exists because the user asked for the choice — so
+the job is to make it honest, not to make it safe.
+
+- **The port cannot be opened on a running browser.** There is no way to switch
+  DevTools on after the fact, so attaching always means quitting the browser and
+  reopening it with `--remote-debugging-port`. Current Chrome also refuses the
+  port when it would use the default profile directory, so `--user-data-dir` is
+  not optional — pointed at a copy of the profile is how logins come along.
+  `DEBUG_PORT_HINT` carries the per-platform command and is returned from the
+  failure path *and* the check, because "nothing is listening" and "here is what
+  makes something listen" are one conversation.
+- **Teardown disconnects and nothing else.** `context.close()` or
+  `browser.close()` reaches across the connection and shuts the user's own
+  windows. `_real_attach`'s teardown is `pw.stop()` alone, and
+  `tests/test_browser_attach.py` asserts it against the real function rather
+  than a fake of it — that is the test that catches someone tidying it up later.
+  A tab opened because the browser had none is left behind for the same reason.
+- **The tab is chosen by `document.visibilityState`, not by index.** Playwright
+  has no active-tab concept and `context.pages` is creation order, so `pages[0]`
+  is whatever they opened first. A foreground tab reports `visible` and every
+  background tab reports `hidden` — the page telling us itself. The search runs
+  across every context, since a second (or incognito) window is a separate one.
+- **The viewport is re-read from the real window.** Every snapshot header quotes
+  `self.viewport` and `browser_click_at` *refuses* coordinates outside it, so a
+  stale 1280×800 would both describe the page wrongly and then reject the right
+  click for being out of bounds. Launched sessions ask for their size and are
+  unaffected; only the attach path syncs.
+- **The endpoint must be localhost.** Not a security boundary — the debugging
+  port is unauthenticated, so anything that can reach it has already won — but a
+  typo that aimed this at another machine would point the agent at someone
+  else's signed-in browser. `_normalize_connect_url` refuses out loud and stores
+  nothing; a setting that silently ignored a bad value would look broken.
+- **`BROWSER_ATTACHED_NOTE` goes in the SYSTEM prompt.** Not the turn: it is
+  what the model *is* this time round and has to hold over every improvised
+  action, not just the first. A model that believes it is in a scratch profile
+  will click "Sign out" to get a clean login form, or empty a cart to start
+  over — reasonable in a sandbox, destructive in the window someone lives in.
+  It is appended *after* `.format()`, so it is free to contain braces.
+
 ## The shell tool is named after the platform, not after PowerShell
 
 `run_command` execs PowerShell on Windows and bash (falling back to `/bin/sh`)

@@ -88,6 +88,50 @@ def _normalize_path_rules(value) -> list:
     return out
 
 
+_LOCAL_HOSTS = ("localhost", "127.0.0.1", "::1")
+
+
+def _normalize_connect_url(value) -> tuple[str, str]:
+    """Clean a DevTools endpoint for "attach to the browser I already have open".
+
+    Returns (url, error). An empty url with no error means the feature is off,
+    which is the default and the safe state.
+
+    The host check is not a security boundary -- the debugging port is
+    unauthenticated, so anything that can already reach it has already won.
+    It is about what a typo can do. This setting points the agent at a browser
+    someone is signed into, and a stray hostname aiming it at a machine that is
+    not this one is a mistake worth refusing rather than obeying.
+    """
+    url = str(value or "").strip()
+    if not url:
+        return "", ""
+    if any(c.isspace() for c in url):
+        return "", f"{url!r} isn't an address — try http://localhost:9222"
+    if "://" not in url:
+        url = "http://" + url
+    from urllib.parse import urlparse
+    try:
+        u = urlparse(url)
+        host = (u.hostname or "").lower()
+        port = u.port
+    except ValueError:
+        return "", f"{str(value).strip()!r} isn't an address — try http://localhost:9222"
+    if u.scheme not in ("http", "https"):
+        return "", "The DevTools endpoint is an http:// address, e.g. http://localhost:9222"
+    if not host:
+        return "", "That address has no host — try http://localhost:9222"
+    if host not in _LOCAL_HOSTS:
+        return "", (f"'{host}' isn't this machine. The browser being attached to has "
+                    "to be the one open in front of you, so the endpoint must be "
+                    "localhost.")
+    if not port:
+        return "", ("Include the debugging port the browser was started with, "
+                    "e.g. http://localhost:9222")
+    netloc = f"[{host}]" if ":" in host else host
+    return f"{u.scheme}://{netloc}:{port}", ""
+
+
 def persist_env_var(name: str, value: str) -> bool:
     """Persist an env var to the user's environment (Windows `setx`). Best
     effort: the value is ALWAYS set for the current process first, so the app
@@ -739,6 +783,7 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
             "notifications": c.notifications, "reduce_effects": c.reduce_effects,
             "browser_headless": c.browser_headless,
             "browser_keep_logins": c.browser_keep_logins,
+            "browser_connect_url": c.browser_connect_url,
             "browser_provider": c.browser_provider, "browser_model": c.browser_model,
             "path_rules": [dict(r) for r in c.path_rules],
             "github_clone_root": c.github_clone_root,
@@ -762,6 +807,16 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
                      "reduce_effects", "browser_headless", "browser_keep_logins",
                      "verify_edits", "auto_fix_tests"):
             setattr(c, key, bool(value))
+        elif key == "browser_connect_url":
+            # Turning this on hands the agent the user's live logged-in
+            # browser, so the value is checked rather than stored as typed: a
+            # typo that silently did nothing would look like the feature being
+            # broken, and pointing it off this machine is not a thing to do by
+            # accident.
+            url, err = _normalize_connect_url(value)
+            if err:
+                return {"error": err}
+            c.browser_connect_url = url
         elif key in ("model", "vision_model") and isinstance(value, str) and value.strip():
             setattr(c, key, value.strip())
             if key == "model" and self._agent:
@@ -2423,6 +2478,39 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
         save_config(self._cfg)
         return {"ok": True, "browser_provider": self._cfg.browser_provider,
                 "browser_model": self._cfg.browser_model}
+
+    def browser_attach_check(self, url: str = ""):
+        """Is a browser actually listening on that DevTools endpoint?
+
+        Every browser with the port open answers /json/version with the
+        product string, so this turns "attach" from a setting you enable and
+        then find out about ten minutes later, mid-task, into one you can
+        confirm before you rely on it. The hint is returned either way,
+        because "nothing is listening" and "here is the command that makes
+        something listen" are the same conversation.
+        """
+        import json as _json
+        import urllib.error
+        import urllib.request
+        from ..browser_session import DEBUG_PORT_HINT
+
+        target, err = _normalize_connect_url(url or self._cfg.browser_connect_url)
+        if err:
+            return {"error": err, "hint": DEBUG_PORT_HINT}
+        if not target:
+            return {"error": "No endpoint set.", "hint": DEBUG_PORT_HINT}
+        try:
+            with urllib.request.urlopen(target + "/json/version", timeout=3) as r:
+                info = _json.loads(r.read().decode("utf-8", "replace"))
+        except urllib.error.URLError as e:
+            return {"ok": False, "url": target, "hint": DEBUG_PORT_HINT,
+                    "error": f"Nothing answered at {target} ({e.reason})."}
+        except Exception as e:
+            return {"ok": False, "url": target, "hint": DEBUG_PORT_HINT,
+                    "error": f"{target} answered, but not like a browser: {e}"}
+        return {"ok": True, "url": target,
+                "browser": str(info.get("Browser") or "a browser"),
+                "hint": DEBUG_PORT_HINT}
 
     def clear_browser_profile(self):
         """Delete the saved agent-browser profile (cookies, logins). The
