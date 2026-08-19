@@ -14,6 +14,20 @@ Perception is a numbered ACCESSIBILITY SNAPSHOT rather than pixels -- a
 text-only model can read `[12] button "Sign in"` and act on ref 12, which is
 far more reliable than guessing coordinates. A screenshot can still be taken
 and routed through the vision model when the visual layout itself matters.
+
+There are two ways to get a page, and they are not variations of one thing:
+
+  - LAUNCH (the default, unchanged): this app starts its own Chromium, in its
+    own throwaway or dedicated-agent profile. Nothing the agent does can touch
+    the browser the user is signed into.
+  - ATTACH (`connect_url`): the user is already running a browser with the
+    DevTools port open, and the agent drives the window they are looking at,
+    in their own session, with their own logins.
+
+Attaching is strictly more dangerous and is opt-in for that reason. Teardown is
+where the difference bites: an attached session must only DISCONNECT. Closing
+the context or the browser would close the user's own windows, which is the one
+thing this must never do.
 """
 
 from __future__ import annotations
@@ -115,7 +129,9 @@ class BrowserSession:
     def __init__(self, *, headless: bool = False, viewport=(1280, 800),
                  executable_path: str | None = None, status: StatusFn = None,
                  launch_factory: Callable | None = None,
-                 max_elements: int = 200, user_data_dir: str | None = None):
+                 max_elements: int = 200, user_data_dir: str | None = None,
+                 connect_url: str | None = None,
+                 attach_factory: Callable | None = None):
         """launch_factory(headless, executable_path, viewport, user_data_dir)
         -> (teardown, page) is called ON THE DRIVER THREAD to produce a
         Playwright page; the default uses real Playwright. Tests inject a fake
@@ -126,7 +142,18 @@ class BrowserSession:
         directory: cookies and logins survive across sessions and app
         restarts. It's a dedicated agent profile (never the user's own
         browser); the user logs into chosen sites once and the agent reuses
-        them. None (the default) keeps the fully throwaway profile."""
+        them. None (the default) keeps the fully throwaway profile.
+
+        connect_url, when set, changes the mode entirely: instead of launching
+        anything, attach to a browser the USER is already running, over the
+        DevTools protocol, and drive the tab they are looking at. headless and
+        user_data_dir have nothing to say in that case -- the window, its
+        profile and its visibility are theirs, not ours -- and are ignored.
+
+        attach_factory(connect_url, viewport) -> (teardown, page) is the
+        injectable seam for that path, separate from launch_factory because
+        connecting is not a kind of launching: it takes different inputs and,
+        crucially, its teardown must only disconnect."""
         self.headless = headless
         self.viewport = viewport
         self.executable_path = executable_path
@@ -134,6 +161,8 @@ class BrowserSession:
         self._launch_factory = launch_factory or _real_launch
         self.max_elements = max_elements
         self.user_data_dir = user_data_dir
+        self.connect_url = (connect_url or "").strip() or None
+        self._attach_factory = attach_factory or _real_attach
 
         self._cmd_q: "queue.Queue" = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -184,11 +213,21 @@ class BrowserSession:
 
     # -- driver thread ---------------------------------------------------- #
 
+    @property
+    def is_attached(self) -> bool:
+        """Driving a browser the user started, rather than one we launched."""
+        return self.connect_url is not None
+
     def _run(self) -> None:
         try:
-            self._teardown, self._page = self._launch_factory(
-                self.headless, self.executable_path, self.viewport,
-                self.user_data_dir)
+            if self.connect_url:
+                self._teardown, self._page = self._attach_factory(
+                    self.connect_url, self.viewport)
+                self._sync_viewport()
+            else:
+                self._teardown, self._page = self._launch_factory(
+                    self.headless, self.executable_path, self.viewport,
+                    self.user_data_dir)
         except Exception as e:  # launch failed -- report it to start()
             self._start_error = e
             self._ready.set()
@@ -545,6 +584,35 @@ class BrowserSession:
 
     # -- driver-thread helpers -------------------------------------------- #
 
+    def _sync_viewport(self) -> None:
+        """Adopt the real window's size, for an attached browser only.
+
+        Every snapshot header quotes self.viewport, and browser_click_at
+        REJECTS coordinates outside it. A window we launched is whatever size
+        we asked for, so those agree by construction -- but a window the user
+        already had open is whatever size they left it, and a stale 1280x800
+        would tell the model the wrong thing and then refuse the right click
+        for being "outside the viewport". Best-effort: a page that will not
+        answer keeps the default rather than failing the attach.
+        """
+        size = None
+        try:
+            size = self._page.viewport_size
+        except Exception:
+            size = None
+        if not size:
+            try:
+                size = self._page.evaluate(
+                    "() => ({width: window.innerWidth, height: window.innerHeight})")
+            except Exception:
+                return
+        try:
+            w, h = int(size["width"]), int(size["height"])
+        except (TypeError, KeyError, ValueError):
+            return
+        if w > 0 and h > 0:
+            self.viewport = (w, h)
+
     def _settle(self) -> None:
         try:
             self._page.wait_for_timeout(600)
@@ -622,5 +690,93 @@ def _real_launch(headless: bool, executable_path: str | None, viewport,
                 browser.close()
             finally:
                 pw.stop()
+
+    return teardown, page
+
+
+# --------------------------------------------------------------------- #
+# Attaching to a browser the user is already running.
+
+DEBUG_PORT_HINT = (
+    "A browser can only be attached to if it was STARTED with the DevTools "
+    "port open -- there is no way to switch it on afterwards, so an already-"
+    "running Chrome has to be quit and reopened. Current Chrome also refuses "
+    "the port when it would use the default profile directory, so "
+    "--user-data-dir is not optional; point it at a copy of your profile to "
+    "keep your logins.\n"
+    "  macOS:   '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' "
+    "--remote-debugging-port=9222 --user-data-dir=\"$HOME/chrome-agent\"\n"
+    "  Windows: & \"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\" "
+    "--remote-debugging-port=9222 --user-data-dir=\"$env:USERPROFILE\\chrome-agent\"\n"
+    "  Linux:   google-chrome --remote-debugging-port=9222 "
+    "--user-data-dir=\"$HOME/chrome-agent\""
+)
+
+
+def _attached_page(browser):
+    """The tab the user is actually looking at.
+
+    Playwright has no notion of an active tab: `context.pages` is creation
+    order, so driving pages[0] means driving whatever they opened first, which
+    is rarely the window in front of them. The page itself knows, though --
+    a foreground tab reports document.visibilityState 'visible' and every
+    background tab reports 'hidden'. That is a real signal rather than a guess,
+    so it is what decides.
+
+    Falling back: the most recently opened page, then a new tab. A new tab is
+    the last resort and is deliberately left behind at teardown -- closing tabs
+    in someone's own browser is exactly the surprise this feature must avoid.
+    """
+    pages = []
+    for ctx in browser.contexts:
+        for pg in ctx.pages:
+            try:
+                if pg.is_closed():
+                    continue
+            except Exception:
+                pass
+            pages.append(pg)
+    for pg in pages:
+        try:
+            if pg.evaluate("() => document.visibilityState") == "visible":
+                return pg
+        except Exception:
+            continue
+    if pages:
+        return pages[-1]
+    ctx = browser.contexts[0] if browser.contexts else browser.new_context()
+    return ctx.new_page()
+
+
+def _real_attach(connect_url: str, viewport):
+    """Default driver-thread attacher: connect to a running browser over CDP
+    and hand back the tab the user is looking at.
+
+    Teardown stops the Playwright driver and NOTHING else. `context.close()`
+    or `browser.close()` would reach across the connection and shut the user's
+    own windows; dropping the driver closes the socket and leaves their browser
+    exactly as it was.
+    """
+    from .browser import _install_packages, packages_installed
+    if not packages_installed():
+        _install_packages()
+    from playwright.sync_api import sync_playwright
+    pw = sync_playwright().start()
+    try:
+        browser = pw.chromium.connect_over_cdp(connect_url, timeout=10_000)
+    except Exception as e:
+        pw.stop()
+        raise BrowserError(
+            f"Couldn't attach to a browser at {connect_url}: "
+            f"{str(e).splitlines()[0]}\n\n{DEBUG_PORT_HINT}")
+    try:
+        page = _attached_page(browser)
+    except Exception as e:
+        pw.stop()
+        raise BrowserError(
+            f"Attached to {connect_url} but found no page to drive: {e}")
+
+    def teardown():
+        pw.stop()
 
     return teardown, page

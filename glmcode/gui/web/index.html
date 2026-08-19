@@ -507,6 +507,25 @@
       <div class="row"><div class="row-text"><label>Saved browser data</label>
         <span class="row-sub">Wipe the remembered profile — logs the agent browser out of everything.</span></div>
         <button id="browser-clear-data" class="btn btn-danger-ghost">Clear</button></div>
+
+      <h3 style="margin-top:22px">Use my own browser instead</h3>
+      <p class="row-sub">Everything above is about a browser this app launches for the agent,
+        separate from yours. You can instead point it at a browser <em>you</em> are already
+        running, so it works in your windows with you already signed in.
+        <strong>It then acts as you</strong> — every site you are logged into is reachable, and
+        anything it does there is real. Leave this empty (the default) to keep the separate
+        browser above.</p>
+      <div class="row"><div class="row-text"><label for="opt-browser-connect">DevTools endpoint</label>
+        <span class="row-sub">A browser can only be attached to if it was <em>started</em> with the
+          port open — it cannot be switched on afterwards, so quit your browser and reopen it
+          with <code>--remote-debugging-port=9222 --user-data-dir=…</code>. Current Chrome
+          refuses the port on the default profile, so <code>--user-data-dir</code> is required;
+          point it at a copy of your profile to keep your logins. Then check it below.</span></div>
+        <input id="opt-browser-connect" class="text-input" placeholder="http://localhost:9222"
+               spellcheck="false" autocapitalize="off"></div>
+      <div class="row"><div class="row-text"><label>Is it listening?</label>
+        <span id="browser-attach-status" class="row-sub">Not checked yet.</span></div>
+        <button id="browser-attach-check" class="btn">Check</button></div>
     </section>
 
     <section data-tab="models">

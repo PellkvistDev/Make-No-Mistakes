@@ -1393,6 +1393,12 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 .text-input:focus { border-color: rgba(10, 132, 255, 0.6); }
 .text-input::placeholder { color: var(--text-faint); }
 
+/* Attaching to the user's own browser is the one browser setting that changes
+   what the agent can reach, so the field says so at a glance rather than
+   looking like every other empty box. */
+.text-input.attached-on { border-color: rgba(245, 166, 35, 0.55); }
+.attach-bad { color: var(--warn); }
+
 .sheet-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 14px; }
 
 /* Phone-app QR sheet. It's opened FROM the settings sheet, so it has to sit

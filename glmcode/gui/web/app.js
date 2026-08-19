@@ -3621,6 +3621,11 @@ function syncSettingsUI() {
   $("opt-reduce-fx").setAttribute("aria-checked", !!settings.reduce_effects);
   $("opt-browser-headless").setAttribute("aria-checked", !!settings.browser_headless);
   $("opt-browser-logins").setAttribute("aria-checked", !!settings.browser_keep_logins);
+  // Not while it's being typed into -- rewriting the field under the cursor
+  // is how a half-typed endpoint turns into a saved wrong one.
+  if (document.activeElement !== $("opt-browser-connect"))
+    $("opt-browser-connect").value = settings.browser_connect_url || "";
+  $("opt-browser-connect").classList.toggle("attached-on", !!settings.browser_connect_url);
   $("gh-auto-pull").setAttribute("aria-checked", settings.github_auto_pull !== false);
   $("gh-auto-push").setAttribute("aria-checked", settings.github_auto_push !== false);
   if (document.activeElement !== $("gh-clone-root"))
@@ -4389,6 +4394,46 @@ $("gh-foot-pull").addEventListener("click", async () => {
 });
 $("gh-foot-sync").addEventListener("click", async () => {
   if (await ghAction($("gh-foot-sync"), () => api().github_sync())) refreshGithubRepo();
+});
+
+// -- attach to the user's own browser ---------------------------------- //
+// Saved on blur/Enter rather than per keystroke: every intermediate value of
+// "http://localhost:9222" is either invalid or, worse, a valid endpoint that
+// is not the one being typed.
+async function saveBrowserConnect() {
+  const el = $("opt-browser-connect");
+  const raw = el.value.trim();
+  if (raw === (settings.browser_connect_url || "")) return;
+  const res = await api().set_setting("browser_connect_url", raw);
+  if (res && res.error) {
+    toast(res.error, "error", 6000);
+    el.value = settings.browser_connect_url || "";
+    return;
+  }
+  settings = res;
+  el.value = settings.browser_connect_url || "";
+  el.classList.toggle("attached-on", !!settings.browser_connect_url);
+  $("browser-attach-status").textContent = settings.browser_connect_url
+    ? "Saved. Check that a browser is actually listening before you rely on it."
+    : "Off — the agent uses its own browser.";
+}
+$("opt-browser-connect").addEventListener("change", saveBrowserConnect);
+$("opt-browser-connect").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); $("opt-browser-connect").blur(); }
+});
+
+$("browser-attach-check").addEventListener("click", async () => {
+  const el = $("browser-attach-status");
+  el.textContent = "Checking…";
+  const res = await api().browser_attach_check($("opt-browser-connect").value.trim());
+  if (res && res.ok) {
+    el.textContent = "Connected — " + res.browser + " is listening at " + res.url + ".";
+    el.classList.remove("attach-bad");
+  } else {
+    el.textContent = (res && res.error) || "Couldn't check that endpoint.";
+    el.classList.add("attach-bad");
+    if (res && res.hint) console.log(res.hint);
+  }
 });
 
 $("browser-clear-data").addEventListener("click", async () => {
