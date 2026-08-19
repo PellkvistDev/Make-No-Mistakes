@@ -9,6 +9,9 @@ subject with its own vocabulary rather than a convenient length:
   - VoiceApi   -- speech-to-text, text-to-speech and the spoken conversation:
                   the delegator agent, its own event sink, and the queues that
                   carry work done by voice back to the coding agent.
+  - GitHubApi  -- cloning, connecting, the token, push and pull, and reviewing
+                  a pull request: everything that speaks `githubsync` about the
+                  chat's own repository.
 
 What these tests protect is the property that makes the split safe to repeat:
 the bridge JavaScript calls must be unchanged. pywebview exposes the Api
@@ -27,6 +30,7 @@ sys.modules.setdefault("webview", types.SimpleNamespace(
 
 from glmcode.gui import app as gui_app  # noqa: E402
 from glmcode.gui import devices_api  # noqa: E402
+from glmcode.gui import github_api  # noqa: E402
 from glmcode.gui import voice_api  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -41,6 +45,9 @@ DEVICE_BRIDGE = [
     "sync_forget_passphrase", "sync_list_chats", "sync_finish_interrupted",
     "sync_pull_chat", "sync_push_chat", "sync_catch_up", "sync_delete_chat",
     "webpush_public_key", "ci_status", "ci_install", "ci_dispatch",
+    # Setting the phone up IS reaching the other machine. These two were left
+    # in app.py by the first split and belong here.
+    "get_phone_app", "get_pair_phone",
 ]
 VOICE_BRIDGE = [
     "voice_mode", "voice_ack", "send_voice", "cancel_voice",
@@ -49,8 +56,16 @@ VOICE_BRIDGE = [
     "tts_status", "tts_voices", "preview_voice", "stt_status",
     "transcribe_audio",
 ]
-MIXINS = [(devices_api.DeviceApi, DEVICE_BRIDGE), (voice_api.VoiceApi, VOICE_BRIDGE)]
-BRIDGE = DEVICE_BRIDGE + VOICE_BRIDGE
+GITHUB_BRIDGE = [
+    "github_env", "github_set_token", "github_forget_token", "github_list_repos",
+    "github_status", "github_clone", "github_create_and_open", "github_connect",
+    "github_create_and_connect", "github_pull", "github_sync", "github_disconnect",
+    "github_open_pulls", "github_review_pr", "github_address_pr",
+    "github_setup_phone_access",
+]
+MIXINS = [(devices_api.DeviceApi, DEVICE_BRIDGE), (voice_api.VoiceApi, VOICE_BRIDGE),
+          (github_api.GitHubApi, GITHUB_BRIDGE)]
+BRIDGE = DEVICE_BRIDGE + VOICE_BRIDGE + GITHUB_BRIDGE
 
 
 def test_every_moved_method_is_still_callable_on_api():
@@ -93,18 +108,21 @@ def test_the_private_helpers_moved_with_the_methods_that_use_them():
                  "_append_voice_messages", "_drain_voice_turns", "_last_convo_reply",
                  "_queue_worker_report", "_drain_worker_reports"):
         assert name in vars(voice_api.VoiceApi), f"{name} did not move"
+    for name in ("_clone_root", "_gh_token", "_active_repo_coords",
+                 "_format_pr_comments"):
+        assert name in vars(github_api.GitHubApi), f"{name} did not move"
 
 
 def test_app_py_actually_got_smaller():
     """Otherwise this was a rename with extra steps. 190 before the first seam,
-    171 after DeviceApi, 143 after VoiceApi (this count includes properties,
-    which the method tally in the notes does not)."""
+    171 after DeviceApi, 143 after VoiceApi, 121 after GitHubApi (this count
+    includes properties, which the method tally in the notes does not)."""
     tree = ast.parse(APP.read_text(encoding="utf-8"))
     api = next(n for n in ast.walk(tree)
                if isinstance(n, ast.ClassDef) and n.name == "Api")
     methods = [n for n in api.body
                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-    assert len(methods) < 150, (
+    assert len(methods) < 130, (
         f"Api still defines {len(methods)} methods; the split did not take")
 
 
@@ -114,7 +132,7 @@ def test_nothing_on_a_mixin_reaches_for_a_global():
     would work today and break the next time a seam is cut -- and a lazy
     `from .app import X` inside a function is the same leak wearing a hat,
     since it only exists to dodge the import cycle the seam is meant to end."""
-    for name in ("devices_api.py", "voice_api.py"):
+    for name in ("devices_api.py", "voice_api.py", "github_api.py"):
         src = (GUI / name).read_text(encoding="utf-8")
         for forbidden in ("_chats[", "from .app import", "import app"):
             assert forbidden not in src.replace("self._chats[", ""), f"{name}: {forbidden}"
@@ -140,8 +158,20 @@ def test_the_leaves_stay_leaves():
     """speech.py and media.py exist so that events.py and voice_api.py can each
     have what they need without importing the other. An import back up the
     stack would recreate exactly the cycle they were carved out to break."""
-    for name in ("speech.py", "media.py"):
+    for name in ("speech.py", "media.py", "paths.py"):
         src = (GUI / name).read_text(encoding="utf-8")
         for forbidden in ("from .app", "from .events", "from .voice_api",
-                          "from .devices_api"):
+                          "from .devices_api", "from .github_api"):
             assert forbidden not in src, f"{name} imports {forbidden}"
+
+
+def test_the_mixins_may_lean_on_each_other_through_self():
+    """Not every GitHub call belongs to the GitHub seam. Chat sync, pairing and
+    the CI runner also speak to GitHub, but their subject is reaching a machine
+    that is not this one -- GitHub is the transport, not the point. So they
+    stay in DeviceApi and reach `self._gh_token()`, which resolves through the
+    MRO. That is a mixin working as intended, not a leak."""
+    assert "_gh_token" in vars(github_api.GitHubApi)
+    assert "_gh_token" not in vars(devices_api.DeviceApi)
+    devices = (GUI / "devices_api.py").read_text(encoding="utf-8")
+    assert "self._gh_token()" in devices
