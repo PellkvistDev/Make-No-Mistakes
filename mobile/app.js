@@ -680,13 +680,18 @@
     session.toldCompact = false;
     session.pending = [];    // work parked for the desktop, per conversation
     session.carry = {};      // nothing to carry: this chat starts here
+    session.baseRef = null;  // resolved per chat, by markBaseRef
     session.readOnly = false;
     applyReadOnlyChrome(false);
     session.transcript = [];
     const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); haptic(18); };
+    // Passed as a getter rather than a value: it is resolved in the background
+    // (markBaseRef) and a chat is usable before it lands. Reading it at call
+    // time is what makes review_changes work on the first turn.
+    const baseRef = () => session.baseRef;
     // Sub-agent tools have NO spawn (depth 1); the main tools add spawn_agent.
-    session.subTools = AC.makeTools(session.gh, { confirmWrite, onCommit, viewImage, needsDesktop });
-    session.tools = AC.makeTools(session.gh, { confirmWrite, onCommit, spawn: runSubAgent, viewImage, needsDesktop });
+    session.subTools = AC.makeTools(session.gh, { confirmWrite, onCommit, viewImage, needsDesktop, baseRef });
+    session.tools = AC.makeTools(session.gh, { confirmWrite, onCommit, spawn: runSubAgent, viewImage, needsDesktop, baseRef });
     session.readTools = {};
     for (const n of READ_TOOL_NAMES) session.readTools[n] = session.tools[n];
     session.readTools.view_image = session.tools.view_image;   // let planning look at images too
@@ -710,6 +715,19 @@
   });
   $("btn-chat-lock").addEventListener("click", lock);
 
+  // Where this chat started, so review_changes has something to diff against.
+  // Fired and not awaited: it is one API call, and holding up a new chat for a
+  // tool that may never be used is the wrong trade. The chat id is checked on
+  // the way back because the user can open a different chat in the meantime,
+  // and a starting point from the wrong conversation is worse than none.
+  function markBaseRef() {
+    const gh = session.gh, chat = session.chatId;
+    if (!gh) return;
+    gh.branchSha().then((sha) => {
+      if (sha && session.chatId === chat && !session.baseRef) session.baseRef = sha;
+    }).catch(() => {});
+  }
+
   // Start a brand-new chat in the connected repo.
   function startNewChat() {
     session.chatId = newChatId();
@@ -721,6 +739,8 @@
     session.toldCompact = false;
     session.pending = [];
     session.carry = {};      // a fresh chat owns all of its own fields
+    session.baseRef = null;
+    markBaseRef();
     session.readOnly = false;
     applyReadOnlyChrome(false);
     clearAttachments();
@@ -823,6 +843,7 @@
         // absent field means "nothing to say" -- omitting it once the turn had
         // finished would leave the last True standing.
         interrupted: !!session.interrupted,
+        base_ref: session.baseRef || carry.base_ref || "",
         messages: stripImages(session.messages || []),
         transcript: session.transcript || [],
       }));
@@ -1074,6 +1095,12 @@
     // Everything this chat arrived with; syncSave overlays the parts the phone
     // owns. See openReadOnlyChat for why this is not an enumerated list.
     session.carry = Object.assign({}, data);
+    // A chat resumed on this phone keeps the starting point it was given, so
+    // the diff still spans work the desktop did. Only a chat that never had
+    // one starts recording here -- and then it says "from now on" rather than
+    // claiming a base it does not have.
+    session.baseRef = data.base_ref || null;
+    if (!session.baseRef) markBaseRef();
     session.readOnly = false;
     applyReadOnlyChrome(false);
     session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
@@ -1802,6 +1829,7 @@
         session.turnCommits = (session.turnCommits || 0) + 1;
       },
       viewImage, needsDesktop,
+      baseRef: () => session.baseRef,
       beforeWrite: async (path) => {
         // Snapshot once, for revert_worker. null means "did not exist".
         if (Object.prototype.hasOwnProperty.call(w.before, path)) return;
