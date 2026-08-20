@@ -509,24 +509,53 @@
         <button id="browser-clear-data" class="btn btn-danger-ghost">Clear</button></div>
 
       <h3 style="margin-top:22px">Use my own browser instead</h3>
-      <p class="row-sub">Everything above is about a browser this app launches for the agent,
-        separate from yours. You can instead point it at a browser <em>you</em> are already
-        running, so it works in your windows with you already signed in.
-        <strong>It then acts as you</strong> — every site you are logged into is reachable, and
-        anything it does there is real. Leave this empty (the default) to keep the separate
-        browser above.</p>
-      <div class="row"><div class="row-text"><label for="opt-browser-connect">DevTools endpoint</label>
-        <span class="row-sub">A browser can only be attached to if it was <em>started</em> with the
-          port open — it cannot be switched on afterwards, so quit your browser and reopen it
-          with <code>--remote-debugging-port=9222 --user-data-dir=…</code>. Current Chrome
-          refuses the port on the default profile, so <code>--user-data-dir</code> is required;
-          point it at a copy of your profile to keep your logins. Then check it below.</span></div>
+      <p class="row-sub">Everything above is a browser this app launches for the agent, separate
+        from yours. Turn this on instead and it works in the tab you are looking at, in your own
+        browser, with you already signed in — nothing to relaunch.
+        <strong>It then acts as you</strong>: every site you are logged into is reachable, and
+        anything it does there is real.</p>
+      <div class="row"><div class="row-text"><label for="opt-browser-mine">Use my own browser</label>
+        <span class="row-sub">Needs the extension below. While it is on, the agent drives your
+          active tab; the extension&rsquo;s toolbar button pauses it at any time.</span></div>
+        <button id="opt-browser-mine" class="switch" role="switch" aria-checked="false"><span></span></button></div>
+      <div class="row" id="browser-ext-row"><div class="row-text"><label>Extension</label>
+        <span id="browser-ext-status" class="row-sub">Checking…</span></div>
+        <button id="browser-ext-install" class="btn">Install it</button></div>
+
+      <details class="row-sub" style="margin-top:14px">
+        <summary style="cursor:pointer">Advanced: attach over a DevTools port instead</summary>
+        <p class="row-sub">The old way, kept because it gives real browser-level input events.
+          It cannot reach a browser that is already running — the port only opens at launch —
+          so it means quitting your browser and reopening it with
+          <code>--remote-debugging-port=9222 --user-data-dir=…</code>. The extension above needs
+          none of that. Leave empty unless you specifically want this.</p>
         <input id="opt-browser-connect" class="text-input" placeholder="http://localhost:9222"
-               spellcheck="false" autocapitalize="off"></div>
-      <div class="row"><div class="row-text"><label>Is it listening?</label>
-        <span id="browser-attach-status" class="row-sub">Not checked yet.</span></div>
-        <button id="browser-attach-check" class="btn">Check</button></div>
+               spellcheck="false" autocapitalize="off">
+        <div class="row" style="border:0;padding-left:0"><div class="row-text">
+          <span id="browser-attach-status" class="row-sub">Not checked yet.</span></div>
+          <button id="browser-attach-check" class="btn">Check</button></div>
+      </details>
     </section>
+
+    <div id="browser-ext-sheet" class="backdrop" hidden>
+      <div class="sheet">
+        <h3>Install the browser extension</h3>
+        <p class="row-sub">One time, about thirty seconds. It is a folder on your machine — nothing
+          is uploaded, and it only ever talks to this app on <code>127.0.0.1</code>.</p>
+        <ol class="ext-steps">
+          <li>Open <code id="ext-store-url">chrome://extensions</code> in the browser you want the
+            agent to drive. <button id="ext-copy-url" class="btn btn-small">Copy</button></li>
+          <li>Turn on <b>Developer mode</b> (top right).</li>
+          <li>Click <b>Load unpacked</b> and choose this folder:
+            <code id="ext-path" class="ext-path">…</code>
+            <button id="ext-copy-path" class="btn btn-small">Copy path</button>
+            <button id="ext-open-folder" class="btn btn-small">Open folder</button></li>
+          <li>That is it — this panel says <b>Connected</b> as soon as it is loaded.</li>
+        </ol>
+        <p id="ext-live-status" class="row-sub">Waiting for the extension…</p>
+        <div class="sheet-actions"><button id="ext-sheet-close" class="btn">Done</button></div>
+      </div>
+    </div>
 
     <section data-tab="models">
       <h3>Permissions</h3>

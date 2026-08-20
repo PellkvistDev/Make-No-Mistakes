@@ -1813,6 +1813,258 @@ def git_log(path: str = ".", max_count: int = 5) -> str:
         return f"git log failed: {e}"
 
 
+# --------------------------------------------------------------------- #
+# why(): the reasons, not just the code.
+#
+# This repository writes down WHY. Nearly every non-obvious decision carries
+# the failure that produced it -- in the comment above the code, and in the
+# commit body, which for a squash-merged PR is the whole PR description. That
+# is the most expensive knowledge here: CLAUDE.md opens a section with "Do not
+# re-litigate these. Each cost a round trip to a real phone."
+#
+# The agent could reach none of it. It reads the code, which is the one
+# artefact that cannot say what was tried and reverted -- a line that came back
+# looks exactly like a line that was never touched. So it proposes the thing
+# that was measured on a device and undone, and the only defence is that a
+# human remembers.
+#
+# Git has stored the answer all along. `git log -L a,b:file` is the per-line
+# history, and pointing the agent at it as a retrieval source is the whole
+# idea.
+
+_COMMENT_STARTS = ("#", "//", "/*", "*", "*/", "--", ";", "<!--")
+_DEF_PATTERN = re.compile(
+    r"^\s*(?:async\s+)?(?:def|class|function|fn|func|type|interface|struct|impl)\b"
+    r"|^\s*(?:export\s+)?(?:const|let|var)\s+\w+\s*=\s*(?:async\s*)?(?:\(|function)"
+    r"|^\s*\w+\s*[:=]\s*(?:async\s*)?\([^)]*\)\s*=>"
+)
+_TRAILER = re.compile(
+    r"^(Co-Authored-By|Co-authored-by|Signed-off-by|Claude-Session|"
+    r"Generated with|https://claude\.ai)", re.I)
+
+
+_NO_HISTORY = ("(Not inside a git repository, so there is no history to read "
+               "here -- what the code says about itself is all there is.)")
+_NEVER_COMMITTED = ("No commit has touched this yet -- it is uncommitted, or git "
+                    "could not follow the file through a rename.")
+_UNTRACKED = re.compile(r"no path .* in the commit|no such path", re.I)
+
+
+def _git(args: list[str], cwd, timeout: int = 20) -> tuple[int, str]:
+    """Run one git command with an argv LIST rather than a shell string.
+
+    The other git helpers here interpolate into a shell command, which is fine
+    for the paths they take. `git log -L` takes a `start,end:path` argument
+    with a colon in it, and a path that may hold spaces or quotes; quoting that
+    correctly for two different shells is a worse problem than using neither.
+    """
+    try:
+        r = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True,
+                           timeout=timeout, encoding="utf-8", errors="replace",
+                           **NO_WINDOW_KWARGS)
+    except FileNotFoundError:
+        return 127, "git is not installed"
+    except subprocess.TimeoutExpired:
+        return 124, f"git {args[0]} took longer than {timeout}s"
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def _comment_run_above(lines: list[str], idx: int, limit: int = 40) -> str:
+    """The unbroken block of comment lines ending just above `idx` (0-based).
+
+    A blank line stops it as firmly as code does. A comment separated from the
+    thing it describes is usually about something else, and dragging it in
+    would attribute the wrong reason to the wrong code -- which is worse than
+    returning nothing, because it reads exactly like an answer.
+    """
+    out = []
+    i = idx - 1
+    while i >= 0 and len(out) < limit:
+        stripped = lines[i].strip()
+        if not stripped or not stripped.startswith(_COMMENT_STARTS):
+            break
+        out.append(lines[i].rstrip())
+        i -= 1
+    return "\n".join(reversed(out))
+
+
+def _docstring_below(lines: list[str], idx: int, limit: int = 40) -> str:
+    """A docstring opening on the line after `idx` (0-based), if there is one.
+
+    In this codebase the reason sits in the docstring under a `def` at least as
+    often as in a comment above it, so looking only upwards finds half of it.
+    """
+    # A signature can span lines, and in this codebase they routinely do, so
+    # the docstring is not reliably at idx+1. Walk to the end of the header
+    # (parens balanced, line ending in a colon) and look at what follows it.
+    depth, head = 0, -1
+    for j in range(idx, min(idx + 12, len(lines))):
+        depth += lines[j].count("(") - lines[j].count(")")
+        if depth <= 0 and lines[j].rstrip().endswith(":"):
+            head = j
+            break
+    if head < 0 or head + 1 >= len(lines):
+        return ""
+    first = lines[head + 1].strip()
+    for quote in ('"""', "'''"):
+        if first.startswith(quote):
+            break
+    else:
+        return ""
+    body = [lines[head + 1].rstrip()]
+    if first.count(quote) >= 2 and len(first) > len(quote):
+        return body[0]
+    for j in range(head + 2, min(head + 2 + limit, len(lines))):
+        body.append(lines[j].rstrip())
+        if quote in lines[j]:
+            break
+    return "\n".join(body)
+
+
+def _indent(s: str) -> int:
+    return len(s) - len(s.lstrip())
+
+
+def _enclosing_def(lines: list[str], idx: int) -> int:
+    """Index of the definition the line at `idx` is INSIDE, or -1.
+
+    The nearest def above is not good enough. A comment sitting between two
+    functions belongs to the one below it, and the nearest def above is the one
+    that already ended -- so a naive scan hands back a neighbour's docstring as
+    the explanation for this code. That reads exactly like an answer, which
+    makes it worse than returning nothing.
+
+    Indentation is the check: the target has to be nested deeper than the
+    header that supposedly contains it. Cheap, no parser, and it fails closed.
+    """
+    want = _indent(lines[idx]) if idx < len(lines) else 0
+    for i in range(min(idx, len(lines) - 1), -1, -1):
+        if _DEF_PATTERN.search(lines[i]) and _indent(lines[i]) < want:
+            return i
+    return -1
+
+
+def _format_commits(raw: str, max_body_lines: int) -> list[str]:
+    """Turn the record-separated log into readable entries, newest first."""
+    out = []
+    for chunk in raw.split("\x1e"):
+        chunk = chunk.strip("\n")
+        if not chunk:
+            continue
+        parts = chunk.split("\x00")
+        if len(parts) < 4:
+            continue
+        sha, date, subject, body = (parts[0].strip(), parts[1].strip(),
+                                    parts[2].strip(), parts[3])
+        entry = [f"  {sha}  {date}  {subject}"]
+        body_lines = [ln.rstrip() for ln in body.strip().splitlines()
+                      if not _TRAILER.match(ln.strip())]
+        while body_lines and not body_lines[-1]:
+            body_lines.pop()
+        if len(body_lines) > max_body_lines:
+            dropped = len(body_lines) - max_body_lines
+            body_lines = body_lines[:max_body_lines] + [
+                f"... (+{dropped} more lines -- git show {sha} for all of it)"]
+        entry += ["      " + ln if ln else "" for ln in body_lines]
+        out.append("\n".join(entry))
+    return out
+
+
+def why(path: str, line: int = 0, end_line: int = 0, max_commits: int = 5,
+        max_body_lines: int = 30) -> str:
+    """Why this code is the way it is: the comment that explains it, and the
+    commits that put it there, with their reasoning."""
+    p = _resolve(path)
+    if not p.exists():
+        raise ToolErrorBase(f"No such file: {p}", ErrorSeverity.ERROR)
+    if p.is_dir():
+        raise ToolErrorBase(f"why() takes a file, not a directory: {p}",
+                            ErrorSeverity.ERROR)
+
+    in_git, root = _git(["rev-parse", "--show-toplevel"], p.parent, timeout=10)
+    in_git = in_git == 0
+    root = root.strip().splitlines()[0] if in_git else str(p.parent)
+    try:
+        rel = p.relative_to(Path(root).resolve()).as_posix()
+    except ValueError:
+        rel = p.name
+
+    try:
+        lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as e:
+        raise ToolErrorBase(f"Could not read {p}: {e}", ErrorSeverity.ERROR)
+
+    try:
+        line, end_line = max(0, int(line or 0)), max(0, int(end_line or 0))
+    except (TypeError, ValueError):
+        raise ToolErrorBase("why(): line and end_line must be numbers.",
+                            ErrorSeverity.ERROR)
+    n = max(1, min(int(max_commits or 5), 20))
+    fmt = "--format=%x1e%h%x00%ad%x00%s%x00%b"
+    out: list[str] = []
+
+    if line:
+        if line > len(lines):
+            return (f"{rel} has {len(lines)} lines, so there is no line {line}. "
+                    "Read the file and ask about a line that exists.")
+        start = line
+        end = min(max(end_line or line, line), len(lines))
+        out.append(f"{rel}:{start}" + (f"-{end}" if end != start else ""))
+        out.append(f"    {start} | {lines[start - 1].rstrip()[:160]}")
+
+        said: list[str] = []
+        direct = _comment_run_above(lines, start - 1)
+        if direct:
+            said.append(direct)
+        d = _enclosing_def(lines, start - 1)
+        if d >= 0 and d != start - 1:
+            block = "\n".join(x for x in (_comment_run_above(lines, d),
+                                          lines[d].rstrip(),
+                                          _docstring_below(lines, d)) if x)
+            if block and block not in said:
+                said.append(f"(from the enclosing block, line {d + 1})\n{block}")
+        if said:
+            out.append("\nWHAT THE CODE SAYS ABOUT ITSELF")
+            out.extend(said)
+
+        if not in_git:
+            out.append("\n" + _NO_HISTORY)
+            return _truncate("\n".join(out))
+        code, raw = _git(["log", f"-L{start},{end}:{rel}", "--no-patch",
+                          f"-n{n}", "--date=short", fmt], root, timeout=30)
+        header = "\nWHAT CHANGED THESE LINES, newest first"
+    else:
+        out.append(rel)
+        if not in_git:
+            out.append("\n" + _NO_HISTORY)
+            return _truncate("\n".join(out))
+        code, raw = _git(["log", "--follow", "--no-patch", f"-n{n}",
+                          "--date=short", fmt, "--", rel], root, timeout=30)
+        header = "\nWHAT CHANGED THIS FILE, newest first"
+
+    if code != 0:
+        first = raw.strip().splitlines()[0] if raw.strip() else f"exit {code}"
+        # git says "there is no path X in the commit" for a file that exists on
+        # disk but has never been committed. That is an ordinary answer here,
+        # not a failure, and it is the state a file the agent just wrote is in.
+        if _UNTRACKED.search(first):
+            out.append("\n" + _NEVER_COMMITTED)
+        else:
+            out.append(f"\n(git could not read the history: {first})")
+        return _truncate("\n".join(out))
+
+    commits = _format_commits(raw, max(1, int(max_body_lines or 30)))
+    if not commits:
+        out.append("\n" + _NEVER_COMMITTED)
+    else:
+        out.append(header)
+        out.extend(commits)
+        out.append("\nThese are reasons, not a changelog. A commit saying "
+                   "something was TRIED and reverted is telling you not to do "
+                   "it again -- check that before you repeat it.")
+    return _truncate("\n".join(out))
+
+
 def git_commit(path: str = ".", message: str = "") -> str:
     """Commit staged changes with the given message."""
     p = _resolve(path)
@@ -2353,6 +2605,23 @@ TOOL_SCHEMAS = [
         [],
     ),
     _schema(
+        "why",
+        "Why a piece of code is the way it is: the comment or docstring that explains "
+        "it, plus the commits that touched those exact lines WITH their full messages. "
+        "Reach for it before changing anything whose reason is not obvious from the "
+        "code -- especially a constant, a workaround, a retry/timeout, an ordering, or "
+        "anything that looks redundant. Code cannot tell you what was already tried and "
+        "reverted; a line that came back looks identical to one never touched. The "
+        "commit that removed an approach usually says why it did not work.",
+        {
+            "path": {"type": "string", "description": "File path (absolute or relative to cwd)"},
+            "line": {"type": "integer", "description": "1-based line to explain. Omit for the whole file's history."},
+            "end_line": {"type": "integer", "description": "End of the line range (default: same as line)"},
+            "max_commits": {"type": "integer", "description": "How many commits to report, newest first (default 5, max 20)"},
+        },
+        ["path"],
+    ),
+    _schema(
         "git_log",
         "Show recent git commit history.",
         {
@@ -2839,6 +3108,7 @@ TOOL_FUNCTIONS = {
     "git_status": git_status,
     "git_branch": git_branch,
     "git_diff": git_diff,
+    "why": why,
     "git_log": git_log,
     "git_commit": git_commit,
     "git_push": git_push,
@@ -2864,7 +3134,7 @@ READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "find_references",
                  "search_code", "code_diagnostics", "go_to_definition",
                  "scan_secrets", "todo_write", "remember", "show_image",
                  "compact_context", "read_output", "stop_process",
-                 "list_processes", "review_changes"}
+                 "list_processes", "review_changes", "why"}
 # Tools that modify files (auto-approved in autoedit mode).
 FILE_WRITE_TOOLS = {"write_file", "edit_file", "replace_in_files", "git_commit"}
 # Network read tools (prompt in ask mode, auto-approved in autoedit/yolo).
