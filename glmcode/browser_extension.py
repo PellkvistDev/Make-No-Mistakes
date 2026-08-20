@@ -52,9 +52,35 @@ def bridge_if_connected(cfg):
     return b if (b is not None and b.connected) else None
 
 
-def status(cfg) -> dict:
-    """What Settings shows: is it on, is the port up, is a browser on it."""
-    b = bridge(start=enabled(cfg))
+def not_connected_hint() -> str:
+    """What to say when 'use my own browser' is on but nothing is on the end.
+
+    Names the state AND the next move, because the observable symptom is a
+    second browser window opening with a blank tab, and nothing about that says
+    "your extension isn't connected".
+    """
+    b = bridge(start=True)
+    where = f"port {b.port}" if b and b.port else "a local port"
+    return ("'Use my own browser' is on, but the extension isn't connected, so "
+            f"I'm falling back to a separate browser window. The app is "
+            f"listening on {where}. Check: is the browser you installed the "
+            "extension in actually open? Is its toolbar button showing a pause "
+            "mark (click it to resume)? Settings -> Browser says Connected the "
+            "moment both ends are up.")
+
+
+def status(cfg, listen: bool = False) -> dict:
+    """What Settings shows: is it on, is the port up, is a browser on it.
+
+    `listen` opens the port even when the setting is off, and the Settings
+    panel passes it while it is on screen. Without that the install sheet said
+    "Waiting for the extension..." forever for anyone who had not flipped the
+    switch first -- there was nothing to wait on, because the port only opened
+    when the feature was already enabled. Being able to verify the install
+    BEFORE turning it on is the right order for a feature that hands over a
+    logged-in browser.
+    """
+    b = bridge(start=listen or enabled(cfg))
     return {
         "enabled": enabled(cfg),
         "port": b.port if b else None,

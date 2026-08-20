@@ -2187,6 +2187,12 @@ class Agent:
         if sess is None or not sess.is_open:
             bridge = browser_extension.bridge_if_connected(self.cfg)
             connect_url = (getattr(self.cfg, "browser_connect_url", "") or "").strip()
+            if bridge is None and browser_extension.enabled(self.cfg):
+                # Asked for their own browser and it isn't reachable. Falling
+                # through in silence is what put a blank second Chrome on
+                # screen and left the user watching the wrong window: the
+                # feature looked broken because nothing said it was off.
+                self.events.warn(browser_extension.not_connected_hint())
             if bridge is not None:
                 # The user's own browser, reached from the inside. Nothing to
                 # launch, nothing to relaunch, no flags: it is already open.

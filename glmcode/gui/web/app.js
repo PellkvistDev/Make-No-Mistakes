@@ -4409,32 +4409,84 @@ $("gh-foot-sync").addEventListener("click", async () => {
 // showing a number from whenever Settings was last rendered.
 let extPollTimer = null;
 
+function tabLabel(tab) {
+  if (!tab || !tab.url) return "";
+  let host = tab.url;
+  try { host = new URL(tab.url).host || tab.url; } catch {}
+  const title = (tab.title || "").trim();
+  return title ? `${title} — ${host}` : host;
+}
+
 function renderExtStatus(st) {
   const line = $("browser-ext-status");
   const install = $("browser-ext-install");
+  const tabLine = $("browser-ext-tab");
   if (!line) return;
-  if (st && st.connected) {
-    line.textContent = "Connected — the agent can drive your active tab.";
+
+  const connected = !!(st && st.connected);
+  const on = !!(st && st.enabled);
+
+  if (connected && on) {
+    line.textContent = "Connected — working in your browser.";
     line.className = "row-sub ext-on";
-    install.textContent = "Reinstall";
-  } else if (st && st.enabled) {
-    line.textContent = st.port
-      ? "Not connected. Load the extension in the browser you want driven."
+  } else if (connected) {
+    // The interesting case, and the one that used to look like a dead end:
+    // the hard part is DONE and only the switch above is left.
+    line.textContent = "Extension is connected. Turn the switch above on to use it.";
+    line.className = "row-sub ext-on";
+  } else if (on) {
+    line.textContent = st && st.port
+      ? "Set up, but your browser isn't connected right now."
       : "Couldn't open a local port for the extension to connect to.";
     line.className = "row-sub ext-off";
-    install.textContent = "Install it";
   } else {
     line.textContent = "Off — the agent uses its own separate browser.";
     line.className = "row-sub ext-off";
-    install.textContent = "Install it";
   }
-  const live = $("ext-live-status");
-  if (live && !$("browser-ext-sheet").hidden) {
-    live.textContent = st && st.connected
-      ? "Connected. You can close this."
-      : "Waiting for the extension…";
-    live.className = st && st.connected ? "row-sub ext-on" : "row-sub";
-  }
+  install.textContent = connected ? "Set up again" : "Set it up";
+
+  // Which window, specifically. "My own browser" is otherwise a leap of faith
+  // taken at the moment the agent starts clicking things.
+  const label = connected ? tabLabel(st.tab) : "";
+  tabLine.hidden = !label;
+  tabLine.textContent = label ? "Would act on: " + label : "";
+
+  if (!$("browser-ext-sheet").hidden) renderExtSheet(st);
+}
+
+function renderExtSheet(st) {
+  const connected = !!(st && st.connected);
+  $("ext-live").classList.toggle("on", connected);
+  $("ext-live-status").textContent = connected
+    ? "Connected to your browser."
+    : "Waiting for the extension…";
+
+  const label = connected ? tabLabel(st.tab) : "";
+  $("ext-live-tab").hidden = !label;
+  $("ext-live-tab").textContent = label ? "Right now that would be: " + label : "";
+
+  // The last step only appears once the hard part is done, so the sheet never
+  // offers a switch that cannot work yet.
+  $("ext-finish").hidden = !(connected && !st.enabled);
+  if (connected && st.enabled) $("ext-sheet-close").textContent = "Done";
+
+  const box = $("ext-browsers");
+  const none = $("ext-browsers-none");
+  const list = (st && st.browsers) || [];
+  none.hidden = list.length > 0;
+  if (box.dataset.rendered === String(list.length)) return;
+  box.dataset.rendered = String(list.length);
+  box.innerHTML = "";
+  list.forEach((b, i) => {
+    const btn = document.createElement("button");
+    btn.className = i === 0 ? "btn btn-primary btn-small" : "btn btn-small";
+    btn.textContent = "Open in " + b.name;
+    btn.addEventListener("click", async () => {
+      const res = await api().open_extensions_page(b.path);
+      if (res && res.error) toast(res.error, "error", 5000);
+    });
+    box.appendChild(btn);
+  });
 }
 
 async function refreshExtStatus() {
@@ -4454,22 +4506,37 @@ function stopExtPolling() {
   extPollTimer = null;
 }
 
-$("opt-browser-mine").addEventListener("click", async () => {
-  const next = $("opt-browser-mine").getAttribute("aria-checked") !== "true";
+async function setUseMine(next) {
   const res = await api().set_setting("browser_use_mine", next);
-  if (res && res.error) return toast(res.error, "error", 5000);
+  if (res && res.error) { toast(res.error, "error", 5000); return null; }
   settings = res;
   $("opt-browser-mine").setAttribute("aria-checked", next);
-  const st = await refreshExtStatus();
-  // Turning it on with nothing installed is the common first move, and the
-  // sheet is the only thing that makes it work -- so offer it rather than
+  return refreshExtStatus();
+}
+
+$("opt-browser-mine").addEventListener("click", async () => {
+  const next = $("opt-browser-mine").getAttribute("aria-checked") !== "true";
+  const st = await setUseMine(next);
+  // Turning it on with nothing connected is the common first move, and the
+  // sheet is the only thing that makes it work -- so open it rather than
   // leaving a switch that appears to do nothing.
   if (next && st && !st.connected) openExtSheet();
 });
 
+// The last step of the sheet: the extension is connected, so the only thing
+// left is the switch. Doing it here means nobody finishes the install and then
+// has to find the control they were sent away from.
+$("ext-enable-now").addEventListener("click", async () => {
+  await setUseMine(true);
+  toast("Using your own browser now.", "info", 3000);
+  $("browser-ext-sheet").hidden = true;
+});
+
 function openExtSheet() {
   $("browser-ext-sheet").hidden = false;
+  $("ext-browsers").dataset.rendered = "";   // re-render the browser buttons
   refreshExtStatus();
+  startExtPolling();      // it connects while this is open, in another window
 }
 $("browser-ext-install").addEventListener("click", openExtSheet);
 $("ext-sheet-close").addEventListener("click", () => { $("browser-ext-sheet").hidden = true; });

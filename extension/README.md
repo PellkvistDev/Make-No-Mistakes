@@ -5,15 +5,32 @@ with you already signed in.
 
 ## Install (about thirty seconds, once)
 
+Easiest: in the app, **Settings → Browser → Set it up**. That sheet opens the
+extensions page in whichever browser you pick, hands you the folder to paste,
+shows a green light the moment it connects, and has the switch on it so you
+never have to go looking for it afterwards.
+
+By hand, if you prefer:
+
 1. Open `chrome://extensions` in the browser you want the agent to drive.
 2. Turn on **Developer mode** (top right).
 3. **Load unpacked** → choose this folder.
+4. Turn on Settings → Browser → **Use my own browser**.
 
-Then turn on Settings → Browser → **Use my own browser** in the app. The panel
-says *Connected* as soon as both ends are up.
+Chrome, Edge, Brave, Vivaldi, Arc and anything else Chromium-based all work.
 
-Chrome, Edge, Brave, Arc and anything else Chromium-based all work; the app's
-Settings panel has a button that opens this folder for you.
+## If it says it isn't connected
+
+The app has to be running for the extension to have anything to connect to, and
+the extension reconnects on its own — within a few seconds if you click around
+in the browser, within thirty otherwise. If it stays disconnected:
+
+- Is the toolbar button showing `||`? That is paused. Click it.
+- Is **Use my own browser** actually on in Settings → Browser?
+- Reload the extension on `chrome://extensions` (the circular arrow).
+
+When it is off, the agent falls back to launching a separate browser of its own
+and **says so in the chat** rather than leaving you watching the wrong window.
 
 ## What it does, and what it cannot
 

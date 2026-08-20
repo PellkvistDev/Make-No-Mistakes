@@ -1,10 +1,21 @@
 {
   "manifest_version": 3,
-  "name": "Make No Mistakes — browser control",
+  "name": "Make No Mistakes \u2014 browser control",
   "version": "1.0.0",
   "description": "Lets the Make No Mistakes desktop app drive the tab you are looking at, in your own browser, with your own logins.",
-  "permissions": ["tabs", "scripting", "storage"],
-  "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "background.js" },
-  "action": { "default_title": "Make No Mistakes" }
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Make No Mistakes"
+  }
 }
