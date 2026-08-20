@@ -20,6 +20,14 @@ whenever the extension is connected.
 
 Chrome, Edge, Brave, Vivaldi, Arc and anything else Chromium-based all work.
 
+## If a screenshot fails
+
+`captureVisibleTab` photographs what is **on screen**. If the browser window is
+minimised or fully covered, Chrome has nothing rendered to read back and says
+`image readback failed`. The extension raises the window and retries, but a
+minimised window it cannot restore will still fail — the page text and the
+clickable-element list both still work in that case.
+
 ## If it says it isn't connected
 
 The app has to be running for the extension to have anything to connect to, and

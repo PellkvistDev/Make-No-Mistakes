@@ -188,66 +188,27 @@ TAB = {"url": "https://github.com/you/repo/pulls", "title": "Pull requests"}
 
 
 def test_it_names_the_browsers_you_actually_have(desktop):
-    """"Open chrome://extensions" assumes one browser and assumes it is Chrome.
-    Someone who lives in Edge reads that and installs it in the wrong one, then
-    wonders why nothing connects. The button only brings that browser forward --
-    see test_the_button_does_not_claim_to_navigate."""
+    """Worth saying, so "install it in the browser you actually use" has
+    something to point at. NOT a button: see the next test."""
     _open_browser_tab(desktop, browser_extension_status=dict(
         EXT_WAITING, browsers=[CHROME, EDGE]))
     desktop.page.click("#browser-ext-install")
     desktop.page.wait_for_timeout(250)
-    labels = desktop.page.eval_on_selector_all(
-        "#ext-browsers button", "els => els.map(e => e.textContent)")
-    assert labels == ["Bring Google Chrome to the front",
-                      "Bring Microsoft Edge to the front"]
+    said = desktop.page.inner_text("#ext-browsers")
+    assert "Google Chrome" in said and "Microsoft Edge" in said
 
 
-def test_the_address_to_paste_is_the_primary_step(desktop):
-    """Reported: the button "is just launching a fresh empty window". It was
-    passing chrome://extensions on the command line, which Chrome DROPS -- so
-    the browser opened with nothing. Nothing can open another program's
-    chrome:// page, so the paste is the step and the panel says why."""
+def test_nothing_offers_to_open_the_browser_for_you(desktop):
+    """Reported: "press 'bring chrome to the front' and that opens an empty
+    chrome window, which i close". An app cannot raise another app's window
+    without platform APIs, and both attempts made it look like the feature
+    misfiring rather than like a step you still have to do."""
     _open_browser_tab(desktop, browser_extension_status=dict(
-        EXT_WAITING, browsers=[CHROME]))
+        EXT_WAITING, browsers=[CHROME, EDGE]))
     desktop.page.click("#browser-ext-install")
     desktop.page.wait_for_timeout(250)
-    assert "chrome://extensions" in desktop.page.inner_text("#ext-store-url")
-    assert desktop.page.eval_on_selector(
-        "#ext-copy-url", "e => e.classList.contains('btn-primary')")
-    # The copy uses a typographic apostrophe, so match on the stable half.
-    assert "open another program" in desktop.page.inner_text("#browser-ext-sheet")
-
-
-def test_clicking_one_brings_that_browser_forward(desktop):
-    _open_browser_tab(desktop, browser_extension_status=dict(
-        EXT_WAITING, browsers=[CHROME, EDGE]), open_extensions_page={"ok": True})
-    desktop.page.click("#browser-ext-install")
-    desktop.page.wait_for_timeout(250)
-    desktop.page.click("#ext-browsers button:nth-child(2)")
-    desktop.page.wait_for_timeout(200)
-    calls = desktop.calls("open_extensions_page")
-    assert calls and calls[0]["args"][0] == "/usr/bin/microsoft-edge"
-
-
-def test_a_clipboard_that_refuses_does_not_stop_the_button(desktop):
-    """Found by CI, where the headless browser's clipboard rejects. Copying was
-    awaited BEFORE the call that matters, so one rejected promise stopped the
-    button doing the only thing it exists for. It is also not hypothetical in
-    the real app: the clipboard API is not always available in WebView2's page
-    context, which is the desktop app on Windows."""
-    _open_browser_tab(desktop, browser_extension_status=dict(
-        EXT_WAITING, browsers=[CHROME]), open_extensions_page={"ok": True})
-    desktop.page.evaluate(
-        """() => { navigator.clipboard.writeText = () => Promise.reject(new Error('nope'));
-                   document.execCommand = () => false; }""")
-    desktop.page.click("#browser-ext-install")
-    desktop.page.wait_for_timeout(250)
-    desktop.page.click("#ext-browsers button:nth-child(1)")
-    desktop.page.wait_for_timeout(250)
-    calls = desktop.calls("open_extensions_page")
-    assert calls and calls[0]["args"][0] == CHROME["path"]
-    # and it tells you to paste it yourself rather than claiming it copied
-    assert "paste chrome://extensions" in desktop.page.inner_text("body")
+    assert desktop.page.eval_on_selector_all("#ext-browsers button", "els => els.length") == 0
+    assert desktop.calls("open_extensions_page") == []
 
 
 def test_with_no_browser_found_the_paste_step_still_stands(desktop):

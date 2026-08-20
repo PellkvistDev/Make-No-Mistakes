@@ -100,17 +100,18 @@ EXTENSIONS_URL = "chrome://extensions"
 
 
 def open_browser(path: str) -> tuple[bool, str]:
-    """Bring that browser up (no URL). Returns (ok, error).
+    """Deliberately does nothing but report that it cannot help.
 
-    Useful only for the case where the browser is not running at all -- with
-    no argument, a running browser is simply focused rather than given a blank
-    window, which is the behaviour that made the URL version look broken.
+    One program cannot raise another program's window without platform
+    specific APIs, and the two attempts at faking it both made things worse.
+    Passing chrome://extensions on the command line got the URL DROPPED and an
+    empty window opened. Launching with no argument at all was meant to focus
+    a running browser -- and does, on macOS -- but on WINDOWS it opens a fresh
+    blank window, which is exactly what was reported.
+
+    Kept as a function so the UI has one honest place to ask, rather than
+    holding a button that produces an empty window and looks like the feature
+    misfiring.
     """
-    exe = Path(path)
-    if not exe.exists():
-        return False, f"That browser isn't where it was: {path}"
-    try:
-        subprocess.Popen([str(exe)], **NO_WINDOW_KWARGS)
-    except OSError as e:
-        return False, f"Couldn't start {exe.name}: {e}"
-    return True, ""
+    return False, ("Switch to your browser yourself and paste the address --"
+                   " an app can't bring another app's window forward.")
