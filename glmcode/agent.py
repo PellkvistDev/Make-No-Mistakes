@@ -1548,7 +1548,7 @@ class Agent:
     def _call_model(self, model: str):
         self.events.stream_start()
         try:
-            return self._client_for(model).chat(
+            result = self._client_for(model).chat(
                 model=model,
                 messages=self._messages_for_call(),
                 tools=self._tools_for_call(),
@@ -1565,9 +1565,48 @@ class Agent:
                 on_reasoning=self.events.reasoning_delta,
                 on_status=self.events.info,
                 cancel=self.cancel,
+                # Only the main turn gets the chain. It is the long,
+                # tool-calling one that a rate limit actually kills, and it is
+                # the one whose model the user chose -- a sub-agent or a
+                # compaction pass quietly answering on a different model is a
+                # surprise nobody asked for.
+                fallbacks=self._fallback_models(),
             )
+            self._say_if_fallback(model, result)
+            return result
         finally:
             self.events.stream_end()
+
+    def _say_if_fallback(self, asked: str, result) -> None:
+        """Say so when a different model answered.
+
+        A silent switch is the worst version of this feature: the chat quietly
+        gets worse at tool calling and there is nothing anywhere to explain
+        why. Said once per switch rather than once per request -- it is news
+        the first time and noise after that.
+        """
+        got = getattr(result, "model", "") or ""
+        if not got or got == asked:
+            self._last_fallback = ""
+            return
+        if getattr(self, "_last_fallback", "") == got:
+            return
+        self._last_fallback = got
+        self.events.warn(f"{asked} is rate-limited -- answering on {got} for "
+                         f"now, and going back to {asked} once that clears.")
+
+    def _fallback_models(self) -> list:
+        """The models to try after this chat's own, in order.
+
+        Empty unless the user set a chain. A chat pinned to a specific model
+        (model_override) still uses it: the point of the chain is that the
+        preferred model is unavailable, and pinning expresses a preference, not
+        a refusal to ever answer.
+        """
+        try:
+            return [m for m in (self.cfg.model_fallbacks or []) if m]
+        except AttributeError:
+            return []
 
     def _call_model_until_done(self, model: str):
         """Like _call_model, but if the response gets cut off by the output

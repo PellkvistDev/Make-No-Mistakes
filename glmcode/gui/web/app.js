@@ -3624,6 +3624,8 @@ function syncSettingsUI() {
   // Not while it's being typed into -- rewriting the field under the cursor
   // is how a half-typed endpoint turns into a saved wrong one.
   $("opt-browser-mine").setAttribute("aria-checked", settings.browser_own !== "off");
+  if (document.activeElement !== $("opt-fallbacks"))
+    $("opt-fallbacks").value = (settings.model_fallbacks || []).join("\n");
   if (document.activeElement !== $("opt-browser-connect"))
     $("opt-browser-connect").value = settings.browser_connect_url || "";
   $("opt-browser-connect").classList.toggle("attached-on", !!settings.browser_connect_url);
@@ -3685,6 +3687,9 @@ function showSettingsTab(name) {
   // Polling only while the tab is actually visible keeps that honest without
   // running a timer for the life of the app.
   if (name === "browser") startExtPolling(); else stopExtPolling();
+  // Looked up when the panel is opened, not at boot: it is a network
+  // call, and nobody wants the app to be slower to start for it.
+  if (name === "general" && !updateState) checkUpdate();
   // The panes scroll now, not the sheet -- the sheet stopped scrolling when the
   // tabs moved into a rail beside it, so resetting the old element did nothing
   // and every tab opened at the previous one's scroll position.
@@ -4400,6 +4405,77 @@ $("gh-foot-pull").addEventListener("click", async () => {
 });
 $("gh-foot-sync").addEventListener("click", async () => {
   if (await ghAction($("gh-foot-sync"), () => api().github_sync())) refreshGithubRepo();
+});
+
+// Saved on blur, not per keystroke: a half-typed model id is a model that
+// does not exist, and storing it would put a guaranteed failure in the chain.
+$("opt-fallbacks").addEventListener("change", async () => {
+  const lines = $("opt-fallbacks").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  const res = await api().set_setting("model_fallbacks", lines);
+  if (res && res.error) return toast(res.error, "error", 5000);
+  settings = res;
+  $("opt-fallbacks").value = (settings.model_fallbacks || []).join("\n");
+});
+
+// -- update ------------------------------------------------------------ //
+// Two steps, never one. A button that pulls and restarts on a single click
+// would do all of that to someone who only wanted to know whether there WAS
+// an update -- and it can refuse for several ordinary reasons (local edits,
+// not a git checkout, no network), each of which is worth reading before
+// anything happens.
+let updateState = null;
+
+function renderUpdate(st) {
+  const line = $("update-status");
+  const btn = $("update-btn");
+  updateState = st;
+  btn.disabled = false;
+
+  const log = (st && st.changes) || [];
+  $("update-log-row").hidden = log.length === 0;
+  $("update-log").textContent = log.join("\n");
+
+  if (!st || !st.ok) {
+    line.textContent = (st && st.reason) || "Couldn't check for updates.";
+    line.className = "row-sub ext-off";
+    btn.textContent = "Check again";
+    return;
+  }
+  if (!st.behind) {
+    line.textContent = "Up to date" + (st.branch ? ` (on ${st.branch})` : "") + ".";
+    line.className = "row-sub ext-on";
+    btn.textContent = "Check again";
+    return;
+  }
+  const n = st.behind;
+  line.textContent = `${n} update${n === 1 ? "" : "s"} available on ${st.branch}. `
+    + "The app will restart itself.";
+  line.className = "row-sub ext-on";
+  btn.textContent = "Update & restart";
+}
+
+async function checkUpdate() {
+  $("update-status").textContent = "Checking…";
+  $("update-btn").disabled = true;
+  renderUpdate(await api().update_check());
+}
+
+$("update-btn").addEventListener("click", async () => {
+  if (!updateState || !updateState.ok || !updateState.behind) return checkUpdate();
+  $("update-status").textContent = "Updating…";
+  $("update-btn").disabled = true;
+  const res = await api().update_apply();
+  if (!res || !res.ok) {
+    renderUpdate(res || { ok: false, reason: "The update failed." });
+    return;
+  }
+  if (res.restarted) {
+    // The new copy is already starting; this window closes a moment later.
+    $("update-status").textContent = "Updated — restarting…";
+    $("update-status").className = "row-sub ext-on";
+  } else {
+    renderUpdate({ ok: false, reason: res.reason, changes: res.changes });
+  }
 });
 
 // -- use my own browser (via the extension) ---------------------------- //

@@ -59,6 +59,10 @@ class ChatResult:
     tool_calls: list = field(default_factory=list)
     finish_reason: str = ""
     usage: Usage = field(default_factory=Usage)
+    # Which model actually answered. Not always the one asked for: a chain
+    # falls back on a rate limit, and a switch nobody can see is the worst
+    # version of that feature.
+    model: str = ""
 
     def to_message(self) -> dict:
         msg: dict = {"role": "assistant", "content": self.content or ""}
@@ -72,6 +76,85 @@ MAX_RETRIES = 8
 # Ceiling on honouring a server's retry hint: long enough for a per-minute
 # window to roll over, short enough that a turn is never parked indefinitely.
 MAX_RETRY_WAIT = 65.0
+
+
+# --------------------------------------------------------------------- #
+# Model fallback: when the preferred model is rate-limited, use the next one.
+#
+# The free tiers this app is built around are metered in requests per day and
+# per minute, and hitting the limit does not make you a worse programmer -- it
+# just stops you. A chain ("3.6 flash, then 3.5 flash, then 3.5 flash lite")
+# turns a hard stop into a slower answer.
+#
+# Two things it costs, and both are worth paying:
+#
+#   - The PROMPT CACHE. This app re-sends ~12,400 tokens of system prompt and
+#     tool schemas on every request, and a different model has no cache for
+#     that prefix. But the alternative is not "keep the cache" -- it is "get
+#     nothing", because the preferred model is refusing.
+#   - QUALITY. A weaker model is worse at tool calling, and switching mid-task
+#     is where that shows. So the chain is only walked on a rate limit, never
+#     on an ordinary error, and the preferred model is returned to as soon as
+#     its cooldown is up rather than being abandoned for the session.
+#
+# The conversation itself is unaffected: history is plain OpenAI-format
+# messages and this app already switches models per chat.
+
+# When a model was last rate-limited, keyed by (base_url, model). Process-wide
+# and deliberately not persisted: a per-minute limit recovers in a minute, and
+# a stale note on disk would keep skipping a model that is fine now.
+_rate_limited_at: dict[tuple[str, str], float] = {}
+_rate_limit_lock = threading.Lock()
+
+# How long a rate-limited model is skipped before it is tried again. Long
+# enough to be worth switching for, short enough that a per-minute limit does
+# not exile the good model for the rest of the session.
+MODEL_COOLDOWN = 90.0
+
+
+def _stamp(result, model: str):
+    """Record which model answered, without assuming what _stream_once returned.
+
+    In the app it is always a ChatResult. Tests stand in for the whole of
+    _stream_once, sometimes with a bare string, and a chat() that insisted on
+    the real shape would be asserting on its own test doubles rather than on
+    behaviour.
+    """
+    try:
+        result.model = model
+    except AttributeError:
+        pass
+    return result
+
+
+def note_rate_limited(base_url: str, model: str) -> None:
+    with _rate_limit_lock:
+        _rate_limited_at[(base_url, model)] = time.monotonic()
+
+
+def is_cooling_down(base_url: str, model: str) -> bool:
+    with _rate_limit_lock:
+        at = _rate_limited_at.get((base_url, model))
+    return at is not None and (time.monotonic() - at) < MODEL_COOLDOWN
+
+
+def clear_cooldowns() -> None:
+    with _rate_limit_lock:
+        _rate_limited_at.clear()
+
+
+def plan_models(base_url: str, model: str, fallbacks) -> list[str]:
+    """The order to try, preferred first, minus anything still cooling down.
+
+    A model that was rate-limited a moment ago is put at the BACK rather than
+    dropped: if every model in the chain is cooling down, trying the preferred
+    one and waiting beats refusing outright.
+    """
+    chain = [model] + [m for m in (fallbacks or [])
+                       if m and m != model]
+    ready = [m for m in chain if not is_cooling_down(base_url, m)]
+    resting = [m for m in chain if is_cooling_down(base_url, m)]
+    return ready + resting
 
 
 class RateLimiter:
@@ -160,8 +243,17 @@ class ZaiClient:
         on_reasoning: Optional[Callable[[str], None]] = None,
         on_status: Optional[Callable[[str], None]] = None,
         cancel=None,
+        fallbacks: Optional[list] = None,
     ) -> ChatResult:
-        """Send a chat completion request, streaming. Returns the final result."""
+        """Send a chat completion request, streaming. Returns the final result.
+
+        `fallbacks` are models on THIS endpoint to fall back to when the
+        preferred one is rate-limited -- see plan_models. They are walked only
+        on a 429; every other failure retries the same model, because a weaker
+        model is not the answer to a bad request or a server fault.
+        """
+        chain = plan_models(self.base_url, model, fallbacks)
+        model = chain[0]
         payload: dict = {
             "model": model,
             "messages": self._portable(messages),
@@ -180,8 +272,39 @@ class ZaiClient:
             payload["thinking"] = {"type": "enabled"}
 
         last_err: Optional[Exception] = None
+        tried = 1                      # how far down the chain we have gone
         for attempt in range(MAX_RETRIES):
             if attempt > 0:
+                # Rate-limited and there is another model to ask? Ask it,
+                # instead of sitting out the backoff. That is the entire point
+                # of a chain: the wait is what it exists to avoid.
+                if (isinstance(last_err, ApiError) and last_err.status == 429
+                        and tried < len(chain)):
+                    note_rate_limited(self.base_url, payload["model"])
+                    payload["model"] = model = chain[tried]
+                    tried += 1
+                    if on_status:
+                        on_status(f"rate limited -- switching to {model}")
+                    if self.rate_limiter:
+                        self.rate_limiter.wait()
+                    _raise_if_cancelled(cancel)
+                    try:
+                        from . import usage as _usage
+                        _usage.record(model)
+                    except Exception:
+                        pass
+                    try:
+                        return _stamp(self._stream_once(payload, on_content,
+                                                        on_reasoning, cancel),
+                                      model)
+                    except ApiError as e:
+                        if e.status in RETRYABLE:
+                            last_err = e
+                            continue
+                        raise
+                    except (requests.ConnectionError, requests.Timeout) as e:
+                        last_err = e
+                        continue
                 base = min(2 ** attempt, 30)
                 if isinstance(last_err, ApiError) and last_err.status == 429:
                     base = max(base, 2)
@@ -221,9 +344,13 @@ class ZaiClient:
             except Exception:
                 pass
             try:
-                return self._stream_once(payload, on_content, on_reasoning, cancel)
+                return _stamp(
+                    self._stream_once(payload, on_content, on_reasoning, cancel),
+                    payload["model"])
             except ApiError as e:
                 if e.status in RETRYABLE:
+                    if e.status == 429:
+                        note_rate_limited(self.base_url, payload["model"])
                     last_err = e
                     continue
                 raise

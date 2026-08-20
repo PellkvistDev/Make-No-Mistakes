@@ -21,3 +21,10 @@ WHITEBOARD_DIR = Path(__file__).resolve().parents[3] / "whiteboard"
 # sibling of the package rather than inside it: "Load unpacked" wants a plain
 # folder, and one buried in site-packages is a folder nobody can find.
 EXTENSION_DIR = Path(__file__).resolve().parents[2] / "extension"
+
+
+# The repository this app is running from -- the parent of the `glmcode`
+# package. It is where `git pull` has to run for the Update button, and it is
+# only a git checkout when someone cloned it (a copied folder or a packaged
+# build is not), so every caller has to cope with that.
+APP_ROOT = Path(__file__).resolve().parents[2]
