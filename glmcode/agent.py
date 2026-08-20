@@ -29,7 +29,7 @@ from .prompts import (ATTEMPT_TASK, BROWSER_AGENT_SYSTEM, BROWSER_AGENT_TASK,
                       conversational_project_context, detect_check_command,
                       fresh_review_nudge, is_critic_approval, verify_nudge)
 from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
-                    BROWSER_TAB_SCHEMAS,
+                    BROWSER_TAB_SCHEMAS, WORKER_SCHEMAS,
                     CHECK_WORKERS_TOOL, COMPACT_CONTEXT_TOOL,
                     CONTROL_CHROME_TOOL, CONVERSATIONAL_READONLY_SCHEMAS,
                     CONVERSATIONAL_SCHEMAS,
@@ -54,6 +54,20 @@ MAX_CONTINUATIONS = 3
 # "Make it green": how many times the bounded test-fix loop will re-run the
 # project's checks and feed a failure back before giving up and reporting.
 GREEN_LOOP_MAX_ROUNDS = 4
+
+
+def _browser_worker_name(goal: str) -> str:
+    """A short kebab-case label for a browser worker, from its goal.
+
+    check_workers and steer_worker are addressed by name as well as id, and
+    "wk3" is not something anyone says out loud -- least of all in voice mode,
+    which is where these are most useful.
+    """
+    words = re.findall(r"[a-z0-9]+", (goal or "").lower())
+    skip = {"the", "a", "an", "and", "to", "in", "on", "for", "of", "my",
+            "our", "please", "can", "you", "go", "then"}
+    keep = [w for w in words if w not in skip][:4]
+    return "-".join(keep)[:40] or "browser"
 
 
 def _first_line(text: str, limit: int = 280) -> str:
@@ -215,7 +229,11 @@ class Agent:
             # never edit or run anything itself (that's the workers' job).
             self.tool_schemas = list(CONVERSATIONAL_SCHEMAS) + list(CONVERSATIONAL_READONLY_SCHEMAS)
         elif allow_subagents:
-            self.tool_schemas = TOOL_SCHEMAS
+            # The worker tools come with it, because control_chrome can now
+            # hand the browser off to a background worker -- and a coordinator
+            # that can start something it cannot then ask about is worse than
+            # one that could not start it at all.
+            self.tool_schemas = list(TOOL_SCHEMAS) + list(WORKER_SCHEMAS)
         else:
             # Sub-agents don't get the spawning tool OR control_chrome (a browser
             # agent is spawned only by the coordinator, and no sub-agent recurses).
@@ -1696,7 +1714,8 @@ class Agent:
         """
         if name == DISPATCH_WORKER_TOOL:
             output = self._dispatch_worker(args.get("name", ""),
-                                           args.get("task", ""))
+                                           args.get("task", ""),
+                                           args.get("kind", "code"))
         elif name == CHECK_WORKERS_TOOL:
             output = self._check_workers()
         elif name == STEER_WORKER_TOOL:
@@ -1714,7 +1733,8 @@ class Agent:
             output = self._run_subagents(args.get("agents", []))
         elif name == CONTROL_CHROME_TOOL:
             output = self._control_chrome_tool(
-                args.get("goal", ""), args.get("start_url", ""))
+                args.get("goal", ""), args.get("start_url", ""),
+                bool(args.get("background", False)))
         elif name in BROWSER_ACTION_TOOLS:
             output = self._browser_action(name, args)
         elif name == VIEW_IMAGE_TOOL:
@@ -1903,7 +1923,7 @@ class Agent:
     # ------------------------------------------------------------------ #
     # Fire-and-forget background workers (conversational mode)
 
-    def _dispatch_worker(self, name: str, task: str) -> str:
+    def _dispatch_worker(self, name: str, task: str, kind: str = "code") -> str:
         """Start a background worker on its own daemon thread and return
         IMMEDIATELY (never joins). The worker runs a full autonomous sub-agent;
         it reports progress through worker_update events, and its result lands
@@ -1912,6 +1932,12 @@ class Agent:
         task = str(task or "").strip()
         if not task:
             raise ToolError("dispatch_worker needs a non-empty 'task'")
+        kind = "browser" if str(kind or "").strip().lower() == "browser" else "code"
+        if kind == "browser":
+            # Opened HERE rather than on the worker thread: "the browser would
+            # not start" is an answer the caller can act on, and a background
+            # thread can only put it in a report nobody is waiting for.
+            self._ensure_browser_session()
         # Snapshot the project's current state as this worker's baseline, so we
         # can later show exactly what IT changed and revert just its work.
         baseline = None
@@ -1927,26 +1953,44 @@ class Agent:
             self._workers[wid] = {
                 "id": wid, "name": name, "task": task, "status": "running",
                 "result": "", "error": None, "baseline": baseline, "changes": [],
+                "kind": kind,
             }
         # One rate limiter shared by every background worker in this chat, so
         # several running at once stay spaced out on the free tier's ~1 req/s.
         if getattr(self, "_worker_limiter", None) is None:
             self._worker_limiter = RateLimiter()
         self.events.worker_update(wid, name, "started")
-        self._emit_subagent(wid, name, "running", mission=task[:280])
-        t = threading.Thread(target=self._run_worker, args=(wid, name, task),
+        self._emit_subagent(wid, "browser" if kind == "browser" else name,
+                            "running", mission=task[:280])
+        t = threading.Thread(target=self._run_worker, args=(wid, name, task, kind),
                              daemon=True)
         t.start()
-        return (f"Started background worker '{name}' (id {wid}). It's running now; "
-                f"tell the user out loud you've started, keep talking, and don't wait "
+        where = ("It is driving the browser now -- the user can watch it, and you "
+                 "can steer_worker it while they talk to you."
+                 if kind == "browser" else "It's running now;")
+        return (f"Started background worker '{name}' (id {wid}). {where} "
+                f"Tell the user you've started, keep talking, and don't wait "
                 f"for it -- you'll be told when it finishes.")
 
-    def _run_worker(self, wid: str, name: str, task: str) -> None:
+    def _run_worker(self, wid: str, name: str, task: str, kind: str = "code") -> None:
         """Body of a background worker thread: run the mission to completion and
-        record the outcome. Never raises out of the thread."""
+        record the outcome. Never raises out of the thread.
+
+        A "browser" worker is the Browser Agent run this way instead of inline.
+        control_chrome used to block the whole conversation until the browsing
+        finished, which is the wrong shape for the thing you most want to watch:
+        you cannot ask about it, cannot have it steered, and cannot get on with
+        anything else. As a worker it reports through the same registry as every
+        other one, so check_workers, steer_worker and stop_worker all just work.
+        """
         try:
-            report, usage = self._run_single_subagent(
-                name, task, self._worker_limiter, wid)
+            if kind == "browser":
+                report = self._run_browser_subagent(
+                    task, self._ensure_browser_session(), wid)
+                usage = None
+            else:
+                report, usage = self._run_single_subagent(
+                    name, task, self._worker_limiter, wid)
             # What did this worker actually change (vs its dispatch baseline)?
             changes = self._worker_changed_files(wid)
             # A worker the user stopped (cancelled) may still return a partial
@@ -2236,7 +2280,8 @@ class Agent:
             except Exception:
                 pass
 
-    def _control_chrome_tool(self, goal: str, start_url: str = "") -> str:
+    def _control_chrome_tool(self, goal: str, start_url: str = "",
+                             background: bool = False) -> str:
         """Spawn a specialized Browser Agent that drives the chat's persistent
         browser toward `goal`, then return its report. The browser itself
         outlives the sub-agent (see _ensure_browser_session)."""
@@ -2245,6 +2290,16 @@ class Agent:
             raise ToolError("control_chrome needs a 'goal'.")
         if not self.allow_subagents:
             raise ToolError("a sub-agent cannot itself launch a browser agent")
+        prompt = goal
+        if start_url.strip():
+            prompt = f"{goal}\n\n(Start by navigating to: {start_url.strip()})"
+        if background:
+            # The browser is the one thing the user is most likely to be
+            # WATCHING, so blocking the whole conversation on it is the wrong
+            # shape: they cannot ask about it, redirect it, or get on with
+            # anything else while it works.
+            return self._dispatch_worker(_browser_worker_name(goal), prompt,
+                                         kind="browser")
         try:
             session = self._ensure_browser_session()
         except Exception as e:
@@ -2253,9 +2308,6 @@ class Agent:
                 "on first use and need network access once.")
         aid = f"chrome-{uuid.uuid4().hex[:6]}"
         self._emit_subagent(aid, "browser", "running", mission=goal[:280])
-        prompt = goal
-        if start_url.strip():
-            prompt = f"{goal}\n\n(Start by navigating to: {start_url.strip()})"
         try:
             report = self._run_browser_subagent(prompt, session, aid)
             self._emit_subagent(aid, "browser", "done", summary=_first_line(report))

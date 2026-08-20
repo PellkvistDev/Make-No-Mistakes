@@ -888,6 +888,37 @@ that checks `event.isTrusted` (bot detection on sign-in pages, mostly) will
 refuse it. The launched browser uses real browser-level input and remains the
 better tool there. Say so rather than letting it look broken.
 
+## The browser agent is a worker, not a blocking call
+
+`control_chrome` ran the Browser Agent inline and the whole conversation waited
+on it. That is the wrong shape for the one thing the user is most likely to be
+*watching*: they could not ask about it, could not redirect it, and could not
+get on with anything else. Steering existed, but only through the sub-agent
+panel — the agent they were talking to was frozen.
+
+It is a background worker now (`background=true`), reporting through the same
+registry as every other one, so `check_workers` / `steer_worker` / `stop_worker`
+apply to it unchanged. Voice reaches the same thing with
+`dispatch_worker(kind="browser")`, which is the shape that was asked for: watch
+the browser, talk to the assistant, have it steered mid-flight.
+
+- **The coding agent had NO worker tools.** Not an oversight to fix later —
+  it is *why* a background browser was impossible. Everything it could delegate
+  blocked until it finished, so there was never anything running to ask about.
+  `WORKER_SCHEMAS` gives it the same three the spoken side has.
+- **Blocking stays the default.** A quick look whose answer is needed to
+  continue is a worse conversation as a worker, not a better one.
+- **The browser is opened before the thread starts.** "The browser would not
+  open" is an answer the model can act on; raised on the worker thread it would
+  land in a report nobody is waiting for.
+- **Workers are named from their goal** (`open-dashboard-check-error`).
+  `steer_worker` takes a name as well as an id, and "wk3" is not something
+  anyone says out loud — least of all in voice mode, where this matters most.
+- **The phone shares the schema and has no browser.** `kind="browser"` there
+  returns a refusal naming `needs_desktop`. A shared schema that silently did
+  something else would have the model report browsing it never did — which is
+  exactly the failure the parity tests exist to prevent.
+
 ## The agent's browser and the user's browser are two different things
 
 `control_chrome` launches its own Chromium — a throwaway profile, or the

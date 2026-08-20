@@ -2915,8 +2915,16 @@ TOOL_SCHEMAS = [
         "anything on the live web that needs interaction, not just a screenshot (for a "
         "quick look at your own local dev server, preview_page is lighter). Give a "
         "COMPLETE, self-contained goal with any specifics (URLs, search terms, what "
-        "counts as done) -- the browser agent does not see this conversation.",
+        "counts as done) -- the browser agent does not see this conversation.\n"
+        "Set background=true for anything that will take more than a few steps, or "
+        "whenever the user is watching or might want to say something while it runs: "
+        "it returns a worker id immediately and you carry on, then check_workers, "
+        "steer_worker and stop_worker apply to it like any other worker. Blocking "
+        "(the default) is for a quick look where you need the answer to continue.",
         {
+            "background": {"type": "boolean",
+                           "description": "Run it as a background worker and return at "
+                                          "once, instead of waiting for the report."},
             "goal": {"type": "string",
                      "description": "The complete task to accomplish in the browser, with "
                                     "all needed specifics and what a successful result "
@@ -3043,6 +3051,12 @@ CONVERSATIONAL_SCHEMAS = [
             "task": {"type": "string",
                      "description": "The complete, self-contained mission for the worker, "
                                     "with all context it needs (it can't see this chat)."},
+            "kind": {"type": "string", "enum": ["code", "browser"],
+                     "description": "'code' (default) works on the project. 'browser' "
+                                    "drives the web browser instead -- use it for anything "
+                                    "on a website: their open tabs, a dashboard, a form, "
+                                    "looking something up. The user can watch it happen "
+                                    "while you keep talking."},
         },
         ["task"],
     ),
@@ -3125,6 +3139,15 @@ RUN_COMMAND_TOOL = "run_command"
 # command by tool name -- the permission engine, the Stop button, the verify
 # nudge -- and a saved session can still hand them the old one.
 SHELL_TOOL_NAMES = frozenset({RUN_COMMAND_TOOL, "run_powershell"})
+
+
+# The coding agent's half of the worker set. It had NONE of these, because
+# everything it could delegate blocked until it finished -- so there was never
+# anything running to ask about. A background browser worker changes that, and
+# the same three tools serve it as serve the spoken conversation.
+WORKER_SCHEMAS = [s for s in CONVERSATIONAL_SCHEMAS
+                  if s["function"]["name"] in
+                  ("check_workers", "steer_worker", "stop_worker")]
 
 
 TOOL_FUNCTIONS = {

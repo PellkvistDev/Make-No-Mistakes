@@ -99,6 +99,14 @@
             "task": {
               "type": "string",
               "description": "The complete, self-contained mission for the worker, with all context it needs (it can't see this chat)."
+            },
+            "kind": {
+              "type": "string",
+              "enum": [
+                "code",
+                "browser"
+              ],
+              "description": "'code' (default) works on the project. 'browser' drives the web browser instead -- use it for anything on a website: their open tabs, a dashboard, a form, looking something up. The user can watch it happen while you keep talking."
             }
           },
           "required": [

@@ -3599,7 +3599,19 @@
     // The workers, which are the whole point of the parity: dispatch returns
     // instantly and the work carries on after it, because a Live function call
     // holds the model silent until the tool returns.
-    if (name === "dispatch_worker") return dispatchWorker(args.name || "", args.task || "");
+    if (name === "dispatch_worker") {
+      // The schema is shared with the desktop, so the model is offered
+      // kind="browser" here too -- and there is no browser on this device to
+      // drive. Saying so is the point: a tool that silently did something
+      // else would have the model report browsing it never did.
+      if (String(args.kind || "") === "browser") {
+        return "ERROR: I can't drive a browser from the phone — that needs the " +
+               "desktop, which has the browser extension. Use needs_desktop to " +
+               "hand it over, or dispatch this as an ordinary worker if it is " +
+               "really about the code.";
+      }
+      return dispatchWorker(args.name || "", args.task || "");
+    }
     if (name === "check_workers") return checkWorkers();
     if (name === "steer_worker") return steerWorker(args.worker || "", args.message || "");
     if (name === "stop_worker") return stopWorker(args.worker || "");
