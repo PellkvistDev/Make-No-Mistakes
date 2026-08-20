@@ -2526,23 +2526,17 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
         return st
 
     def open_extensions_page(self, path: str = ""):
-        """Bring the chosen browser to the front, ready for the address to be
-        pasted in.
+        """Kept so an older page calling it gets an answer, not an exception.
 
-        It does NOT navigate. No program can open another program's chrome://
-        page: Chrome refuses those URLs on the command line, a page cannot link
-        to them, and there is no API. Passing one anyway is worse than doing
-        nothing -- the browser drops the URL and opens an empty window, which
-        is exactly what this button used to do and why it looked broken.
+        It no longer opens anything. One program cannot raise another's window
+        without platform-specific APIs, and both attempts at faking it made the
+        feature look broken: passing chrome://extensions on the command line
+        got the URL dropped and an empty window opened, and launching with no
+        argument opens a fresh blank window on Windows.
         """
         from .. import installed_browsers
-        if not path:
-            found = installed_browsers.find()
-            if not found:
-                return {"error": "No Chromium-based browser found on this machine."}
-            path = found[0]["path"]
-        ok, err = installed_browsers.open_browser(path)
-        return {"ok": True, "url": installed_browsers.EXTENSIONS_URL} if ok else {"error": err}
+        return {"error": installed_browsers.open_browser(path)[1],
+                "url": installed_browsers.EXTENSIONS_URL}
 
     def open_extension_folder(self):
         """Reveal the extension folder in the OS file manager, so 'Load

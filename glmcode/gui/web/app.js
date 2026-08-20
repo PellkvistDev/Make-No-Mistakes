@@ -4474,35 +4474,17 @@ function renderExtSheet(st) {
   // offers a switch that cannot work yet.
   $("ext-finish").hidden = !connected;
 
+  // Named, not clickable. An app cannot bring another app's window forward,
+  // and both attempts at pretending otherwise opened an empty window -- which
+  // reads as the whole feature misfiring rather than as a step you still have
+  // to do yourself.
   const box = $("ext-browsers");
   const none = $("ext-browsers-none");
   const list = (st && st.browsers) || [];
   none.hidden = list.length > 0;
-  if (box.dataset.rendered === String(list.length)) return;
-  box.dataset.rendered = String(list.length);
-  box.innerHTML = "";
-  list.forEach((b, i) => {
-    const btn = document.createElement("button");
-    btn.className = "btn btn-small";
-    // Brings that browser to the front so the address can be pasted. It does
-    // NOT navigate: no program can open another program's chrome:// page, and
-    // passing the URL anyway got the browser to drop it and show an empty
-    // window -- which is what made this button look like the bug.
-    btn.textContent = "Bring " + b.name + " to the front";
-    btn.addEventListener("click", async () => {
-      // The browser comes forward FIRST. Copying is a nicety and it can fail
-      // (no focus, no permission, WebView2's page context) -- awaiting it
-      // first meant one rejected promise stopped the button doing the one
-      // thing it is for.
-      const res = await api().open_extensions_page(b.path);
-      if (res && res.error) return toast(res.error, "error", 5000);
-      const copied = await copyText("chrome://extensions").then(() => true, () => false);
-      toast(copied ? "Copied chrome://extensions — paste it in the address bar."
-                   : "Now paste chrome://extensions into the address bar.",
-            "info", 5000);
-    });
-    box.appendChild(btn);
-  });
+  box.textContent = list.length
+    ? "Found on this machine: " + list.map((b) => b.name).join(", ")
+    : "";
 }
 
 async function refreshExtStatus() {

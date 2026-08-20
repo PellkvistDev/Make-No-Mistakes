@@ -51,6 +51,7 @@ function connect() {
   socket = ws;
 
   ws.onopen = () => {
+    startKeepalive();
     // Every port in the list gets tried in turn, so a port taken by something
     // else costs a second rather than the feature.
     retryMs = RETRY_MIN_MS;
@@ -74,7 +75,12 @@ function connect() {
     }
     setBadge(paused ? "paused" : "on");
   };
-  ws.onclose = () => { socket = null; setBadge(paused ? "paused" : "off"); scheduleRetry(); };
+  ws.onclose = () => {
+    socket = null;
+    stopKeepalive();
+    setBadge(paused ? "paused" : "off");
+    scheduleRetry();
+  };
   ws.onerror = () => { try { ws.close(); } catch {} };
 }
 
@@ -103,6 +109,31 @@ chrome.alarms.onAlarm.addListener((a) => {
 // connect() is a no-op when a socket is already open.
 chrome.tabs.onActivated.addListener(() => connect());
 chrome.windows.onFocusChanged.addListener(() => connect());
+
+// The service worker is killed after 30 SECONDS of inactivity, and the socket
+// dies with it. WebSocket activity resets that timer -- but only activity the
+// worker itself performs. A ping from the app is answered by Chrome's network
+// stack without ever waking the worker, so it keeps the SOCKET alive while the
+// worker is reaped out from under it anyway. That is what the connection log
+// showed: connected, dropped exactly 30s later, over and over.
+//
+// So the extension must speak, from JavaScript, before every deadline. The app
+// ignores a message with no id; receiving it is the whole point.
+const KEEPALIVE_MS = 20000;
+let keepaliveTimer = null;
+
+function startKeepalive() {
+  stopKeepalive();
+  keepaliveTimer = setInterval(() => {
+    if (socket && socket.readyState === WebSocket.OPEN) send({ type: "keepalive" });
+    else stopKeepalive();
+  }, KEEPALIVE_MS);
+}
+
+function stopKeepalive() {
+  if (keepaliveTimer) clearInterval(keepaliveTimer);
+  keepaliveTimer = null;
+}
 
 function send(obj) {
   if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(obj));
@@ -195,6 +226,37 @@ function waitForLoad(tabId, timeoutMs = 30000) {
   });
 }
 
+// captureVisibleTab photographs what is ON SCREEN. If that window is behind
+// another one, minimised, or its tab is not the active one, Chrome has nothing
+// rendered to read back and fails with "image readback failed" -- which is
+// exactly the normal state here, because the person is looking at the APP.
+//
+// So the tab is made active and its window raised first, and one retry covers
+// the moment it takes to paint. JPEG rather than PNG because a full-window
+// lossless shot is megabytes of base64 for something a vision model reads and
+// a thumbnail displays.
+async function capture(tab) {
+  try {
+    await chrome.tabs.update(tab.id, { active: true });
+    await chrome.windows.update(tab.windowId, { focused: true, state: "normal" });
+  } catch { /* keep going; the capture itself is the real test */ }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await new Promise((r) => setTimeout(r, attempt === 0 ? 120 : 400));
+    try {
+      return await chrome.tabs.captureVisibleTab(tab.windowId,
+                                                 { format: "jpeg", quality: 70 });
+    } catch (e) {
+      if (attempt === 1) {
+        throw new Error(
+          "Couldn't photograph the tab (" + ((e && e.message) || e) + "). " +
+          "The browser window may be minimised or covered. You can still read " +
+          "the page with browser_read, and browser_snapshot lists everything " +
+          "clickable on it.");
+      }
+    }
+  }
+}
+
 // -- commands ------------------------------------------------------------- //
 
 async function run(command, p) {
@@ -255,14 +317,7 @@ async function run(command, p) {
     return true;
   }
   if (command === "screenshot") {
-    // JPEG, not PNG. A full-window PNG of a normal page is several megabytes
-    // of base64 over the socket; the same shot as JPEG is a fraction of that.
-    // Both ends handle a big message correctly now, but the smallest payload
-    // that answers the question is still the right one to send -- this one is
-    // read by a vision model and shown as a thumbnail, neither of which wants
-    // lossless pixels.
-    return await chrome.tabs.captureVisibleTab(tab.windowId,
-                                               { format: "jpeg", quality: 70 });
+    return await capture(tab);
   }
   if (command === "info") {
     const size = await act(tab.id, { kind: "size" });

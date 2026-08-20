@@ -398,10 +398,13 @@ def test_browser_detection_returns_names_and_paths():
         assert pathlib.Path(b["path"]).exists()
 
 
-def test_opening_a_browser_that_is_not_there_says_so():
+def test_nothing_claims_to_raise_another_apps_window():
+    """Reported: "press 'bring chrome to the front' and that opens an empty
+    chrome window". Two attempts, both worse than doing nothing -- see
+    tests/test_extension_keepalive.py for the full account."""
     from glmcode import installed_browsers
     ok, err = installed_browsers.open_browser("/nope/not/a/browser")
-    assert ok is False and "isn't where it was" in err
+    assert ok is False and "can't bring another app's window forward" in err
 
 
 
@@ -511,17 +514,13 @@ def test_we_no_longer_pretend_we_can_open_a_chrome_url():
     assert not hasattr(installed_browsers, "open_extensions_page")
 
 
-def test_bringing_a_browser_forward_passes_no_url(monkeypatch, tmp_path):
-    """With no argument a running browser is focused rather than handed a blank
-    window -- which is the behaviour that made the URL version look broken."""
+def test_the_browsers_are_still_named_even_though_none_is_launched():
+    """Detection is worth keeping -- "install it in the browser you actually
+    use" needs to know which ones exist -- it is only the ACTION that was
+    impossible."""
     from glmcode import installed_browsers
-    exe = tmp_path / "chrome"
-    exe.write_text("#!/bin/sh\n")
-    seen = {}
-    monkeypatch.setattr(installed_browsers.subprocess, "Popen",
-                        lambda argv, **kw: seen.update(argv=argv))
-    ok, err = installed_browsers.open_browser(str(exe))
-    assert ok and seen["argv"] == [str(exe)]
+    for b in installed_browsers.find():
+        assert b["name"] and b["path"]
 
 
 def test_supports_tabs_is_answerable_before_the_session_starts():
