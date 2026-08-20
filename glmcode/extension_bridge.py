@@ -61,6 +61,9 @@ ACCEPT_POLL = 0.25
 # Chrome has the worker asleep.
 PING_EVERY = 8.0
 STALE_AFTER = 30.0
+# A screenshot is the only big thing that crosses this wire; the cap is a
+# sanity bound, not a budget.
+MAX_MESSAGE = 32 * 1024 * 1024
 # How often the heartbeat wakes to decide anything.
 HEARTBEAT_TICK = 0.5
 # How long a call waits for the extension to dial back in before giving up. The
@@ -119,14 +122,19 @@ def encode_frame(payload: bytes, opcode: int = OP_TEXT) -> bytes:
     return head + payload
 
 
-def read_frame(sock) -> tuple[int, bytes]:
-    """One frame off the wire, unmasking it. Returns (opcode, payload).
+def read_frame(sock) -> tuple[int, bytes, bool]:
+    """One frame off the wire, unmasked. Returns (opcode, payload, fin).
 
     Client frames are ALWAYS masked -- the spec requires it, and a server that
     ignored the mask bit would read scrambled bytes rather than fail, which is
     the kind of bug that looks like the other end being broken.
+
+    FIN is returned rather than ignored because a big message arrives in
+    PIECES: RFC 6455 §5.4 lets a sender fragment, and Chrome does it for
+    anything large. See read_message.
     """
     b0, b1 = _read_exactly(sock, 2)
+    fin = bool(b0 & 0x80)
     opcode = b0 & 0x0F
     masked = bool(b1 & 0x80)
     n = b1 & 0x7F
@@ -134,13 +142,53 @@ def read_frame(sock) -> tuple[int, bytes]:
         n = struct.unpack(">H", _read_exactly(sock, 2))[0]
     elif n == 127:
         n = struct.unpack(">Q", _read_exactly(sock, 8))[0]
-    if n > 32 * 1024 * 1024:
+    if n > MAX_MESSAGE:
         raise ConnectionError("frame too large")
     mask = _read_exactly(sock, 4) if masked else b""
     data = _read_exactly(sock, n) if n else b""
     if masked:
         data = bytes(c ^ mask[i % 4] for i, c in enumerate(data))
-    return opcode, data
+    return opcode, data, fin
+
+
+def read_message(sock, on_control) -> tuple[int, bytes]:
+    """One whole MESSAGE, reassembled from however many frames it took.
+
+    This is what a screenshot needs. Every other command in this protocol
+    answers in a few hundred bytes and arrives in a single frame, so the
+    missing reassembly went unnoticed until the browser agent took its first
+    screenshot -- a multi-megabyte data URL, which Chrome sends fragmented.
+    The first frame carried a fraction of the JSON (unparseable, dropped) and
+    every continuation frame had opcode 0, which the read loop skipped as "not
+    text". The reply simply vanished, and the task died waiting for it.
+
+    Control frames (ping/pong/close) may be interleaved between fragments and
+    are handed to `on_control` rather than joined into the payload.
+    """
+    opcode, data, fin = read_frame(sock)
+    while opcode in (OP_PING, OP_PONG, OP_CLOSE):
+        on_control(opcode, data)
+        if opcode == OP_CLOSE:
+            return OP_CLOSE, b""
+        opcode, data, fin = read_frame(sock)
+    chunks = [data]
+    total = len(data)
+    while not fin:
+        cont, more, fin = read_frame(sock)
+        if cont in (OP_PING, OP_PONG, OP_CLOSE):
+            on_control(cont, more)
+            if cont == OP_CLOSE:
+                return OP_CLOSE, b""
+            fin = False                      # still mid-message
+            continue
+        if cont != OP_CONT:
+            raise ConnectionError(
+                f"expected a continuation frame, got opcode {cont}")
+        chunks.append(more)
+        total += len(more)
+        if total > MAX_MESSAGE:
+            raise ConnectionError("message too large")
+    return opcode, b"".join(chunks)
 
 
 def origin_is_extension(origin: str) -> bool:
@@ -404,15 +452,24 @@ class ExtensionBridge:
         return True
 
     def _read_loop(self, conn) -> None:
+        closed_by = ""
         try:
             while True:
-                opcode, data = read_frame(conn)
+                def control(op, payload, _conn=conn):
+                    # ANY frame is proof the other end is alive, and a pong is
+                    # the only one that arrives on a quiet connection. Marking
+                    # liveness only when a whole message lands would let a
+                    # healthy but idle browser go stale and be dropped.
+                    self._last_seen = time.monotonic()
+                    if op == OP_PING:
+                        with self._send_lock:
+                            _conn.sendall(encode_frame(payload, OP_PONG))
+
+                opcode, data = read_message(conn, control)
                 self._last_seen = time.monotonic()
                 if opcode == OP_CLOSE:
+                    closed_by = "the browser closed the connection"
                     break
-                if opcode == OP_PING:
-                    self._send_raw(conn, encode_frame(data, OP_PONG))
-                    continue
                 if opcode != OP_TEXT:
                     continue
                 try:
@@ -420,15 +477,20 @@ class ExtensionBridge:
                 except (ValueError, UnicodeDecodeError):
                     continue
                 self._dispatch(msg)
-        except (OSError, ConnectionError, struct.error):
-            pass
+        except ConnectionError as e:
+            # Our own read giving up -- a malformed or oversized stream. Said
+            # as such: reporting it as "the browser closed the connection"
+            # once cost a whole round of looking in the wrong place.
+            closed_by = f"gave up reading the connection ({e})"
+        except (OSError, struct.error) as e:
+            closed_by = f"the connection broke ({type(e).__name__})"
         finally:
             with self._client_lock:
                 was_current = self._client is conn
                 if was_current:
                     self._client = None
             if was_current:
-                self._log("dropped", "the browser closed the connection")
+                self._log("dropped", closed_by or "the browser closed the connection")
             try:
                 conn.close()
             except OSError:

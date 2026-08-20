@@ -255,7 +255,14 @@ async function run(command, p) {
     return true;
   }
   if (command === "screenshot") {
-    return await chrome.tabs.captureVisibleTab(tab.windowId, { format: "png" });
+    // JPEG, not PNG. A full-window PNG of a normal page is several megabytes
+    // of base64 over the socket; the same shot as JPEG is a fraction of that.
+    // Both ends handle a big message correctly now, but the smallest payload
+    // that answers the question is still the right one to send -- this one is
+    // read by a vision model and shown as a thumbnail, neither of which wants
+    // lossless pixels.
+    return await chrome.tabs.captureVisibleTab(tab.windowId,
+                                               { format: "jpeg", quality: 70 });
   }
   if (command === "info") {
     const size = await act(tab.id, { kind: "size" });

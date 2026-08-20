@@ -296,6 +296,7 @@ def test_falling_back_to_a_launched_browser_says_so_out_loud():
     fake_mod = types.ModuleType("glmcode.browser_session")
     fake_mod.BrowserSession = FakeSession
     import sys
+    real = sys.modules.get("glmcode.browser_session")
     sys.modules["glmcode.browser_session"] = fake_mod
     try:
         ag = agent_mod.Agent.__new__(agent_mod.Agent)
@@ -306,7 +307,13 @@ def test_falling_back_to_a_launched_browser_says_so_out_loud():
                                           warn=lambda m: warnings.append(m))
         ag._ensure_browser_session()
     finally:
-        sys.modules.pop("glmcode.browser_session", None)
+        # RESTORED, not popped. Popping makes the next import build a fresh
+        # module, and every class in it a new object -- so BrowserError raised
+        # afterwards no longer matches the one another test imported.
+        if real is not None:
+            sys.modules["glmcode.browser_session"] = real
+        else:
+            sys.modules.pop("glmcode.browser_session", None)
 
     assert warnings, "it fell back to a separate browser without saying anything"
     said = warnings[0]
@@ -331,6 +338,7 @@ def test_no_warning_when_the_user_turned_their_own_browser_off():
     fake_mod = types.ModuleType("glmcode.browser_session")
     fake_mod.BrowserSession = FakeSession
     import sys
+    real = sys.modules.get("glmcode.browser_session")
     sys.modules["glmcode.browser_session"] = fake_mod
     try:
         ag = agent_mod.Agent.__new__(agent_mod.Agent)
@@ -341,7 +349,13 @@ def test_no_warning_when_the_user_turned_their_own_browser_off():
                                           warn=lambda m: warnings.append(m))
         ag._ensure_browser_session()
     finally:
-        sys.modules.pop("glmcode.browser_session", None)
+        # RESTORED, not popped. Popping makes the next import build a fresh
+        # module, and every class in it a new object -- so BrowserError raised
+        # afterwards no longer matches the one another test imported.
+        if real is not None:
+            sys.modules["glmcode.browser_session"] = real
+        else:
+            sys.modules.pop("glmcode.browser_session", None)
     assert warnings == []
 
 
