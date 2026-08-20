@@ -49,7 +49,8 @@ from .devices_api import DeviceApi
 from .events import WebEvents, _TtsFeeder            # noqa: F401
 from .github_api import GitHubApi
 from .media import _data_uri, _thumb_uri              # noqa: F401
-from .paths import WEB_DIR, DEFAULT_BG, WHITEBOARD_DIR   # noqa: F401
+from .paths import (WEB_DIR, DEFAULT_BG, WHITEBOARD_DIR,   # noqa: F401
+                    EXTENSION_DIR)
 from .speech import _tts_engine_voice                 # noqa: F401
 from .voice_api import VoiceApi
 from ..transcript import Transcript, search_sessions
@@ -784,6 +785,7 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
             "browser_headless": c.browser_headless,
             "browser_keep_logins": c.browser_keep_logins,
             "browser_connect_url": c.browser_connect_url,
+            "browser_use_mine": c.browser_use_mine,
             "browser_provider": c.browser_provider, "browser_model": c.browser_model,
             "path_rules": [dict(r) for r in c.path_rules],
             "github_clone_root": c.github_clone_root,
@@ -807,6 +809,8 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
                      "reduce_effects", "browser_headless", "browser_keep_logins",
                      "verify_edits", "auto_fix_tests"):
             setattr(c, key, bool(value))
+        elif key == "browser_use_mine":
+            c.browser_use_mine = bool(value)
         elif key == "browser_connect_url":
             # Turning this on hands the agent the user's live logged-in
             # browser, so the value is checked rather than stored as typed: a
@@ -2478,6 +2482,27 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
         save_config(self._cfg)
         return {"ok": True, "browser_provider": self._cfg.browser_provider,
                 "browser_model": self._cfg.browser_model}
+
+    def browser_extension_status(self):
+        """Is the extension connected, and where does the user install it from.
+
+        The path is returned every time rather than only when asked, because
+        the install sheet's whole job is to hand someone a folder to point
+        Chrome at, and a sheet that has to make a second call before it can
+        show the one thing it exists to show flickers.
+        """
+        from .. import browser_extension
+        st = browser_extension.status(self._cfg)
+        st["path"] = str(EXTENSION_DIR)
+        st["installed"] = EXTENSION_DIR.joinpath("manifest.json").is_file()
+        return st
+
+    def open_extension_folder(self):
+        """Reveal the extension folder in the OS file manager, so 'Load
+        unpacked' has somewhere to be pointed at without anyone typing a path."""
+        if not EXTENSION_DIR.is_dir():
+            return {"error": f"The extension folder is missing: {EXTENSION_DIR}"}
+        return self.open_path(str(EXTENSION_DIR))
 
     def browser_attach_check(self, url: str = ""):
         """Is a browser actually listening on that DevTools endpoint?

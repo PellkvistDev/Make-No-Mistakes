@@ -669,6 +669,67 @@ call is not a feature: reach for it when a line looks *unnecessary* — a magic
 constant, a workaround, a retry, an ordering that looks arbitrary, a guard that
 looks redundant.
 
+## Reaching the user's own browser means going in through the side
+
+`control_chrome` launches its own Chromium by default and that is unchanged: a
+throwaway profile, or the dedicated agent profile behind "Remember browser
+logins", and nothing it does can touch the browser the user is signed into.
+
+For driving the browser they *already have open*, there are two routes and only
+one of them is usable.
+
+**`browser_connect_url` (the DevTools port) cannot reach a running browser.**
+The port only opens at launch — there is no way to switch it on afterwards — so
+the honest description of that feature was always "quit your browser and reopen
+it with these flags", and current Chrome additionally refuses the port on the
+default profile directory. It is kept, behind an Advanced disclosure, because
+it gives real browser-level input events. It is not the way in.
+
+**The extension is.** It is already inside the browser: same profile, same
+logins, same tabs, no flags and no relaunch. So the direction of the connection
+flips — the app stops trying to reach into the browser, and the browser dials
+the app.
+
+- **WebSocket, not a fetch loop.** An MV3 service worker is killed after 30
+  seconds idle, and WebSocket activity is the documented thing that resets that
+  timer. A poll loop would have the worker dying underneath it every half
+  minute.
+- **The server is hand-rolled, and `Origin` is the entire security boundary.** A
+  WebSocket is not subject to CORS, so any page in any tab can open a socket to
+  `127.0.0.1` and start issuing commands. The browser sets `Origin` and page
+  JavaScript cannot forge it, so only `chrome-extension://` is accepted; the
+  socket is bound to loopback so nothing off the machine reaches it at all.
+  `tests/test_extension_bridge.py` drives a real client over a real socket,
+  including the RFC 6455 §1.3 worked example for the handshake.
+- **`stop()` joins the accept thread before closing.** Closing a listening
+  socket while another thread sits in `accept()` does *not* release the port —
+  the close waits on the blocked call, which never returns. Without the join a
+  stopped bridge holds its port for the life of the process, and the next one
+  silently walks down to the next port in the list. This was found by a test
+  that started and stopped eight bridges.
+- **The extension gets a Playwright-Page-shaped object, not a second set of
+  ops.** `ExtensionPage` implements the dozen calls `_op_*` actually makes, so
+  the snapshot, the stable refs, the region grouping, the error messages and the
+  Browser Agent's whole prompt are untouched. Teaching every op a second way to
+  work would have been two subtly different pages described to one model.
+- **The snapshot is GENERATED into the extension** (`scripts/gen_extension_page.py`).
+  MV3 forbids `unsafe-eval`, so an extension cannot run a JavaScript string it
+  was handed — the snapshot has to *be* code inside it, and a second hand-written
+  copy would drift from the one Playwright gets.
+- **Clicks are a full event sequence, and fills go through the native value
+  setter.** `el.click()` skips the pointer and mouse events frameworks actually
+  listen on, and `el.value = x` is ignored by React, which tracks its own
+  last-rendered value and concludes nothing changed. Both show up as "the page
+  did nothing".
+- **`is_attached` is true for both routes**, because everything keying off it
+  cares only whose browser this is. The Browser Agent gets
+  `BROWSER_ATTACHED_NOTE` either way.
+
+What the extension route gives up: input is dispatched as page events, so a site
+that checks `event.isTrusted` (bot detection on sign-in pages, mostly) will
+refuse it. The launched browser uses real browser-level input and remains the
+better tool there. Say so rather than letting it look broken.
+
 ## The agent's browser and the user's browser are two different things
 
 `control_chrome` launches its own Chromium — a throwaway profile, or the

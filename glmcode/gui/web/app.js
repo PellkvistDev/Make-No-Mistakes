@@ -3623,6 +3623,7 @@ function syncSettingsUI() {
   $("opt-browser-logins").setAttribute("aria-checked", !!settings.browser_keep_logins);
   // Not while it's being typed into -- rewriting the field under the cursor
   // is how a half-typed endpoint turns into a saved wrong one.
+  $("opt-browser-mine").setAttribute("aria-checked", !!settings.browser_use_mine);
   if (document.activeElement !== $("opt-browser-connect"))
     $("opt-browser-connect").value = settings.browser_connect_url || "";
   $("opt-browser-connect").classList.toggle("attached-on", !!settings.browser_connect_url);
@@ -3679,6 +3680,11 @@ function showSettingsTab(name) {
   // Re-apply toggle/segment state now the tab's controls are visible -- some
   // WebView2 builds don't "stick" styling applied while a subtree was hidden.
   syncSettingsUI();
+  // "Is the extension connected" changes while this panel is open, without
+  // anyone touching it -- they load it in another window, or quit the browser.
+  // Polling only while the tab is actually visible keeps that honest without
+  // running a timer for the life of the app.
+  if (name === "browser") startExtPolling(); else stopExtPolling();
   // The panes scroll now, not the sheet -- the sheet stopped scrolling when the
   // tabs moved into a rail beside it, so resetting the old element did nothing
   // and every tab opened at the previous one's scroll position.
@@ -3825,12 +3831,12 @@ $("opt-browser-model").addEventListener("change", async (e) => {
   toast(model ? `Browser agent will use ${model}.` : "Browser agent uses the chat's model.",
         "info", 3000);
 });
-$("settings-close").addEventListener("click", () => { $("settings-backdrop").hidden = true; });
+$("settings-close").addEventListener("click", () => { $("settings-backdrop").hidden = true; stopExtPolling(); });
 $("settings-backdrop").addEventListener("click", (e) => {
-  if (e.target === $("settings-backdrop")) $("settings-backdrop").hidden = true;
+  if (e.target === $("settings-backdrop")) { $("settings-backdrop").hidden = true; stopExtPolling(); }
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") $("settings-backdrop").hidden = true;
+  if (e.key === "Escape") { $("settings-backdrop").hidden = true; stopExtPolling(); }
 });
 
 document.querySelectorAll("#seg-mode button").forEach((b) =>
@@ -4394,6 +4400,93 @@ $("gh-foot-pull").addEventListener("click", async () => {
 });
 $("gh-foot-sync").addEventListener("click", async () => {
   if (await ghAction($("gh-foot-sync"), () => api().github_sync())) refreshGithubRepo();
+});
+
+// -- use my own browser (via the extension) ---------------------------- //
+// The state that matters is "is the extension connected", and it changes
+// without the user doing anything here -- they load it in another window, or
+// they quit their browser. So the panel polls while it is open rather than
+// showing a number from whenever Settings was last rendered.
+let extPollTimer = null;
+
+function renderExtStatus(st) {
+  const line = $("browser-ext-status");
+  const install = $("browser-ext-install");
+  if (!line) return;
+  if (st && st.connected) {
+    line.textContent = "Connected — the agent can drive your active tab.";
+    line.className = "row-sub ext-on";
+    install.textContent = "Reinstall";
+  } else if (st && st.enabled) {
+    line.textContent = st.port
+      ? "Not connected. Load the extension in the browser you want driven."
+      : "Couldn't open a local port for the extension to connect to.";
+    line.className = "row-sub ext-off";
+    install.textContent = "Install it";
+  } else {
+    line.textContent = "Off — the agent uses its own separate browser.";
+    line.className = "row-sub ext-off";
+    install.textContent = "Install it";
+  }
+  const live = $("ext-live-status");
+  if (live && !$("browser-ext-sheet").hidden) {
+    live.textContent = st && st.connected
+      ? "Connected. You can close this."
+      : "Waiting for the extension…";
+    live.className = st && st.connected ? "row-sub ext-on" : "row-sub";
+  }
+}
+
+async function refreshExtStatus() {
+  const st = await api().browser_extension_status();
+  if (st && st.path) $("ext-path").textContent = st.path;
+  renderExtStatus(st);
+  return st;
+}
+
+function startExtPolling() {
+  stopExtPolling();
+  refreshExtStatus();
+  extPollTimer = setInterval(refreshExtStatus, 2000);
+}
+function stopExtPolling() {
+  if (extPollTimer) clearInterval(extPollTimer);
+  extPollTimer = null;
+}
+
+$("opt-browser-mine").addEventListener("click", async () => {
+  const next = $("opt-browser-mine").getAttribute("aria-checked") !== "true";
+  const res = await api().set_setting("browser_use_mine", next);
+  if (res && res.error) return toast(res.error, "error", 5000);
+  settings = res;
+  $("opt-browser-mine").setAttribute("aria-checked", next);
+  const st = await refreshExtStatus();
+  // Turning it on with nothing installed is the common first move, and the
+  // sheet is the only thing that makes it work -- so offer it rather than
+  // leaving a switch that appears to do nothing.
+  if (next && st && !st.connected) openExtSheet();
+});
+
+function openExtSheet() {
+  $("browser-ext-sheet").hidden = false;
+  refreshExtStatus();
+}
+$("browser-ext-install").addEventListener("click", openExtSheet);
+$("ext-sheet-close").addEventListener("click", () => { $("browser-ext-sheet").hidden = true; });
+$("browser-ext-sheet").addEventListener("click", (e) => {
+  if (e.target === $("browser-ext-sheet")) $("browser-ext-sheet").hidden = true;
+});
+$("ext-copy-url").addEventListener("click", () => {
+  navigator.clipboard.writeText("chrome://extensions");
+  toast("Copied. Paste it in your browser's address bar.", "info", 3000);
+});
+$("ext-copy-path").addEventListener("click", () => {
+  navigator.clipboard.writeText($("ext-path").textContent.trim());
+  toast("Folder path copied.", "info", 3000);
+});
+$("ext-open-folder").addEventListener("click", async () => {
+  const res = await api().open_extension_folder();
+  if (res && res.error) toast(res.error, "error", 5000);
 });
 
 // -- attach to the user's own browser ---------------------------------- //

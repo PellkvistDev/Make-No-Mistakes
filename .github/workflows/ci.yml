@@ -58,6 +58,7 @@ jobs:
       # stale block is a real divergence, not a formatting nit -- and it
       # surfaces on a phone with the working copy on the other machine.
       - run: python scripts/gen_mobile_core.py --check
+      - run: python scripts/gen_extension_page.py --check
 
   # The UI layers, in a separate job because they need a browser. These are what
   # unit tests cannot reach: the phone's wiring (where a chat resume silently

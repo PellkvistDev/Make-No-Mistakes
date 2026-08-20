@@ -398,6 +398,10 @@ class Config:
     # endpoint, e.g. http://localhost:9222). "" = launch our own, which is
     # the default and the safe one -- attaching hands the agent their live
     # logged-in session.
+    # control_chrome: drive the browser the user already has open, through
+    # the extension. The one that needs no relaunch, so it is the one the
+    # UI offers; browser_connect_url stays for the DevTools-port route.
+    browser_use_mine: bool = False
     browser_connect_url: str = ""
     browser_provider: str = ""       # control_chrome: dedicated Browser Agent provider ("" = same as chat)
     browser_model: str = ""          # control_chrome: dedicated Browser Agent model ("" = same as chat)

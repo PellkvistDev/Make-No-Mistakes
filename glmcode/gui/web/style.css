@@ -1397,6 +1397,22 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
    what the agent can reach, so the field says so at a glance rather than
    looking like every other empty box. */
 .text-input.attached-on { border-color: rgba(245, 166, 35, 0.55); }
+
+/* The install sheet. Steps rather than prose: this is a thing someone does
+   once, with their browser open next to the window, and a paragraph they have
+   to re-read to find step three is the difference between doing it and giving
+   up. */
+#browser-ext-sheet { z-index: calc(var(--z-sheet) + 2); }
+.ext-steps { margin: 12px 0 4px; padding-left: 20px; line-height: 2; }
+.ext-steps li { margin-bottom: 6px; }
+.ext-path {
+  display: block; margin: 6px 0; padding: 8px 10px;
+  background: rgba(6, 9, 18, 0.5); border: 1px solid var(--stroke);
+  border-radius: var(--r-sm); word-break: break-all; user-select: text;
+}
+.btn-small { padding: 3px 9px; font-size: 12px; }
+.ext-on  { color: var(--good, #1f9d55); font-weight: 600; }
+.ext-off { color: var(--text-faint); }
 .attach-bad { color: var(--warn); }
 
 .sheet-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 14px; }

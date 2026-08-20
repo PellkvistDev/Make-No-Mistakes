@@ -2181,11 +2181,20 @@ class Agent:
         """The chat's persistent BrowserSession, created on first use. Kept on
         the coordinator so cookies/login/page survive across control_chrome
         calls; sub-agents share this exact instance."""
+        from . import browser_extension
         from .browser_session import BrowserSession
         sess = self.browser_session
         if sess is None or not sess.is_open:
+            bridge = browser_extension.bridge_if_connected(self.cfg)
             connect_url = (getattr(self.cfg, "browser_connect_url", "") or "").strip()
-            if connect_url:
+            if bridge is not None:
+                # The user's own browser, reached from the inside. Nothing to
+                # launch, nothing to relaunch, no flags: it is already open.
+                sess = BrowserSession(status=self.events.info, bridge=bridge)
+                self.events.info(
+                    "Browser: using your own browser (the tab you're looking "
+                    "at) -- it acts as you, in your logged-in session.")
+            elif connect_url:
                 # Attaching to the user's own running browser. headless and the
                 # saved-profile directory are meaningless here -- the window,
                 # its profile and its visibility are theirs -- so they are not

@@ -16,3 +16,8 @@ DEFAULT_BG = WEB_DIR / "bg-default.jpg"
 # of this app's own install directory (e.g. .../Theo/Make No Mistakes ->
 # .../Theo/whiteboard), created on first use rather than at import time.
 WHITEBOARD_DIR = Path(__file__).resolve().parents[3] / "whiteboard"
+
+# The unpacked browser extension the user loads into their own browser. A
+# sibling of the package rather than inside it: "Load unpacked" wants a plain
+# folder, and one buried in site-packages is a folder nobody can find.
+EXTENSION_DIR = Path(__file__).resolve().parents[2] / "extension"

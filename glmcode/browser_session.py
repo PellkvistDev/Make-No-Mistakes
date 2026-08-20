@@ -33,7 +33,9 @@ thing this must never do.
 from __future__ import annotations
 
 import queue
+import re
 import threading
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -131,7 +133,8 @@ class BrowserSession:
                  launch_factory: Callable | None = None,
                  max_elements: int = 200, user_data_dir: str | None = None,
                  connect_url: str | None = None,
-                 attach_factory: Callable | None = None):
+                 attach_factory: Callable | None = None,
+                 bridge=None, extension_factory: Callable | None = None):
         """launch_factory(headless, executable_path, viewport, user_data_dir)
         -> (teardown, page) is called ON THE DRIVER THREAD to produce a
         Playwright page; the default uses real Playwright. Tests inject a fake
@@ -144,16 +147,28 @@ class BrowserSession:
         browser); the user logs into chosen sites once and the agent reuses
         them. None (the default) keeps the fully throwaway profile.
 
-        connect_url, when set, changes the mode entirely: instead of launching
-        anything, attach to a browser the USER is already running, over the
-        DevTools protocol, and drive the tab they are looking at. headless and
-        user_data_dir have nothing to say in that case -- the window, its
-        profile and its visibility are theirs, not ours -- and are ignored.
+        bridge, when set, is the extension backend: an ExtensionBridge the
+        user's own browser has dialled into. Nothing is launched and nothing is
+        attached to -- the browser is already running with the extension inside
+        it -- so this is the mode that needs no relaunch, no flags and no
+        second profile. It wins over connect_url when both are set, because it
+        is the one that works without asking anything of the user.
 
-        attach_factory(connect_url, viewport) -> (teardown, page) is the
-        injectable seam for that path, separate from launch_factory because
-        connecting is not a kind of launching: it takes different inputs and,
-        crucially, its teardown must only disconnect."""
+        connect_url is the older way to reach the user's browser: attach over
+        the DevTools protocol to one that was STARTED with the port open. It
+        still works and is still tested, but it can only ever be used by
+        quitting the browser and reopening it, which is why the extension
+        exists.
+
+        headless and user_data_dir have nothing to say in either of those
+        cases -- the window, its profile and its visibility are the user's --
+        and are ignored.
+
+        attach_factory(connect_url, viewport) and extension_factory(bridge,
+        viewport), both -> (teardown, page), are the injectable seams for the
+        two. They are separate from launch_factory because neither is a kind of
+        launching: they take different inputs and, crucially, their teardown
+        must not close anything."""
         self.headless = headless
         self.viewport = viewport
         self.executable_path = executable_path
@@ -163,6 +178,8 @@ class BrowserSession:
         self.user_data_dir = user_data_dir
         self.connect_url = (connect_url or "").strip() or None
         self._attach_factory = attach_factory or _real_attach
+        self.bridge = bridge
+        self._extension_factory = extension_factory or _real_extension
 
         self._cmd_q: "queue.Queue" = queue.Queue()
         self._thread: threading.Thread | None = None
@@ -215,12 +232,22 @@ class BrowserSession:
 
     @property
     def is_attached(self) -> bool:
-        """Driving a browser the user started, rather than one we launched."""
-        return self.connect_url is not None
+        """Driving a browser the user started, rather than one we launched.
+
+        True for both ways of doing that -- through the extension, and over a
+        DevTools port -- because everything that keys off it cares only WHOSE
+        browser this is. The Browser Agent must be told it is acting as the
+        user either way.
+        """
+        return self.bridge is not None or self.connect_url is not None
 
     def _run(self) -> None:
         try:
-            if self.connect_url:
+            if self.bridge is not None:
+                self._teardown, self._page = self._extension_factory(
+                    self.bridge, self.viewport)
+                self._sync_viewport()
+            elif self.connect_url:
                 self._teardown, self._page = self._attach_factory(
                     self.connect_url, self.viewport)
                 self._sync_viewport()
@@ -693,6 +720,187 @@ def _real_launch(headless: bool, executable_path: str | None, viewport,
 
     return teardown, page
 
+
+# --------------------------------------------------------------------- #
+# Driving the browser the user already has open, through the extension.
+#
+# Everything above talks to a Playwright Page. Rather than teach every _op_*
+# a second way to do its job, the extension gets an object with the same
+# surface -- the ops cannot tell the difference, and the snapshot, the ref
+# tracking, the error messages and the Browser Agent's prompt all stay exactly
+# as they are.
+#
+# The surface is small because the ops only ever use a dozen calls, and the
+# element handle only needs six.
+
+
+class _ExtHandle:
+    """One element, addressed by its data-mnm-ref stamp.
+
+    Playwright hands back a live handle; this re-resolves the ref on every
+    call instead, which is the same guarantee _locate() was already after --
+    never act through a stale handle -- and it means nothing has to be kept
+    alive across the wire.
+    """
+
+    def __init__(self, page, ref: int):
+        self._page = page
+        self._ref = ref
+
+    def is_enabled(self) -> bool:
+        return bool(self._page._call("enabled", ref=self._ref))
+
+    def scroll_into_view_if_needed(self, timeout: int = 0) -> None:
+        pass    # the click action scrolls; there is nothing separate to do
+
+    def click(self, timeout: int = 0) -> None:
+        self._page._call("click", ref=self._ref)
+
+    def fill(self, text: str, timeout: int = 0) -> None:
+        self._page._call("fill", ref=self._ref, text=text, submit=False)
+
+    def press(self, key: str) -> None:
+        self._page._call("press", key=key)
+
+    def select_option(self, label=None, value=None) -> None:
+        self._page._call("select", ref=self._ref,
+                         text=label if label is not None else value)
+
+
+class _ExtMouse:
+    def __init__(self, page):
+        self._page = page
+
+    def click(self, x, y) -> None:
+        self._page._call("click_at", x=x, y=y)
+
+
+class _ExtKeyboard:
+    def __init__(self, page):
+        self._page = page
+
+    def press(self, key: str) -> None:
+        self._page._call("press", key=key)
+
+
+class ExtensionPage:
+    """A Playwright-Page-shaped view of the user's active tab."""
+
+    def __init__(self, bridge):
+        self._bridge = bridge
+        self._url = ""
+        self._title = ""
+        self.mouse = _ExtMouse(self)
+        self.keyboard = _ExtKeyboard(self)
+        self.viewport_size = None
+
+    def _call(self, command: str, **params):
+        from .extension_bridge import BridgeError
+        try:
+            return self._bridge.call(command, **params)
+        except BridgeError as e:
+            raise BrowserError(str(e))
+
+    # -- what the ops use --------------------------------------------- #
+
+    def _refresh(self) -> dict:
+        info = self._call("info") or {}
+        self._url = info.get("url") or self._url
+        self._title = info.get("title") or ""
+        w, h = info.get("width"), info.get("height")
+        if w and h:
+            self.viewport_size = {"width": int(w), "height": int(h)}
+        return info
+
+    @property
+    def url(self) -> str:
+        return self._url
+
+    def title(self) -> str:
+        return self._title
+
+    def goto(self, url: str, wait_until: str = "", timeout: int = 0) -> None:
+        self._call("navigate", url=url, timeout=45)
+        self._refresh()
+
+    def go_back(self, wait_until: str = "", timeout: int = 0) -> None:
+        self._call("back", timeout=45)
+        self._refresh()
+
+    def evaluate(self, js, arg=None):
+        """Only ever called with SNAPSHOT_JS.
+
+        MV3 forbids unsafe-eval, so the extension cannot run a script it was
+        handed -- it holds a GENERATED copy of exactly this function instead
+        (scripts/gen_extension_page.py). Anything else reaching here is a
+        caller assuming a general evaluate() that does not exist, and saying so
+        is better than silently snapshotting.
+        """
+        if "__mnmNextRef" not in str(js):
+            raise BrowserError(
+                "The extension backend can only run the page snapshot, not "
+                "arbitrary JavaScript (Chrome forbids extensions from "
+                "evaluating strings).")
+        self._refresh()
+        return self._call("snapshot")
+
+    def inner_text(self, selector: str) -> str:
+        self._refresh()
+        return self._call("text", max=200_000) or ""
+
+    def screenshot(self, path: str = ""):
+        import base64
+        data_url = self._call("screenshot", timeout=45) or ""
+        _, _, b64 = data_url.partition(",")
+        try:
+            png = base64.b64decode(b64)
+        except Exception:
+            raise BrowserError("The browser returned an unreadable screenshot.")
+        if path:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            Path(path).write_bytes(png)
+            return path
+        return png
+
+    def query_selector(self, selector: str):
+        ref = _ref_from_selector(selector)
+        if ref is None or not self._call("exists", ref=ref):
+            return None
+        return _ExtHandle(self, ref)
+
+    def wait_for_timeout(self, ms) -> None:
+        time.sleep(max(0.0, float(ms) / 1000.0))
+
+    def is_closed(self) -> bool:
+        return False
+
+
+def _ref_from_selector(selector: str):
+    """The ops address elements as [data-mnm-ref="N"]; pull N back out.
+
+    Kept to that one shape on purpose. A general selector would have to be
+    forwarded into the page and interpolated into a query, and there is no
+    reason to open that up when the only caller stamps the refs itself.
+    """
+    m = re.search(r'data-mnm-ref="(\d+)"', selector or "")
+    return int(m.group(1)) if m else None
+
+
+def _real_extension(bridge, viewport):
+    """Driver-thread 'launcher' for the extension backend.
+
+    There is nothing to launch: the browser is already running and the
+    extension is already in it. Teardown closes nothing at all -- it is the
+    user's browser, and the socket outlives any one session because other
+    chats use it too.
+    """
+    page = ExtensionPage(bridge)
+    page._refresh()          # fails loudly here if nothing is connected
+
+    def teardown():
+        pass
+
+    return teardown, page
 
 # --------------------------------------------------------------------- #
 # Attaching to a browser the user is already running.
