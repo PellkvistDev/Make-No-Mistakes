@@ -1412,6 +1412,7 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
 }
 .btn-small { padding: 3px 9px; font-size: 12px; margin-left: 6px; }
 .ext-browsers { display: flex; flex-wrap: wrap; gap: 7px; margin: 8px 0 2px; }
+.ext-why { display: block; margin: 6px 0 2px; opacity: 0.75; }
 
 /* Connected/not is the one thing someone is watching for while they click
    around in another window, so it gets a light of its own rather than a

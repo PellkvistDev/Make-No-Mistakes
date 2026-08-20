@@ -178,20 +178,38 @@ EDGE = {"name": "Microsoft Edge", "path": "/usr/bin/microsoft-edge"}
 TAB = {"url": "https://github.com/you/repo/pulls", "title": "Pull requests"}
 
 
-def test_it_offers_to_open_the_extensions_page_in_each_browser_you_have(desktop):
+def test_it_names_the_browsers_you_actually_have(desktop):
     """"Open chrome://extensions" assumes one browser and assumes it is Chrome.
     Someone who lives in Edge reads that and installs it in the wrong one, then
-    wonders why nothing connects."""
+    wonders why nothing connects. The button only brings that browser forward --
+    see test_the_button_does_not_claim_to_navigate."""
     _open_browser_tab(desktop, browser_extension_status=dict(
         EXT_WAITING, browsers=[CHROME, EDGE]))
     desktop.page.click("#browser-ext-install")
     desktop.page.wait_for_timeout(250)
     labels = desktop.page.eval_on_selector_all(
         "#ext-browsers button", "els => els.map(e => e.textContent)")
-    assert labels == ["Open in Google Chrome", "Open in Microsoft Edge"]
+    assert labels == ["Bring Google Chrome to the front",
+                      "Bring Microsoft Edge to the front"]
 
 
-def test_clicking_one_opens_that_browser(desktop):
+def test_the_address_to_paste_is_the_primary_step(desktop):
+    """Reported: the button "is just launching a fresh empty window". It was
+    passing chrome://extensions on the command line, which Chrome DROPS -- so
+    the browser opened with nothing. Nothing can open another program's
+    chrome:// page, so the paste is the step and the panel says why."""
+    _open_browser_tab(desktop, browser_extension_status=dict(
+        EXT_WAITING, browsers=[CHROME]))
+    desktop.page.click("#browser-ext-install")
+    desktop.page.wait_for_timeout(250)
+    assert "chrome://extensions" in desktop.page.inner_text("#ext-store-url")
+    assert desktop.page.eval_on_selector(
+        "#ext-copy-url", "e => e.classList.contains('btn-primary')")
+    # The copy uses a typographic apostrophe, so match on the stable half.
+    assert "open another program" in desktop.page.inner_text("#browser-ext-sheet")
+
+
+def test_clicking_one_brings_that_browser_forward(desktop):
     _open_browser_tab(desktop, browser_extension_status=dict(
         EXT_WAITING, browsers=[CHROME, EDGE]), open_extensions_page={"ok": True})
     desktop.page.click("#browser-ext-install")
@@ -202,12 +220,14 @@ def test_clicking_one_opens_that_browser(desktop):
     assert calls and calls[0]["args"][0] == "/usr/bin/microsoft-edge"
 
 
-def test_with_no_browser_found_it_falls_back_to_the_url(desktop):
+def test_with_no_browser_found_the_paste_step_still_stands(desktop):
+    """The address is the step that always works, so nothing depends on having
+    detected a browser."""
     _open_browser_tab(desktop, browser_extension_status=dict(EXT_WAITING, browsers=[]))
     desktop.page.click("#browser-ext-install")
     desktop.page.wait_for_timeout(250)
     assert desktop.page.eval_on_selector("#ext-browsers-none", "e => !e.hidden")
-    assert "chrome://extensions" in desktop.page.inner_text("#ext-browsers-none")
+    assert "chrome://extensions" in desktop.page.inner_text("#ext-store-url")
 
 
 def test_connected_but_switched_off_says_the_hard_part_is_done(desktop):

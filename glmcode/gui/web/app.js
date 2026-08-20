@@ -4479,11 +4479,17 @@ function renderExtSheet(st) {
   box.innerHTML = "";
   list.forEach((b, i) => {
     const btn = document.createElement("button");
-    btn.className = i === 0 ? "btn btn-primary btn-small" : "btn btn-small";
-    btn.textContent = "Open in " + b.name;
+    btn.className = "btn btn-small";
+    // Brings that browser to the front so the address can be pasted. It does
+    // NOT navigate: no program can open another program's chrome:// page, and
+    // passing the URL anyway got the browser to drop it and show an empty
+    // window -- which is what made this button look like the bug.
+    btn.textContent = "Bring " + b.name + " to the front";
     btn.addEventListener("click", async () => {
+      await navigator.clipboard.writeText("chrome://extensions");
       const res = await api().open_extensions_page(b.path);
-      if (res && res.error) toast(res.error, "error", 5000);
+      if (res && res.error) return toast(res.error, "error", 5000);
+      toast("Copied chrome://extensions — paste it in the address bar.", "info", 5000);
     });
     box.appendChild(btn);
   });

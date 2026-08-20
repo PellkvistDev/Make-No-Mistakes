@@ -546,11 +546,15 @@
           this app on <code>127.0.0.1</code>.</p>
 
         <ol class="ext-steps">
-          <li><b>Open the extensions page</b> in the browser you want the agent to drive.
+          <li><b>Paste this into the address bar</b> of the browser you want the agent to
+            drive, and press Enter:
+            <code id="ext-store-url" class="ext-path">chrome://extensions</code>
+            <button id="ext-copy-url" class="btn btn-primary btn-small">Copy it</button>
+            <span class="row-sub ext-why">A program can&rsquo;t open another program&rsquo;s
+              settings page — Chrome blocks that — so this one step is yours.</span>
             <div id="ext-browsers" class="ext-browsers"></div>
-            <span class="row-sub" id="ext-browsers-none" hidden>No Chromium browser found —
-              open <code>chrome://extensions</code> yourself.
-              <button id="ext-copy-url" class="btn btn-small">Copy that</button></span></li>
+            <span class="row-sub" id="ext-browsers-none" hidden>No Chromium browser found on
+              this machine.</span></li>
           <li>Turn on <b>Developer mode</b> — the switch in the top right of that page.</li>
           <li>Click <b>Load unpacked</b>, then paste this folder into the dialog:
             <code id="ext-path" class="ext-path">…</code>

@@ -768,6 +768,35 @@ about any of the causes:
   (`not_connected_hint()`), naming the port and what to check, because the
   feature looked broken rather than off.
 
+**The agent chooses a tab; it does not inherit one.** Driving "the active tab"
+silently meant whatever happened to be in front, which in someone's own browser
+is rarely what the goal is about — and it followed the user around as they
+switched tabs. `browser_tabs` / `browser_switch_tab` / `browser_new_tab` are
+added to the Browser Agent's schemas **only when `supports_tabs`**, since a
+launched browser holds the single page this app made it and three tools that
+always answer with the current page are noise in the longest prompt in the app.
+
+- **A selected tab is pinned in the extension** (`pinnedTabId`), so a long task
+  stays where it was put. Dropped when that tab closes.
+- **Switching brings the tab to the front.** The user should be able to see
+  where the agent is working, and a background tab throttles timers and
+  rendering in ways that make a page behave differently.
+- **The prompt makes a new tab the default move.** Taking over the tab someone
+  is reading is the thing that felt wrong, and "leave it as you found it" now
+  means their tabs, not the one the agent opened for itself.
+- **`supports_tabs` is answered from the backend, not the page.** The page only
+  exists after `start()`, and a property that said False until then would drop
+  the tab tools for anyone who asked in the wrong order.
+
+**Nothing can open another program's `chrome://` page.** Chrome refuses those
+URLs on the command line (they were a malware vector), a web page cannot link
+to them, and there is no API. Passing one anyway is *worse than doing nothing*:
+the browser drops the URL and opens an empty window — which is exactly what a
+button labelled "Open in Chrome" appeared to do, and it read as the whole
+feature misfiring. The address is copied for pasting instead, the panel says
+why, and the per-browser button only brings that browser to the front (with no
+argument, a running browser is focused rather than handed a blank window).
+
 What the extension route gives up: input is dispatched as page events, so a site
 that checks `event.isTrusted` (bot detection on sign-in pages, mostly) will
 refuse it. The launched browser uses real browser-level input and remains the

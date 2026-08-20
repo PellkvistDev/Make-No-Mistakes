@@ -29,6 +29,7 @@ from .prompts import (ATTEMPT_TASK, BROWSER_AGENT_SYSTEM, BROWSER_AGENT_TASK,
                       conversational_project_context, detect_check_command,
                       fresh_review_nudge, is_critic_approval, verify_nudge)
 from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
+                    BROWSER_TAB_SCHEMAS,
                     CHECK_WORKERS_TOOL, COMPACT_CONTEXT_TOOL,
                     CONTROL_CHROME_TOOL, CONVERSATIONAL_READONLY_SCHEMAS,
                     CONVERSATIONAL_SCHEMAS,
@@ -2301,6 +2302,11 @@ class Agent:
         # Restrict the sub-agent to ONLY the browser action tools, and give it
         # the specialized browser system prompt in place of the coding one.
         sub.tool_schemas = list(BROWSER_AGENT_SCHEMAS)
+        # Tabs only exist as a choice in a browser full of the user's own. A
+        # launched browser has the single page this app made it, so the same
+        # three tools there would always answer with the page it is already on.
+        if getattr(session, "supports_tabs", False):
+            sub.tool_schemas += list(BROWSER_TAB_SCHEMAS)
         system = BROWSER_AGENT_SYSTEM.format(goal=goal)
         if getattr(session, "is_attached", False):
             # Appended AFTER the format(), so the note is free to contain braces
@@ -2330,7 +2336,8 @@ class Agent:
 
     # Browser actions that change what's on screen -> push a live frame after.
     _BROWSER_STATE_CHANGING = {"browser_navigate", "browser_click", "browser_click_at",
-                               "browser_type", "browser_key"}
+                               "browser_type", "browser_key", "browser_switch_tab",
+                               "browser_new_tab"}
 
     def _browser_action(self, name: str, args: dict) -> str:
         """Dispatch a browser_* tool (only ever called inside a Browser Agent,
@@ -2352,6 +2359,12 @@ class Agent:
                                          bool(args.get("submit", False)))
             if name == "browser_key":
                 return session.press(args.get("key", ""))
+            if name == "browser_tabs":
+                return session.list_tabs()
+            if name == "browser_switch_tab":
+                return session.select_tab(args.get("id"))
+            if name == "browser_new_tab":
+                return session.open_tab(args.get("url", ""))
             if name == "browser_read":
                 return session.read_text()
             if name == "browser_wait":
