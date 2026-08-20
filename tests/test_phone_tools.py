@@ -596,3 +596,134 @@ def test_read_file_offers_the_same_arguments_as_the_desktop():
     phone = _schema("read_file")
     for name in desktop["parameters"]["properties"]:
         assert name in phone["parameters"]["properties"], name
+
+
+# --------------------------------------------------------------------- #
+# whole-repo scans
+#
+# grep and search_code read EVERY file in the repository, and every file is
+# its own HTTPS round trip. In series that is the difference between a search
+# and a stall -- a few hundred files at ~150ms each is minutes, on the device
+# with the least patience available to it.
+
+def _repo(n=40, hit_every=7):
+    return {f"src/f{i}.py": ("def f%d():\n    return %d  # NEEDLE\n" % (i, i)
+                             if i % hit_every == 0
+                             else "def f%d():\n    return %d\n" % (i, i))
+            for i in range(n)}
+
+
+@needs_node
+def test_a_scan_overlaps_its_reads():
+    """Ordered chunks, not one at a time. The count that matters is how many
+    round trips are outstanding at once, not how many are made."""
+    r = _node("""
+      const gh = fakeGh(%s);
+      let inflight = 0, peak = 0;
+      const get = gh.getFile;
+      gh.getFile = async (p) => {
+        inflight++; peak = Math.max(peak, inflight);
+        await new Promise((r) => setTimeout(r, 1));
+        inflight--;
+        return get(p);
+      };
+      const t = C.makeTools(gh, {});
+      await t.grep({ pattern: "nothing matches this" });
+      out(peak);
+    """ % __import__("json").dumps(_repo()))
+    assert r > 1, "reads are still serial"
+    assert r <= 8, r
+
+
+@needs_node
+def test_a_scan_does_not_open_every_file_at_once():
+    """A phone on cellular, and a rate limit shared with everything else this
+    chat does. Bounded, not unbounded."""
+    r = _node("""
+      const gh = fakeGh(%s);
+      let inflight = 0, peak = 0;
+      const get = gh.getFile;
+      gh.getFile = async (p) => {
+        inflight++; peak = Math.max(peak, inflight);
+        await new Promise((r) => setTimeout(r, 1));
+        inflight--; return get(p);
+      };
+      const t = C.makeTools(gh, {});
+      await t.search_code({ query: "return" });
+      out(peak);
+    """ % __import__("json").dumps(_repo(200)))
+    assert r <= 8, r
+
+
+@needs_node
+def test_grep_results_stay_in_tree_order():
+    """A race would give this up. Output that reorders itself between two runs
+    of the same search is output nobody can compare."""
+    r = _node("""
+      const gh = fakeGh(%s);
+      const get = gh.getFile;
+      // Answer out of order on purpose: later files come back first.
+      gh.getFile = async (p) => {
+        const n = parseInt(p.replace(/\\D+/g, ""), 10) || 0;
+        await new Promise((r) => setTimeout(r, (20 - (n %% 20))));
+        return get(p);
+      };
+      const t = C.makeTools(gh, {});
+      out(await t.grep({ pattern: "NEEDLE" }));
+    """ % __import__("json").dumps(_repo(24, 3)))
+    paths = [ln.split(":")[0] for ln in r.splitlines()]
+    nums = [int(p.replace("src/f", "").replace(".py", "")) for p in paths]
+    assert nums == sorted(nums), nums
+
+
+@needs_node
+def test_grep_stops_once_it_has_enough():
+    """The early stop has to actually stop. A race would keep going through
+    whatever had already been scheduled, which on a big repo is all of it."""
+    r = _node("""
+      const gh = fakeGh(%s);
+      let reads = 0;
+      const get = gh.getFile;
+      gh.getFile = async (p) => { reads++; return get(p); };
+      const t = C.makeTools(gh, {});
+      const text = await t.grep({ pattern: "NEEDLE" });
+      out({ reads, hits: text.split("\\n").length });
+    """ % __import__("json").dumps(_repo(1000, 1)))
+    assert r["hits"] == 100
+    assert r["reads"] < 200, r["reads"]      # not the whole thousand
+
+
+@needs_node
+def test_a_file_that_cannot_be_read_is_skipped_not_fatal():
+    """A submodule, a symlink, or a blob too large for the contents API."""
+    r = _node("""
+      const gh = fakeGh({ "a.py": "NEEDLE here\\n", "big.py": "x", "c.py": "NEEDLE too\\n" });
+      const get = gh.getFile;
+      gh.getFile = async (p) => {
+        if (p === "big.py") throw new Error("too large for the contents API");
+        return get(p);
+      };
+      const t = C.makeTools(gh, {});
+      out(await t.grep({ pattern: "NEEDLE" }));
+    """)
+    assert "a.py:1" in r and "c.py:1" in r
+
+
+@needs_node
+def test_both_scans_agree_on_what_the_repo_contains():
+    """The filter was inline and identical in each; two tools disagreeing
+    about which files exist is worse than either being wrong alone."""
+    r = _node("""
+      const gh = fakeGh({ "a.py": "alpha beta\\n", "logo.png": "binary-ish alpha\\n" });
+      const seen = [];
+      const get = gh.getFile;
+      gh.getFile = async (p) => { seen.push(p); return get(p); };
+      const t = C.makeTools(gh, {});
+      await t.grep({ pattern: "alpha" });
+      const afterGrep = seen.slice();
+      out({ afterGrep });
+    """)
+    assert "logo.png" not in r["afterGrep"]
+    assert "a.py" in r["afterGrep"]
+
+

@@ -1193,6 +1193,29 @@
     async function currentSha(path) {
       try { return (await gh.getFile(path)).sha; } catch { return undefined; }
     }
+    // Every file read is its own HTTPS round trip, and grep/search_code read
+    // the WHOLE repository. In series that is the difference between a search
+    // and a stall: a few hundred files at ~150ms each is minutes, on the
+    // device with the least patience available to it.
+    //
+    // Fetched in ordered CHUNKS rather than one unbounded race. The same
+    // number of requests either way -- so the GitHub rate limit is untouched
+    // -- but a race would give up two things that matter: results in tree
+    // order, and an early stop that actually stops early rather than after
+    // whatever had already been scheduled.
+    const SCAN_CHUNK = 8;
+    async function scanFiles(entries, visit) {
+      for (let i = 0; i < entries.length; i += SCAN_CHUNK) {
+        const slice = entries.slice(i, i + SCAN_CHUNK);
+        // A file that cannot be read is skipped, not fatal: a submodule, a
+        // symlink, or a blob too large for the contents API.
+        const files = await Promise.all(
+          slice.map((e) => load(e.path).catch(() => null)));
+        for (let j = 0; j < slice.length; j++) {
+          if (files[j] && visit(slice[j], files[j]) === false) return;
+        }
+      }
+    }
     function tokenize(s) {
       const out = [];
       for (const m of String(s).matchAll(/[A-Za-z0-9_]+/g)) {
@@ -1206,6 +1229,12 @@
     // How much of one file read_file will spend on a single call. The phone
     // has less context than the desktop, not more.
     const READ_BUDGET = 12000;
+    // What a whole-repo scan should even look at. Both callers had this pair
+    // of conditions inline and identical; a filter that drifts between grep
+    // and search_code is two tools disagreeing about what the repo contains.
+    async function scannable() {
+      return (await tree()).filter((e) => !BIN.test(e.path) && e.size <= 300000);
+    }
 
     const api = {
       async list_dir(a) {
@@ -1269,31 +1298,26 @@
       },
       async grep(a) {
         const rx = new RegExp(a.pattern, a.case_insensitive ? "i" : "");
-        const t = await tree();
         const hits = [];
-        for (const e of t) {
-          if (BIN.test(e.path) || e.size > 300000) continue;
-          let f; try { f = await load(e.path); } catch { continue; }
+        await scanFiles(await scannable(), (e, f) => {
           f.text.split("\n").forEach((l, i) => {
             if (hits.length < 100 && rx.test(l)) hits.push(`${e.path}:${i + 1}: ${l.trim().slice(0, 160)}`);
           });
-          if (hits.length >= 100) break;
-        }
+          return hits.length < 100;
+        });
         return hits.join("\n") || "(no matches)";
       },
       async search_code(a) {
         const q = new Set(tokenize(a.query || ""));
         if (!q.size) return "(empty query)";
-        const t = await tree();
         const scored = [];
-        for (const e of t) {
-          if (BIN.test(e.path) || e.size > 300000) continue;
-          let f; try { f = await load(e.path); } catch { continue; }
-          const toks = tokenize(f.text);
-          const set = new Set(toks);
+        // No early stop here: every file has to be scored before the best six
+        // are known. The chunking is the whole of the speed-up.
+        await scanFiles(await scannable(), (e, f) => {
+          const set = new Set(tokenize(f.text));
           let overlap = 0; for (const w of q) if (set.has(w)) overlap++;
           if (overlap) scored.push({ path: e.path, score: overlap / q.size, snippet: f.text.slice(0, 400) });
-        }
+        });
         scored.sort((x, y) => y.score - x.score);
         return scored.slice(0, 6).map((s) => `${s.path} (${s.score.toFixed(2)})\n${s.snippet}`).join("\n\n")
           || "(no matches)";
