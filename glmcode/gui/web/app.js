@@ -3623,7 +3623,7 @@ function syncSettingsUI() {
   $("opt-browser-logins").setAttribute("aria-checked", !!settings.browser_keep_logins);
   // Not while it's being typed into -- rewriting the field under the cursor
   // is how a half-typed endpoint turns into a saved wrong one.
-  $("opt-browser-mine").setAttribute("aria-checked", !!settings.browser_use_mine);
+  $("opt-browser-mine").setAttribute("aria-checked", settings.browser_own !== "off");
   if (document.activeElement !== $("opt-browser-connect"))
     $("opt-browser-connect").value = settings.browser_connect_url || "";
   $("opt-browser-connect").classList.toggle("attached-on", !!settings.browser_connect_url);
@@ -4426,21 +4426,16 @@ function renderExtStatus(st) {
   const connected = !!(st && st.connected);
   const on = !!(st && st.enabled);
 
-  if (connected && on) {
-    line.textContent = "Connected — working in your browser.";
-    line.className = "row-sub ext-on";
-  } else if (connected) {
-    // The interesting case, and the one that used to look like a dead end:
-    // the hard part is DONE and only the switch above is left.
-    line.textContent = "Extension is connected. Turn the switch above on to use it.";
-    line.className = "row-sub ext-on";
-  } else if (on) {
-    line.textContent = st && st.port
-      ? "Set up, but your browser isn't connected right now."
-      : "Couldn't open a local port for the extension to connect to.";
-    line.className = "row-sub ext-off";
-  } else {
+  if (!on) {
     line.textContent = "Off — the agent uses its own separate browser.";
+    line.className = "row-sub ext-off";
+  } else if (connected) {
+    line.textContent = "Connected — I'll work in your tabs.";
+    line.className = "row-sub ext-on";
+  } else {
+    line.textContent = st && st.port
+      ? "Install the extension and I'll work in your tabs instead."
+      : "Couldn't open a local port for the extension to connect to.";
     line.className = "row-sub ext-off";
   }
   install.textContent = connected ? "Set up again" : "Set it up";
@@ -4467,8 +4462,7 @@ function renderExtSheet(st) {
 
   // The last step only appears once the hard part is done, so the sheet never
   // offers a switch that cannot work yet.
-  $("ext-finish").hidden = !(connected && !st.enabled);
-  if (connected && st.enabled) $("ext-sheet-close").textContent = "Done";
+  $("ext-finish").hidden = !connected;
 
   const box = $("ext-browsers");
   const none = $("ext-browsers-none");
@@ -4513,7 +4507,7 @@ function stopExtPolling() {
 }
 
 async function setUseMine(next) {
-  const res = await api().set_setting("browser_use_mine", next);
+  const res = await api().set_setting("browser_own", next ? "auto" : "off");
   if (res && res.error) { toast(res.error, "error", 5000); return null; }
   settings = res;
   $("opt-browser-mine").setAttribute("aria-checked", next);
@@ -4523,20 +4517,12 @@ async function setUseMine(next) {
 $("opt-browser-mine").addEventListener("click", async () => {
   const next = $("opt-browser-mine").getAttribute("aria-checked") !== "true";
   const st = await setUseMine(next);
-  // Turning it on with nothing connected is the common first move, and the
-  // sheet is the only thing that makes it work -- so open it rather than
-  // leaving a switch that appears to do nothing.
+  // Switched on with nothing connected: the extension is the only thing that
+  // makes it work, so offer the instructions rather than leaving a switch that
+  // appears to do nothing.
   if (next && st && !st.connected) openExtSheet();
 });
 
-// The last step of the sheet: the extension is connected, so the only thing
-// left is the switch. Doing it here means nobody finishes the install and then
-// has to find the control they were sent away from.
-$("ext-enable-now").addEventListener("click", async () => {
-  await setUseMine(true);
-  toast("Using your own browser now.", "info", 3000);
-  $("browser-ext-sheet").hidden = true;
-});
 
 function openExtSheet() {
   $("browser-ext-sheet").hidden = false;

@@ -15,7 +15,8 @@ By hand, if you prefer:
 1. Open `chrome://extensions` in the browser you want the agent to drive.
 2. Turn on **Developer mode** (top right).
 3. **Load unpacked** → choose this folder.
-4. Turn on Settings → Browser → **Use my own browser**.
+That is all. There is no switch to find afterwards — the app uses your browser
+whenever the extension is connected.
 
 Chrome, Edge, Brave, Vivaldi, Arc and anything else Chromium-based all work.
 

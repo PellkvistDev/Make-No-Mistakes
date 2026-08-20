@@ -371,7 +371,7 @@ def test_the_agent_attaches_when_configured(monkeypatch):
     ag.cfg.browser_connect_url = "http://localhost:9222"
     ag.cfg.browser_headless = True
     ag.cfg.browser_keep_logins = True
-    ag.events = types.SimpleNamespace(info=lambda m: None)
+    ag.events = types.SimpleNamespace(info=lambda m: None, warn=lambda m: None)
 
     ag._ensure_browser_session()
     assert built["connect_url"] == "http://localhost:9222"
@@ -399,7 +399,7 @@ def test_the_agent_launches_when_not_configured(monkeypatch):
     ag.browser_session = None
     ag.cfg = Config()
     ag.cfg.browser_headless = True
-    ag.events = types.SimpleNamespace(info=lambda m: None)
+    ag.events = types.SimpleNamespace(info=lambda m: None, warn=lambda m: None)
 
     ag._ensure_browser_session()
     assert built.get("connect_url") is None
@@ -419,3 +419,33 @@ def test_the_browser_agent_is_told_whose_browser_it_is():
         assert word.lower() in system.lower(), word
     # And it survives .format() being applied to the prompt it is appended to.
     assert "{" not in BROWSER_ATTACHED_NOTE
+
+
+def test_the_devtools_route_is_not_nagged_about_the_extension(monkeypatch):
+    """Someone who deliberately configured the DevTools port has not asked
+    about the extension, and telling them their extension is missing on every
+    browser action would be noise about a feature they chose not to use."""
+    import glmcode.agent as agent_mod
+    from glmcode.config import Config
+
+    warnings = []
+
+    class FakeSession:
+        def __init__(self, **kw):
+            self.is_open = True
+
+        def start(self):
+            pass
+
+    fake_mod = types.ModuleType("glmcode.browser_session")
+    fake_mod.BrowserSession = FakeSession
+    monkeypatch.setitem(sys.modules, "glmcode.browser_session", fake_mod)
+
+    ag = agent_mod.Agent.__new__(agent_mod.Agent)
+    ag.browser_session = None
+    ag.cfg = Config()
+    ag.cfg.browser_connect_url = "http://localhost:9222"
+    ag.events = types.SimpleNamespace(info=lambda m: None,
+                                      warn=lambda m: warnings.append(m))
+    ag._ensure_browser_session()
+    assert warnings == []

@@ -2188,11 +2188,12 @@ class Agent:
         if sess is None or not sess.is_open:
             bridge = browser_extension.bridge_if_connected(self.cfg)
             connect_url = (getattr(self.cfg, "browser_connect_url", "") or "").strip()
-            if bridge is None and browser_extension.enabled(self.cfg):
-                # Asked for their own browser and it isn't reachable. Falling
-                # through in silence is what put a blank second Chrome on
-                # screen and left the user watching the wrong window: the
-                # feature looked broken because nothing said it was off.
+            if bridge is None and not connect_url and browser_extension.enabled(self.cfg):
+                # Their own browser is the default and it isn't reachable.
+                # Falling through in silence is what put a blank second Chrome
+                # on screen and left the user watching the wrong window.
+                # Skipped when connect_url is set: someone who deliberately
+                # configured the DevTools route has not asked about this one.
                 self.events.warn(browser_extension.not_connected_hint())
             if bridge is not None:
                 # The user's own browser, reached from the inside. Nothing to

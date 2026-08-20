@@ -768,25 +768,47 @@ about any of the causes:
   (`not_connected_hint()`), naming the port and what to check, because the
   feature looked broken rather than off.
 
-**The agent chooses a tab; it does not inherit one.** Driving "the active tab"
-silently meant whatever happened to be in front, which in someone's own browser
-is rarely what the goal is about — and it followed the user around as they
-switched tabs. `browser_tabs` / `browser_switch_tab` / `browser_new_tab` are
-added to the Browser Agent's schemas **only when `supports_tabs`**, since a
-launched browser holds the single page this app made it and three tools that
-always answer with the current page are noise in the longest prompt in the app.
+**The whole feature is: open some tabs, open the app, ask for something, and it
+works.** Anything the user has to do beyond installing the extension once is a
+bug in this feature, and it has had two.
 
+**There is no second opt-in.** `browser_own` defaults to `"auto"`, meaning the
+extension is used whenever it is connected. Loading an unpacked extension into
+your own browser is already a deliberate, several-step act — requiring a switch
+afterwards meant people finished the hard part and found nothing worked. It is
+a NEW config field rather than a flipped default on the old one, because the
+old one defaulted to `False` and a persisted `False` cannot be told apart from
+a choice. `"off"` is the way out, and it closes the port.
+
+The cost is that the port is open by default. That is the price of the
+extension ever being able to reach anything on first install, and it is
+loopback-bound and `Origin`-gated (above).
+
+**The agent chooses a tab; it does not inherit one.** Driving "the active tab"
+silently meant whatever happened to be in front, and it followed the user
+around as they switched tabs. `browser_tabs` / `browser_switch_tab` /
+`browser_new_tab` are added to the Browser Agent's schemas **only when
+`supports_tabs`**, since a launched browser holds the single page this app made
+it and three tools that always answer with the current page are noise in the
+longest prompt in the app.
+
+- **Their open tabs are the workspace, and the prompt says so.** A first
+  version told the model to *prefer a new tab* — reasoning about not hijacking
+  the page someone is reading — and that fights the actual use case head on:
+  "do something in those tabs" is the normal request. The rule is now: list the
+  tabs, work in the one the goal is about, and open a new tab only when the
+  goal needs a page that is not open yet.
 - **A selected tab is pinned in the extension** (`pinnedTabId`), so a long task
   stays where it was put. Dropped when that tab closes.
 - **Switching brings the tab to the front.** The user should be able to see
   where the agent is working, and a background tab throttles timers and
   rendering in ways that make a page behave differently.
-- **The prompt makes a new tab the default move.** Taking over the tab someone
-  is reading is the thing that felt wrong, and "leave it as you found it" now
-  means their tabs, not the one the agent opened for itself.
 - **`supports_tabs` is answered from the backend, not the page.** The page only
   exists after `start()`, and a property that said False until then would drop
   the tab tools for anyone who asked in the wrong order.
+- **The fallback warning is skipped when `browser_connect_url` is set.**
+  Someone who deliberately configured the DevTools route has not asked about
+  the extension.
 
 **Nothing can open another program's `chrome://` page.** Chrome refuses those
 URLs on the command line (they were a malware vector), a web page cannot link

@@ -796,7 +796,7 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
             "browser_headless": c.browser_headless,
             "browser_keep_logins": c.browser_keep_logins,
             "browser_connect_url": c.browser_connect_url,
-            "browser_use_mine": c.browser_use_mine,
+            "browser_own": c.browser_own,
             "browser_provider": c.browser_provider, "browser_model": c.browser_model,
             "path_rules": [dict(r) for r in c.path_rules],
             "github_clone_root": c.github_clone_root,
@@ -820,8 +820,8 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
                      "reduce_effects", "browser_headless", "browser_keep_logins",
                      "verify_edits", "auto_fix_tests"):
             setattr(c, key, bool(value))
-        elif key == "browser_use_mine":
-            c.browser_use_mine = bool(value)
+        elif key == "browser_own":
+            c.browser_own = "auto" if str(value) in ("auto", "True", "true") or value is True else "off"
         elif key == "browser_connect_url":
             # Turning this on hands the agent the user's live logged-in
             # browser, so the value is checked rather than stored as typed: a

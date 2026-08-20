@@ -510,14 +510,14 @@
 
       <h3 style="margin-top:22px">Use my own browser instead</h3>
       <p class="row-sub">Everything above is a browser this app launches for the agent, separate
-        from yours. Turn this on instead and it works in the tab you are looking at, in your own
-        browser, with you already signed in — nothing to relaunch.
+        from yours. Install the extension once and it works in <em>your</em> browser instead — it
+        sees your open tabs, picks the one you meant, and you are already signed in.
         <strong>It then acts as you</strong>: every site you are logged into is reachable, and
-        anything it does there is real.</p>
-      <div class="row"><div class="row-text"><label for="opt-browser-mine">Use my own browser</label>
-        <span class="row-sub">Needs the extension below. While it is on, the agent drives your
-          active tab; the extension&rsquo;s toolbar button pauses it at any time.</span></div>
-        <button id="opt-browser-mine" class="switch" role="switch" aria-checked="false"><span></span></button></div>
+        anything it does there is real. Nothing else to switch on.</p>
+      <div class="row"><div class="row-text"><label for="opt-browser-mine">Let it use my browser</label>
+        <span class="row-sub">On whenever the extension is connected. The extension&rsquo;s toolbar
+          button pauses it for a moment; this turns it off for good.</span></div>
+        <button id="opt-browser-mine" class="switch" role="switch" aria-checked="true"><span></span></button></div>
       <div class="row" id="browser-ext-row"><div class="row-text"><label>Extension</label>
         <span id="browser-ext-status" class="row-sub">Checking…</span>
         <span id="browser-ext-tab" class="row-sub ext-tab" hidden></span></div>
@@ -568,11 +568,9 @@
         </div>
         <p id="ext-live-tab" class="row-sub" hidden></p>
 
-        <label class="ext-finish" id="ext-finish" hidden>
-          <button id="ext-enable-now" class="btn btn-primary">Use my own browser from now on</button>
-          <span class="row-sub">You can turn this off any time, and the extension&rsquo;s toolbar
-            button pauses it without turning anything off.</span>
-        </label>
+        <p class="ext-finish row-sub" id="ext-finish" hidden>That is everything. Just ask —
+          &ldquo;check the failing test in the tab I have open&rdquo; — and it will look at your
+          tabs and work in the right one. The extension&rsquo;s toolbar button pauses it any time.</p>
 
         <div class="sheet-actions"><button id="ext-sheet-close" class="btn">Done</button></div>
       </div>

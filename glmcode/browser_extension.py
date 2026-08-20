@@ -20,7 +20,14 @@ _listeners: list = []
 
 
 def enabled(cfg) -> bool:
-    return bool(getattr(cfg, "browser_use_mine", False))
+    """Whether the user's own browser may be used at all.
+
+    On unless they turned it off. The extension being installed IS the opt-in:
+    loading an unpacked extension into your own browser is a deliberate,
+    several-step act, and requiring a switch afterwards meant people finished
+    the hard part and then found nothing worked.
+    """
+    return str(getattr(cfg, "browser_own", "auto") or "auto") != "off"
 
 
 def bridge(start: bool = True) -> ExtensionBridge | None:

@@ -259,7 +259,7 @@ def test_the_port_is_opened_at_boot_not_when_settings_is_first_looked_at():
     from glmcode.gui import app as gui_app
 
     cfg = Config()
-    cfg.browser_use_mine = True
+    cfg.browser_own = "auto"
     api = gui_app.Api.__new__(gui_app.Api)
     api._cfg = cfg
     assert bx.bridge(start=False) is None          # nothing listening yet
@@ -269,9 +269,11 @@ def test_the_port_is_opened_at_boot_not_when_settings_is_first_looked_at():
     assert bx.bridge(start=False).port
 
 
-def test_boot_opens_nothing_when_the_setting_is_off():
-    """Someone who never turns this on never has a port open."""
+def test_boot_opens_nothing_when_it_has_been_turned_off():
+    """The port is open by default, because it has to be for the extension to
+    ever reach anything -- but turning the feature off closes it."""
     cfg = Config()
+    cfg.browser_own = "off"
     bx.bridge(start=bx.enabled(cfg))
     assert bx.bridge(start=False) is None
 
@@ -299,7 +301,7 @@ def test_falling_back_to_a_launched_browser_says_so_out_loud():
         ag = agent_mod.Agent.__new__(agent_mod.Agent)
         ag.browser_session = None
         ag.cfg = Config()
-        ag.cfg.browser_use_mine = True          # on, but nothing connected
+        # on by default now -- nothing connected is the interesting half
         ag.events = types.SimpleNamespace(info=lambda m: None,
                                           warn=lambda m: warnings.append(m))
         ag._ensure_browser_session()
@@ -314,7 +316,7 @@ def test_falling_back_to_a_launched_browser_says_so_out_loud():
     assert built.get("connect_url") is None and "headless" in built
 
 
-def test_no_warning_when_the_user_never_asked_for_their_own_browser():
+def test_no_warning_when_the_user_turned_their_own_browser_off():
     import glmcode.agent as agent_mod
 
     warnings = []
@@ -334,6 +336,7 @@ def test_no_warning_when_the_user_never_asked_for_their_own_browser():
         ag = agent_mod.Agent.__new__(agent_mod.Agent)
         ag.browser_session = None
         ag.cfg = Config()
+        ag.cfg.browser_own = "off"
         ag.events = types.SimpleNamespace(info=lambda m: None,
                                           warn=lambda m: warnings.append(m))
         ag._ensure_browser_session()
@@ -345,16 +348,33 @@ def test_no_warning_when_the_user_never_asked_for_their_own_browser():
 # --------------------------------------------------------------------- #
 # Finding the browsers, and letting someone verify before committing
 
-def test_the_panel_can_listen_before_the_switch_is_on():
-    """The install sheet used to say "Waiting for the extension..." forever for
-    anyone who had not flipped the switch first -- there was nothing to wait
-    on, because the port only opened once the feature was already enabled.
-    Verifying the install BEFORE handing over a logged-in browser is the right
-    order."""
+def test_the_panel_can_listen_even_when_it_is_switched_off():
+    """Someone who turned this off should still be able to open the panel, see
+    the extension connect, and decide to turn it back on -- verifying before
+    committing is the right order for a feature that hands over a logged-in
+    browser."""
     cfg = Config()
+    cfg.browser_own = "off"
     assert bx.status(cfg)["port"] is None            # off, and nothing opened
     st = bx.status(cfg, listen=True)
     assert st["port"] and st["enabled"] is False
+
+
+def test_it_is_on_unless_it_was_turned_off():
+    """The extension being installed IS the opt-in. Loading an unpacked
+    extension into your own browser is a deliberate, several-step act, and
+    asking for a switch afterwards meant people finished the hard part and then
+    found nothing worked."""
+    assert bx.enabled(Config()) is True
+    off = Config()
+    off.browser_own = "off"
+    assert bx.enabled(off) is False
+
+
+def test_a_config_without_the_field_at_all_is_on():
+    """Old configs, and anything constructing a stand-in cfg."""
+    import types as t
+    assert bx.enabled(t.SimpleNamespace()) is True
 
 
 def test_browser_detection_returns_names_and_paths():
@@ -442,10 +462,15 @@ def test_tab_tools_are_offered_only_for_the_users_own_browser(wired):
                           ).supports_tabs is False
 
 
-def test_the_prompt_tells_it_to_look_first_and_prefer_a_new_tab():
+def test_the_prompt_sends_it_to_the_tabs_the_user_already_has_open():
+    """The whole point: "I have some tabs open, tell it to do something in
+    those tabs, and it should just work." An earlier version told the model to
+    PREFER a new tab, which fights exactly that."""
     from glmcode.prompts import BROWSER_ATTACHED_NOTE as note
-    assert "browser_tabs first" in note
-    assert "browser_new_tab is the default move" in note
+    assert "browser_tabs first, always" in note
+    assert "work in that tab" in note
+    assert "browser_new_tab) when the goal needs a page" in note   # the other case
+    assert "default move" not in note
 
 
 def test_the_tab_tools_are_wired_end_to_end():

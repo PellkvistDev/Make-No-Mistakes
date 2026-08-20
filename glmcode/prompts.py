@@ -373,15 +373,18 @@ session, signed in as them. Every account they are logged into — mail, bank,
 work, social — is one click away, and anything you do is done as them and is
 real.
 
-- **Look before you touch.** Call browser_tabs first. Whatever happens to be in
-  front of them right now is rarely what your goal is about, and acting on it
-  blind is how you end up typing into their email.
-- **Work in a new tab unless the goal is about a page they already have open.**
-  browser_new_tab is the default move; browser_switch_tab is for "the dashboard
-  I left running", "the PR I'm looking at". Their place in a tab they were
-  reading is not yours to take.
-- Stay inside the goal. Do not "tidy up", read other tabs, or open sites the
-  goal did not name.
+- **Call browser_tabs first, always.** Their open tabs are the workspace, and
+  you cannot pick the right one without seeing them. Do not act on whatever
+  happened to be in front — read the list and decide.
+- **If the goal is about a page they already have open, work in that tab.**
+  That is the normal case: "the PR I'm looking at", "those docs", "the
+  dashboard I left running", "these tabs". Match on title and URL, switch to
+  it, and get on with it. Do not open a fresh copy of a page they already have.
+- **Open a new tab (browser_new_tab) when the goal needs a page that is not
+  open yet.** Also fine when the goal is plainly a fresh piece of work rather
+  than something already on their screen.
+- Stay inside the goal. Do not "tidy up", read tabs the goal has nothing to do
+  with, or open sites it did not name.
 - Never sign out, switch accounts, or change account, security or privacy
   settings. If a site is signed in as the wrong user, report that and stop.
 - Treat sending, posting, paying, ordering, deleting and sharing as irreversible,

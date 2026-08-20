@@ -3174,9 +3174,9 @@ BROWSER_TAB_SCHEMAS = [
     _schema(
         "browser_tabs",
         "List the tabs open in the user's browser, with an id, title and URL for each, "
-        "and which one you are currently driving. Call this FIRST when you are in "
-        "someone's own browser: what is in front of them right now is rarely what your "
-        "goal is about.",
+        "and which one you are currently driving. Call this FIRST, always: their open "
+        "tabs are the workspace the goal is usually about, and you cannot pick the "
+        "right one without seeing them.",
         {},
         [],
     ),
@@ -3191,9 +3191,9 @@ BROWSER_TAB_SCHEMAS = [
     ),
     _schema(
         "browser_new_tab",
-        "Open a NEW tab and work there. Prefer this over taking over a tab the user is "
-        "reading -- it is their browser, and their place in it is not yours to lose. "
-        "Returns a snapshot of the new tab.",
+        "Open a NEW tab and work there. For when the goal needs a page that is not open "
+        "yet -- if it is about something they already have open, browser_switch_tab to "
+        "that instead of opening a second copy of it. Returns a snapshot of the new tab.",
         {"url": {"type": "string", "description": "URL to open (optional; blank opens a new tab page)"}},
         [],
     ),

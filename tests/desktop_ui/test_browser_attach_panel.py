@@ -15,10 +15,11 @@ is kept for the real input events it gives, not offered as the way in.
 from .conftest import DEFAULT_SETTINGS
 
 
-EXT_OFF = {"enabled": False, "connected": False, "port": None,
+EXT_OFF = {"enabled": True, "connected": False, "port": 8765,
            "path": "/home/you/GLMCode/extension", "installed": True}
-EXT_ON = dict(EXT_OFF, enabled=True, connected=True, port=8765)
-EXT_WAITING = dict(EXT_OFF, enabled=True, connected=False, port=8765)
+EXT_ON = dict(EXT_OFF, connected=True)
+EXT_DISABLED = dict(EXT_OFF, enabled=False, port=None)
+EXT_WAITING = dict(EXT_OFF)
 
 
 def _open_browser_tab(desktop, settings=None, **replies):
@@ -114,25 +115,33 @@ def test_check_says_so_when_nothing_is_there(desktop):
 # --------------------------------------------------------------------- #
 # The extension: the path that actually works
 
-def test_off_by_default_and_says_which_browser_is_being_used(desktop):
+def test_it_is_on_by_default(desktop):
+    """Installing an unpacked extension into your own browser is already a
+    deliberate act. Asking for a second opt-in afterwards is how someone ends
+    up with everything set up and nothing working."""
     _open_browser_tab(desktop)
     assert desktop.page.eval_on_selector(
-        "#opt-browser-mine", "e => e.getAttribute('aria-checked')") == "false"
+        "#opt-browser-mine", "e => e.getAttribute('aria-checked')") == "true"
+
+
+def test_switched_off_says_which_browser_is_being_used(desktop):
+    _open_browser_tab(desktop, {"browser_own": "off"},
+                      browser_extension_status=EXT_DISABLED)
+    desktop.page.wait_for_timeout(250)
     assert "its own separate browser" in desktop.page.inner_text("#browser-ext-status")
 
 
 def test_connected_says_so_plainly(desktop):
-    _open_browser_tab(desktop, {"browser_use_mine": True},
-                      browser_extension_status=EXT_ON)
+    _open_browser_tab(desktop, browser_extension_status=EXT_ON)
     desktop.page.wait_for_timeout(250)
-    assert "Connected" in desktop.page.inner_text("#browser-ext-status")
+    assert "work in your tabs" in desktop.page.inner_text("#browser-ext-status")
 
 
-def test_turning_it_on_with_nothing_installed_opens_the_instructions(desktop):
-    """A switch that appears to do nothing is how this feature gets abandoned
-    thirty seconds in. Turning it on with no extension connected is the common
-    first move, and the sheet is the only thing that makes it work."""
-    _open_browser_tab(desktop, set_setting=dict(DEFAULT_SETTINGS, browser_use_mine=True),
+def test_switching_it_back_on_offers_the_instructions(desktop):
+    """A switch that appears to do nothing is how this gets abandoned thirty
+    seconds in -- the extension is the only thing that makes it work."""
+    _open_browser_tab(desktop, {"browser_own": "off"},
+                      set_setting=dict(DEFAULT_SETTINGS, browser_own="auto"),
                       browser_extension_status=EXT_WAITING)
     desktop.page.click("#opt-browser-mine")
     desktop.page.wait_for_timeout(350)
@@ -230,31 +239,26 @@ def test_with_no_browser_found_the_paste_step_still_stands(desktop):
     assert "chrome://extensions" in desktop.page.inner_text("#ext-store-url")
 
 
-def test_connected_but_switched_off_says_the_hard_part_is_done(desktop):
-    """This is the state someone lands in after installing, and it used to read
-    as a dead end. Only the switch above is left."""
+def test_connecting_is_the_whole_of_the_setup(desktop):
+    """There is no second step. Installing the extension is what turns this on,
+    which is the entire point of the change."""
     _open_browser_tab(desktop, browser_extension_status=dict(
-        EXT_OFF, connected=True, port=8765, browsers=[CHROME]))
+        EXT_ON, browsers=[CHROME]))
     desktop.page.wait_for_timeout(250)
     said = desktop.page.inner_text("#browser-ext-status")
-    assert "connected" in said.lower() and "switch above" in said
+    assert "work in your tabs" in said
+    assert "switch" not in said.lower()
 
 
-def test_the_sheet_finishes_the_job_itself(desktop):
-    """Nobody should have to close the instructions and then hunt for the
-    control they were sent away from."""
-    _open_browser_tab(desktop,
-                      browser_extension_status=dict(EXT_OFF, connected=True,
-                                                    port=8765, browsers=[CHROME]),
-                      set_setting=dict(DEFAULT_SETTINGS, browser_use_mine=True))
+def test_the_sheet_says_you_are_done_rather_than_asking_for_one_more_thing(desktop):
+    """Connecting IS the setup now. The sheet's last line tells you to just ask
+    for something, not to go and find a switch."""
+    _open_browser_tab(desktop, browser_extension_status=dict(EXT_ON, browsers=[CHROME]))
     desktop.page.click("#browser-ext-install")
     desktop.page.wait_for_timeout(250)
     assert desktop.page.eval_on_selector("#ext-finish", "e => !e.hidden")
-    desktop.page.click("#ext-enable-now")
-    desktop.page.wait_for_timeout(300)
-    calls = desktop.calls("set_setting")
-    assert calls[-1]["args"][:2] == ["browser_use_mine", True]
-    assert desktop.page.eval_on_selector("#browser-ext-sheet", "e => e.hidden")
+    assert "That is everything" in desktop.page.inner_text("#ext-finish")
+    assert desktop.calls("set_setting") == []
 
 
 def test_the_finish_button_stays_hidden_until_it_can_work(desktop):
@@ -267,7 +271,7 @@ def test_the_finish_button_stays_hidden_until_it_can_work(desktop):
 def test_it_names_the_tab_it_would_act_on(desktop):
     """"My own browser" is otherwise a leap of faith taken at the moment the
     agent starts clicking things."""
-    _open_browser_tab(desktop, {"browser_use_mine": True},
+    _open_browser_tab(desktop,
                       browser_extension_status=dict(EXT_ON, tab=TAB, browsers=[CHROME]))
     desktop.page.wait_for_timeout(250)
     said = desktop.page.inner_text("#browser-ext-tab")

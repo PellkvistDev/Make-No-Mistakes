@@ -116,7 +116,7 @@ DEFAULT_SETTINGS = {
     "github_clone_root": "",
     "browser_headless": False, "browser_keep_logins": False,
     "browser_model": "", "browser_provider": "",
-    "browser_use_mine": False, "browser_connect_url": "",
+    "browser_own": "auto", "browser_connect_url": "",
     "tts_engine": "", "tts_voice": "", "tts_speed": 1.0, "piper_voice": "",
     "stt_model": "", "stt_language": "", "voice_earcons": False,
     "voice_ptt_key": "", "voice_reply_language": "", "voice_sensitivity": 0.5,
