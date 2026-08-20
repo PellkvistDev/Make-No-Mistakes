@@ -272,6 +272,7 @@ class _Ext:
         self._handlers, self._fails, self._silent = {}, {}, set()
         self._pongs, self._stop = [], False
         self.deaf = False   # stop answering, without closing the socket
+        self.fragment_at = 0   # split messages bigger than this
         self._buf = b""
         threading.Thread(target=self._loop, daemon=True).start()
         self._send(json.dumps({"type": "hello", "agent": "mnm-extension",
@@ -306,12 +307,23 @@ class _Ext:
     # -- wire -------------------------------------------------------- #
 
     def _send(self, text: str):
-        self._send_frame(text.encode("utf-8"), 0x1)
+        data = text.encode("utf-8")
+        if self.fragment_at and len(data) > self.fragment_at:
+            # Exactly what Chrome does with a big message: a TEXT frame with
+            # FIN=0, then continuation frames with opcode 0.
+            n = self.fragment_at
+            self._send_frame(data[:n], 0x1, fin=False)
+            rest = data[n:]
+            while rest:
+                chunk, rest = rest[:n], rest[n:]
+                self._send_frame(chunk, 0x0, fin=not rest)
+            return
+        self._send_frame(data, 0x1)
 
-    def _send_frame(self, payload: bytes, opcode: int):
+    def _send_frame(self, payload: bytes, opcode: int, fin: bool = True):
         mask = os.urandom(4)
         masked = bytes(c ^ mask[i % 4] for i, c in enumerate(payload))
-        head = bytes([0x80 | opcode])
+        head = bytes([(0x80 if fin else 0x00) | opcode])
         n = len(payload)
         if n < 126:
             head += bytes([0x80 | n])
@@ -512,3 +524,60 @@ def test_windows_does_not_let_a_second_process_steal_the_port():
     assert 'sys.platform == "win32"' in before, \
         "the SO_REUSEADDR call must sit in a non-Windows branch"
     assert "SO_EXCLUSIVEADDRUSE" in before
+
+
+# --------------------------------------------------------------------- #
+# Big messages arrive in pieces
+
+def test_a_message_split_across_frames_is_reassembled(bridge, ext):
+    """Reported: "it got the right browser, then it tried to take a screenshot
+    and start working and then it disconnected."
+
+    A screenshot is the only large payload in this protocol -- every other
+    command answers in a few hundred bytes -- so the missing reassembly went
+    unnoticed until the browser agent took one. RFC 6455 section 5.4 lets a
+    sender fragment, and Chrome does for anything big: the first frame carried
+    a fraction of the JSON (unparseable, silently dropped) and every
+    continuation frame had opcode 0, which the read loop skipped as "not text".
+    The reply vanished and the task died waiting for it.
+    """
+    shot = "data:image/png;base64," + ("QUJD" * 200_000)      # ~800KB, like a real one
+    ext.fragment_at = 60_000
+    ext.handle("screenshot", lambda p: shot)
+    got = bridge.call("screenshot", timeout=15)
+    assert got == shot
+
+
+def test_fragmentation_at_awkward_sizes(bridge, ext):
+    """Including a payload that lands exactly on a fragment boundary."""
+    ext.fragment_at = 1000
+    for size in (999, 1000, 1001, 2000, 2001):
+        body = "x" * size
+        ext.handle("text", lambda p, b=body: b)
+        assert bridge.call("text", timeout=10) == body
+
+
+def test_a_ping_between_fragments_does_not_corrupt_the_message(bridge, ext):
+    """Control frames may be interleaved with a fragmented message (§5.4), and
+    joining one into the payload would produce unparseable JSON."""
+    body = "y" * 5000
+    ext.fragment_at = 900
+    ext.handle("text", lambda p: (ext.ping(b"mid"), body)[1])
+    assert bridge.call("text", timeout=10) == body
+
+
+def test_an_oversized_message_is_refused_rather_than_buffered(bridge, ext):
+    """A cap on the whole message, not just one frame -- fragments would
+    otherwise add up past it unchecked."""
+    import glmcode.extension_bridge as eb
+    assert eb.MAX_MESSAGE > 0
+    src = __import__("pathlib").Path(eb.__file__).read_text(encoding="utf-8")
+    assert "total > MAX_MESSAGE" in src
+
+
+def test_the_log_says_who_actually_closed_it(bridge, ext):
+    """"The browser closed the connection" was printed for our own read giving
+    up too, and that cost a whole round of looking in the wrong place."""
+    import glmcode.extension_bridge as eb
+    src = __import__("pathlib").Path(eb.__file__).read_text(encoding="utf-8")
+    assert "gave up reading the connection" in src
