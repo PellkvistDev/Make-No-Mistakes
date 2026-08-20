@@ -4522,11 +4522,47 @@ function renderUpdate(st) {
   btn.textContent = "Update & restart";
 }
 
+/* A dot on the gear when there is something to take.
+ *
+ * The check itself was already good and already lazy -- it runs when you open
+ * Settings -> General. Which means it answers a question only after you have
+ * thought to ask it, and an app installed by cloning is exactly the kind that
+ * quietly runs three weeks behind because nobody thought to ask.
+ *
+ * Only "ok and behind" shows anything. A check that FAILED -- no network, a
+ * dirty checkout, not a git clone at all -- stays silent: nobody asked for it,
+ * and a permanent badge on the settings button over something the user never
+ * initiated is worse than not knowing. The reason is still there, in full, the
+ * moment they do open the panel. */
+function markUpdateAvailable(st) {
+  const on = !!(st && st.ok && st.behind);
+  $("settings-btn").classList.toggle("has-update", on);
+  if (on) {
+    $("settings-btn").title =
+      `Settings — ${st.behind} update${st.behind === 1 ? "" : "s"} available`;
+  }
+}
 
 async function checkUpdate() {
   $("update-status").textContent = "Checking…";
   $("update-btn").disabled = true;
-  renderUpdate(await api().update_check());
+  let st;
+  // The panel may not be open at all when this runs -- see bootUpdateCheck.
+  // A rejected bridge call there would be an unhandled rejection with nothing
+  // on screen to show for it.
+  try { st = await api().update_check(); }
+  catch (e) { st = { ok: false, reason: "Couldn't check for updates." }; }
+  renderUpdate(st);
+  markUpdateAvailable(st);
+}
+
+/* One check per launch, a moment after boot, so the gear can carry the dot
+ * without anyone having gone looking. Deliberately after the app is usable:
+ * check() runs `git fetch`, and a slow or unreachable remote must not be
+ * something the first paint waits on. */
+const BOOT_UPDATE_DELAY = 4000;
+function bootUpdateCheck() {
+  setTimeout(() => { if (!updateState) checkUpdate(); }, BOOT_UPDATE_DELAY);
 }
 
 $("update-btn").addEventListener("click", async () => {
@@ -6736,6 +6772,9 @@ function bootSafely() {
     try { api().log && api().log("boot:error " + e); } catch (_) { /* ignore */ }
     console.error("boot failed", e);
   });
+  // Not inside boot(): a failed boot is the moment least worth spending on a
+  // network round trip, and this must not be able to fail one either.
+  bootUpdateCheck();
 }
 
 if (window.pywebview && window.pywebview.api) bootSafely();

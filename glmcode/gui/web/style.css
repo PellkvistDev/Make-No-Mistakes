@@ -2219,4 +2219,18 @@ body.sidebar-open #sidebar { transform: translateX(0); }
   padding: 1px 6px; white-space: nowrap;
 }
 .model-quota + .model-limited { margin-left: 6px; }
+/* The gear carries a dot when an update is waiting. Positioned on the button
+   rather than drawn into the icon: the icon is one <path> and every other
+   icon-btn shares the class, so a badge in the SVG would have to be a second
+   icon kept in step with the first. */
+.icon-btn.has-update { position: relative; }
+.icon-btn.has-update::after {
+  content: ""; position: absolute; top: 5px; right: 5px;
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent);
+  /* A ring in the header's own colour, so the dot reads as separate
+     from the gear behind it rather than as part of the glyph. */
+  box-shadow: 0 0 0 2px rgba(12, 16, 28, 0.75);
+  pointer-events: none;
+}
 .model-limited.cooling { color: #ff6b6b; border-color: rgba(255, 107, 107, 0.45); }

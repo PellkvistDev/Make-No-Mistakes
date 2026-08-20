@@ -100,3 +100,81 @@ def test_it_refuses_while_a_turn_is_running(desktop):
     desktop.page.click("#update-btn")
     desktop.page.wait_for_timeout(300)
     assert "still working" in desktop.page.inner_text("#update-status")
+
+
+# ---- the dot on the gear ---------------------------------------------------
+#
+# The check was already good and already lazy: it runs when you open
+# Settings -> General. Which means it answers a question only after you have
+# thought to ask it, and an app installed by cloning is exactly the kind that
+# quietly runs three weeks behind because nobody thought to ask.
+
+def _boot(desktop, **replies):
+    desktop.boot(boot={"settings": dict(DEFAULT_SETTINGS)}, **replies)
+    # The boot check is deliberately behind a delay so it cannot be something
+    # the first paint waits on.
+    desktop.page.evaluate("() => { window.BOOT_DELAY_DONE = true; checkUpdate(); }")
+    desktop.page.wait_for_timeout(300)
+    return desktop
+
+
+def test_an_available_update_puts_a_dot_on_the_gear(desktop):
+    _boot(desktop, update_check={"ok": True, "behind": 2, "branch": "main"})
+    cls = desktop.page.get_attribute("#settings-btn", "class")
+    assert "has-update" in cls
+    assert "2 updates available" in desktop.page.get_attribute("#settings-btn", "title")
+
+
+def test_being_up_to_date_shows_nothing(desktop):
+    _boot(desktop, update_check={"ok": True, "behind": 0, "branch": "main",
+                                 "reason": "Already up to date."})
+    assert "has-update" not in desktop.page.get_attribute("#settings-btn", "class")
+
+
+def test_a_check_that_could_not_run_stays_silent(desktop):
+    """Nobody asked for this check. A permanent badge over a dirty checkout or
+    a missing network would be worse than not knowing -- and the reason is
+    still there in full the moment Settings is opened."""
+    _boot(desktop, update_check={"ok": False, "reason": "Couldn't reach the remote."})
+    assert "has-update" not in desktop.page.get_attribute("#settings-btn", "class")
+
+
+def test_a_bridge_that_rejects_does_not_take_the_page_with_it(desktop):
+    """checkUpdate now runs with the panel closed, so a rejection here has
+    nothing on screen to land on."""
+    _boot(desktop, update_check={"__throw": "no bridge"})
+    assert desktop.errors == []
+    assert "has-update" not in desktop.page.get_attribute("#settings-btn", "class")
+
+
+def test_opening_general_does_not_check_again(desktop):
+    """The boot check already answered it. Asking twice spends a `git fetch`
+    to be told the same thing."""
+    _boot(desktop, update_check={"ok": True, "behind": 1, "branch": "main"})
+    before = len(desktop.calls("update_check"))
+    desktop.page.evaluate("() => document.getElementById('settings-btn').click()")
+    desktop.page.wait_for_timeout(200)
+    desktop.page.click('.settings-tab-btn[data-tab="general"]')
+    desktop.page.wait_for_timeout(300)
+    assert len(desktop.calls("update_check")) == before
+    assert "1 update available" in desktop.page.inner_text("#update-status")
+
+
+def test_the_check_is_not_part_of_boot(desktop):
+    """check() runs a git fetch. A slow or unreachable remote must not be
+    something the first paint waits on."""
+    desktop.boot(boot={"settings": dict(DEFAULT_SETTINGS)},
+                 update_check={"ok": True, "behind": 5, "branch": "main"})
+    assert desktop.calls("update_check") == []
+
+
+def test_but_it_does_run_on_its_own(desktop):
+    """The one test that waits out the real delay. Every test above calls
+    checkUpdate() directly, so all of them would still pass with the boot hook
+    deleted -- which is the whole feature. This one is slow on purpose."""
+    desktop.boot(boot={"settings": dict(DEFAULT_SETTINGS)},
+                 update_check={"ok": True, "behind": 5, "branch": "main"})
+    desktop.page.wait_for_function(
+        "() => window.__calls.some((c) => c.name === 'update_check')",
+        timeout=15000)
+    desktop.page.wait_for_selector("#settings-btn.has-update", timeout=5000)
