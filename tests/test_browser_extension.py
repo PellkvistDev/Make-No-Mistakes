@@ -14,6 +14,7 @@ tests drive the real _op_* methods over a real socket to prove that.
 """
 
 import json
+import pathlib
 import time
 
 import pytest
@@ -339,3 +340,45 @@ def test_no_warning_when_the_user_never_asked_for_their_own_browser():
     finally:
         sys.modules.pop("glmcode.browser_session", None)
     assert warnings == []
+
+
+# --------------------------------------------------------------------- #
+# Finding the browsers, and letting someone verify before committing
+
+def test_the_panel_can_listen_before_the_switch_is_on():
+    """The install sheet used to say "Waiting for the extension..." forever for
+    anyone who had not flipped the switch first -- there was nothing to wait
+    on, because the port only opened once the feature was already enabled.
+    Verifying the install BEFORE handing over a logged-in browser is the right
+    order."""
+    cfg = Config()
+    assert bx.status(cfg)["port"] is None            # off, and nothing opened
+    st = bx.status(cfg, listen=True)
+    assert st["port"] and st["enabled"] is False
+
+
+def test_browser_detection_returns_names_and_paths():
+    from glmcode import installed_browsers
+    for b in installed_browsers.find():
+        assert b["name"] and b["path"]
+        assert pathlib.Path(b["path"]).exists()
+
+
+def test_opening_a_browser_that_is_not_there_says_so():
+    from glmcode import installed_browsers
+    ok, err = installed_browsers.open_extensions_page("/nope/not/a/browser")
+    assert ok is False and "isn't where it was" in err
+
+
+def test_it_passes_the_extensions_url_on_the_command_line(monkeypatch, tmp_path):
+    """That page cannot be linked to and cannot be reached from another app any
+    other way. A running browser handles the argument by opening a tab, which
+    is the whole point -- it must not start a second copy."""
+    from glmcode import installed_browsers
+    exe = tmp_path / "chrome"
+    exe.write_text("#!/bin/sh\n")
+    seen = {}
+    monkeypatch.setattr(installed_browsers.subprocess, "Popen",
+                        lambda argv, **kw: seen.update(argv=argv))
+    ok, err = installed_browsers.open_extensions_page(str(exe))
+    assert ok and seen["argv"] == [str(exe), "chrome://extensions"]

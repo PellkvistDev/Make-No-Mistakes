@@ -5,15 +5,19 @@ with you already signed in.
 
 ## Install (about thirty seconds, once)
 
+Easiest: in the app, **Settings → Browser → Set it up**. That sheet opens the
+extensions page in whichever browser you pick, hands you the folder to paste,
+shows a green light the moment it connects, and has the switch on it so you
+never have to go looking for it afterwards.
+
+By hand, if you prefer:
+
 1. Open `chrome://extensions` in the browser you want the agent to drive.
 2. Turn on **Developer mode** (top right).
 3. **Load unpacked** → choose this folder.
+4. Turn on Settings → Browser → **Use my own browser**.
 
-Then turn on Settings → Browser → **Use my own browser** in the app. The panel
-says *Connected* as soon as both ends are up.
-
-Chrome, Edge, Brave, Arc and anything else Chromium-based all work; the app's
-Settings panel has a button that opens this folder for you.
+Chrome, Edge, Brave, Vivaldi, Arc and anything else Chromium-based all work.
 
 ## If it says it isn't connected
 

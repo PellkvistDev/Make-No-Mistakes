@@ -168,3 +168,93 @@ def test_the_devtools_route_is_not_the_first_thing_you_see(desktop):
     _open_browser_tab(desktop)
     assert desktop.page.eval_on_selector(
         "#opt-browser-connect", "e => e.closest('details').open") is False
+
+
+# --------------------------------------------------------------------- #
+# Making the install something a person will actually finish
+
+CHROME = {"name": "Google Chrome", "path": "/usr/bin/google-chrome"}
+EDGE = {"name": "Microsoft Edge", "path": "/usr/bin/microsoft-edge"}
+TAB = {"url": "https://github.com/you/repo/pulls", "title": "Pull requests"}
+
+
+def test_it_offers_to_open_the_extensions_page_in_each_browser_you_have(desktop):
+    """"Open chrome://extensions" assumes one browser and assumes it is Chrome.
+    Someone who lives in Edge reads that and installs it in the wrong one, then
+    wonders why nothing connects."""
+    _open_browser_tab(desktop, browser_extension_status=dict(
+        EXT_WAITING, browsers=[CHROME, EDGE]))
+    desktop.page.click("#browser-ext-install")
+    desktop.page.wait_for_timeout(250)
+    labels = desktop.page.eval_on_selector_all(
+        "#ext-browsers button", "els => els.map(e => e.textContent)")
+    assert labels == ["Open in Google Chrome", "Open in Microsoft Edge"]
+
+
+def test_clicking_one_opens_that_browser(desktop):
+    _open_browser_tab(desktop, browser_extension_status=dict(
+        EXT_WAITING, browsers=[CHROME, EDGE]), open_extensions_page={"ok": True})
+    desktop.page.click("#browser-ext-install")
+    desktop.page.wait_for_timeout(250)
+    desktop.page.click("#ext-browsers button:nth-child(2)")
+    desktop.page.wait_for_timeout(200)
+    calls = desktop.calls("open_extensions_page")
+    assert calls and calls[0]["args"][0] == "/usr/bin/microsoft-edge"
+
+
+def test_with_no_browser_found_it_falls_back_to_the_url(desktop):
+    _open_browser_tab(desktop, browser_extension_status=dict(EXT_WAITING, browsers=[]))
+    desktop.page.click("#browser-ext-install")
+    desktop.page.wait_for_timeout(250)
+    assert desktop.page.eval_on_selector("#ext-browsers-none", "e => !e.hidden")
+    assert "chrome://extensions" in desktop.page.inner_text("#ext-browsers-none")
+
+
+def test_connected_but_switched_off_says_the_hard_part_is_done(desktop):
+    """This is the state someone lands in after installing, and it used to read
+    as a dead end. Only the switch above is left."""
+    _open_browser_tab(desktop, browser_extension_status=dict(
+        EXT_OFF, connected=True, port=8765, browsers=[CHROME]))
+    desktop.page.wait_for_timeout(250)
+    said = desktop.page.inner_text("#browser-ext-status")
+    assert "connected" in said.lower() and "switch above" in said
+
+
+def test_the_sheet_finishes_the_job_itself(desktop):
+    """Nobody should have to close the instructions and then hunt for the
+    control they were sent away from."""
+    _open_browser_tab(desktop,
+                      browser_extension_status=dict(EXT_OFF, connected=True,
+                                                    port=8765, browsers=[CHROME]),
+                      set_setting=dict(DEFAULT_SETTINGS, browser_use_mine=True))
+    desktop.page.click("#browser-ext-install")
+    desktop.page.wait_for_timeout(250)
+    assert desktop.page.eval_on_selector("#ext-finish", "e => !e.hidden")
+    desktop.page.click("#ext-enable-now")
+    desktop.page.wait_for_timeout(300)
+    calls = desktop.calls("set_setting")
+    assert calls[-1]["args"][:2] == ["browser_use_mine", True]
+    assert desktop.page.eval_on_selector("#browser-ext-sheet", "e => e.hidden")
+
+
+def test_the_finish_button_stays_hidden_until_it_can_work(desktop):
+    _open_browser_tab(desktop, browser_extension_status=dict(EXT_WAITING, browsers=[CHROME]))
+    desktop.page.click("#browser-ext-install")
+    desktop.page.wait_for_timeout(250)
+    assert desktop.page.eval_on_selector("#ext-finish", "e => e.hidden")
+
+
+def test_it_names_the_tab_it_would_act_on(desktop):
+    """"My own browser" is otherwise a leap of faith taken at the moment the
+    agent starts clicking things."""
+    _open_browser_tab(desktop, {"browser_use_mine": True},
+                      browser_extension_status=dict(EXT_ON, tab=TAB, browsers=[CHROME]))
+    desktop.page.wait_for_timeout(250)
+    said = desktop.page.inner_text("#browser-ext-tab")
+    assert "Pull requests" in said and "github.com" in said
+
+
+def test_no_tab_line_when_nothing_is_connected(desktop):
+    _open_browser_tab(desktop, browser_extension_status=EXT_WAITING)
+    desktop.page.wait_for_timeout(250)
+    assert desktop.page.eval_on_selector("#browser-ext-tab", "e => e.hidden")

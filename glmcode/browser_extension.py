@@ -69,9 +69,18 @@ def not_connected_hint() -> str:
             "moment both ends are up.")
 
 
-def status(cfg) -> dict:
-    """What Settings shows: is it on, is the port up, is a browser on it."""
-    b = bridge(start=enabled(cfg))
+def status(cfg, listen: bool = False) -> dict:
+    """What Settings shows: is it on, is the port up, is a browser on it.
+
+    `listen` opens the port even when the setting is off, and the Settings
+    panel passes it while it is on screen. Without that the install sheet said
+    "Waiting for the extension..." forever for anyone who had not flipped the
+    switch first -- there was nothing to wait on, because the port only opened
+    when the feature was already enabled. Being able to verify the install
+    BEFORE turning it on is the right order for a feature that hands over a
+    logged-in browser.
+    """
+    b = bridge(start=listen or enabled(cfg))
     return {
         "enabled": enabled(cfg),
         "port": b.port if b else None,

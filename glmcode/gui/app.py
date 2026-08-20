@@ -2495,18 +2495,45 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
                 "browser_model": self._cfg.browser_model}
 
     def browser_extension_status(self):
-        """Is the extension connected, and where does the user install it from.
+        """Everything the Browser panel needs, in one call.
 
-        The path is returned every time rather than only when asked, because
-        the install sheet's whole job is to hand someone a folder to point
-        Chrome at, and a sheet that has to make a second call before it can
-        show the one thing it exists to show flickers.
+        The port is opened while this panel is on screen even if the feature is
+        off, so someone can install the extension and SEE it connect before
+        deciding to turn it on. Verifying first is the right order for a switch
+        that hands the agent a logged-in browser.
         """
-        from .. import browser_extension
-        st = browser_extension.status(self._cfg)
+        from .. import browser_extension, installed_browsers
+        st = browser_extension.status(self._cfg, listen=True)
         st["path"] = str(EXTENSION_DIR)
         st["installed"] = EXTENSION_DIR.joinpath("manifest.json").is_file()
+        st["browsers"] = installed_browsers.find()
+        # What it would actually act on, so "my own browser" is a specific
+        # window rather than a leap of faith. Cheap, and only when connected.
+        st["tab"] = {}
+        if st["connected"]:
+            try:
+                b = browser_extension.bridge(start=False)
+                st["tab"] = b.call("status", timeout=4) or {}
+            except Exception:
+                st["tab"] = {}
         return st
+
+    def open_extensions_page(self, path: str = ""):
+        """Open chrome://extensions in the chosen browser.
+
+        That page cannot be linked to and cannot be reached from another app
+        except by passing it on the command line, which a running browser
+        handles by opening a tab. It removes the copy-the-URL-and-paste-it step,
+        which is the one people get wrong by pasting it into the wrong browser.
+        """
+        from .. import installed_browsers
+        if not path:
+            found = installed_browsers.find()
+            if not found:
+                return {"error": "No Chromium-based browser found on this machine."}
+            path = found[0]["path"]
+        ok, err = installed_browsers.open_extensions_page(path)
+        return {"ok": True} if ok else {"error": err}
 
     def open_extension_folder(self):
         """Reveal the extension folder in the OS file manager, so 'Load

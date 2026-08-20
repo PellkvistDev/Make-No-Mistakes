@@ -519,8 +519,9 @@
           active tab; the extension&rsquo;s toolbar button pauses it at any time.</span></div>
         <button id="opt-browser-mine" class="switch" role="switch" aria-checked="false"><span></span></button></div>
       <div class="row" id="browser-ext-row"><div class="row-text"><label>Extension</label>
-        <span id="browser-ext-status" class="row-sub">Checking…</span></div>
-        <button id="browser-ext-install" class="btn">Install it</button></div>
+        <span id="browser-ext-status" class="row-sub">Checking…</span>
+        <span id="browser-ext-tab" class="row-sub ext-tab" hidden></span></div>
+        <button id="browser-ext-install" class="btn">Set it up</button></div>
 
       <details class="row-sub" style="margin-top:14px">
         <summary style="cursor:pointer">Advanced: attach over a DevTools port instead</summary>
@@ -539,20 +540,36 @@
 
     <div id="browser-ext-sheet" class="backdrop" hidden>
       <div class="sheet">
-        <h3>Install the browser extension</h3>
-        <p class="row-sub">One time, about thirty seconds. It is a folder on your machine — nothing
-          is uploaded, and it only ever talks to this app on <code>127.0.0.1</code>.</p>
+        <h3>Use your own browser</h3>
+        <p class="row-sub">One time, about thirty seconds. The extension is a folder already on
+          this machine — nothing is downloaded, nothing is uploaded, and it only ever talks to
+          this app on <code>127.0.0.1</code>.</p>
+
         <ol class="ext-steps">
-          <li>Open <code id="ext-store-url">chrome://extensions</code> in the browser you want the
-            agent to drive. <button id="ext-copy-url" class="btn btn-small">Copy</button></li>
-          <li>Turn on <b>Developer mode</b> (top right).</li>
-          <li>Click <b>Load unpacked</b> and choose this folder:
+          <li><b>Open the extensions page</b> in the browser you want the agent to drive.
+            <div id="ext-browsers" class="ext-browsers"></div>
+            <span class="row-sub" id="ext-browsers-none" hidden>No Chromium browser found —
+              open <code>chrome://extensions</code> yourself.
+              <button id="ext-copy-url" class="btn btn-small">Copy that</button></span></li>
+          <li>Turn on <b>Developer mode</b> — the switch in the top right of that page.</li>
+          <li>Click <b>Load unpacked</b>, then paste this folder into the dialog:
             <code id="ext-path" class="ext-path">…</code>
-            <button id="ext-copy-path" class="btn btn-small">Copy path</button>
-            <button id="ext-open-folder" class="btn btn-small">Open folder</button></li>
-          <li>That is it — this panel says <b>Connected</b> as soon as it is loaded.</li>
+            <button id="ext-copy-path" class="btn btn-small">Copy folder</button>
+            <button id="ext-open-folder" class="btn btn-small">Reveal it</button></li>
         </ol>
-        <p id="ext-live-status" class="row-sub">Waiting for the extension…</p>
+
+        <div id="ext-live" class="ext-live">
+          <span class="ext-dot" id="ext-dot"></span>
+          <span id="ext-live-status">Waiting for the extension…</span>
+        </div>
+        <p id="ext-live-tab" class="row-sub" hidden></p>
+
+        <label class="ext-finish" id="ext-finish" hidden>
+          <button id="ext-enable-now" class="btn btn-primary">Use my own browser from now on</button>
+          <span class="row-sub">You can turn this off any time, and the extension&rsquo;s toolbar
+            button pauses it without turning anything off.</span>
+        </label>
+
         <div class="sheet-actions"><button id="ext-sheet-close" class="btn">Done</button></div>
       </div>
     </div>

@@ -725,6 +725,28 @@ the app.
   cares only whose browser this is. The Browser Agent gets
   `BROWSER_ATTACHED_NOTE` either way.
 
+**The install is the feature.** It cannot be automated away — Chrome has no API
+for loading an unpacked extension and the Web Store is not a route this project
+can take — so the only thing left is to remove every step around it:
+
+- **Browsers are found and named** (`installed_browsers.py`), and each gets a
+  button that opens its own extensions page. "Open chrome://extensions" assumes
+  one browser and assumes it is Chrome; someone who lives in Edge reads that,
+  installs it in the wrong browser, and wonders why nothing connects. Passing
+  the `chrome://` URL on the command line is the only way to reach that page
+  from outside the browser, and a running browser answers it with a new tab.
+- **The port opens while the panel is on screen, before the switch is on**
+  (`status(cfg, listen=True)`). It used to open only once the feature was
+  enabled, so the sheet said "Waiting for the extension…" forever to anyone who
+  had not flipped the switch first — there was nothing to wait on. Verifying
+  the install *before* handing over a logged-in browser is also the right order.
+- **The sheet carries the switch.** Finishing the instructions and then having
+  to find the control you were sent away from is where people stop.
+- **Connected-but-off is called out as nearly done**, not shown as an error.
+  It is the state everyone lands in after installing.
+- **The panel names the tab it would act on.** "My own browser" is otherwise a
+  leap of faith taken at the moment the agent starts clicking things.
+
 **Three ways this fails in silence, all of them found by one bug report.** The
 symptom was a second Chrome window opening with a blank tab, which says nothing
 about any of the causes:
