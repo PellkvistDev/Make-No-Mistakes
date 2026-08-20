@@ -484,6 +484,15 @@
           that repaint constantly — the biggest cause of general sluggishness. Turn OFF for the
           full frosted-glass look if your machine handles it smoothly.</span></div>
         <button id="opt-reduce-fx" class="switch" role="switch" aria-checked="false"><span></span></button></div>
+
+      <h3 style="margin-top:22px">Update</h3>
+      <div class="row"><div class="row-text"><label>App version</label>
+        <span id="update-status" class="row-sub">Checking…</span></div>
+        <button id="update-btn" class="btn" disabled>Check</button></div>
+      <details id="update-log-row" class="row-sub" style="margin:-6px 0 10px" hidden>
+        <summary style="cursor:pointer">What&rsquo;s new</summary>
+        <div id="update-log" class="ext-log"></div>
+      </details>
     </section>
 
     <section data-tab="browser">

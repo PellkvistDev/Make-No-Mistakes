@@ -737,6 +737,51 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
             except Exception:
                 pass
 
+    def update_check(self):
+        """Is there a newer version, and can it be taken? Changes nothing."""
+        from .. import updater
+        return updater.check()
+
+    def update_apply(self):
+        """Pull, then restart into the new code.
+
+        The restart is spawned BEFORE this window closes and is detached from
+        this process, because the alternative -- close, then start -- leaves a
+        gap where the app is simply gone, and a failure in that gap is
+        indistinguishable from the update having quit the app for good.
+
+        A turn in flight is refused rather than interrupted: restarting mid-turn
+        loses whatever the agent was part-way through, and an update is never
+        so urgent that it cannot wait for a reply to finish.
+        """
+        from .. import updater
+        busy = [cs.title or cs.sid for cs in self._chats.values()
+                if cs.turn_lock.locked()]
+        if busy:
+            return {"ok": False,
+                    "reason": f"'{busy[0]}' is still working. Let it finish, "
+                              "then update -- restarting now would lose it."}
+        result = updater.pull()
+        if not result.get("ok"):
+            return result
+        if not result.get("updated"):
+            return result
+        try:
+            self._save_current()
+        except Exception:
+            pass
+        if not updater.spawn_restart():
+            return {"ok": True, "updated": True, "restarted": False,
+                    "changes": result.get("changes", []),
+                    "reason": "Updated, but couldn't start the new copy. "
+                              "Close the app and open it again."}
+        # Give the new process a moment to get going before this window goes,
+        # so the screen is never empty with nothing on the way.
+        threading.Timer(1.2, lambda: self.win("close")).start()
+        return {"ok": True, "updated": True, "restarted": True,
+                "count": result.get("count", 0),
+                "changes": result.get("changes", [])}
+
     def open_external(self, url: str):
         if isinstance(url, str) and url.startswith(("http://", "https://")):
             webbrowser.open(url)

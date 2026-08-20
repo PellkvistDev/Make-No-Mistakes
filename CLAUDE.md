@@ -669,6 +669,35 @@ call is not a feature: reach for it when a line looks *unnecessary* — a magic
 constant, a workaround, a retry, an ordering that looks arbitrary, a guard that
 looks redundant.
 
+## Updating is a pull and a restart, and both halves fail quietly
+
+The app is installed by cloning it, so the Update button in Settings → General
+runs `git pull` and starts a fresh copy. Every part of that has a failure mode
+invisible from a button, and a button that half-works leaves someone's app
+directory in a state they did not ask for and cannot see.
+
+- **Two steps, never one.** `check()` looks and changes nothing; `pull()` only
+  runs after a clean check. A single-click "update" would do all of it to
+  someone who wanted to know whether there *was* one.
+- **Every refusal names the actual state** — local edits, detached HEAD, no
+  upstream, not a git checkout at all. "Couldn't update" leaves a button that
+  does not work and no way to find out why.
+- **`--ff-only`.** A merge commit created by a button in someone's app
+  directory is not something they asked for, and a *conflicted* merge leaves
+  the app in a state it cannot run from. Refusing is recoverable; half-merging
+  is not.
+- **Local changes stop it.** The person editing their own copy is exactly the
+  person most likely to press this.
+- **The restart is spawned BEFORE the window closes,** and detached. Close-then-
+  start leaves a gap where the app is simply gone, and a failure in that gap is
+  indistinguishable from the update having quit the app for good. On Windows a
+  child in the same console group dies with its parent, so `DETACHED_PROCESS`
+  is not optional.
+- **`sys.executable`, not `"python"`.** On Windows that may be a different
+  install, or absent from PATH.
+- **A running turn refuses the update.** Restarting mid-turn loses whatever the
+  agent was part-way through, and an update is never that urgent.
+
 ## Reaching the user's own browser means going in through the side
 
 `control_chrome` launches its own Chromium by default and that is unchanged: a
