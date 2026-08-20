@@ -747,6 +747,30 @@ can take — so the only thing left is to remove every step around it:
 - **The panel names the tab it would act on.** "My own browser" is otherwise a
   leap of faith taken at the moment the agent starts clicking things.
 
+**An open socket is not evidence of a live browser.** `connected` used to mean
+"a file descriptor exists", which produced the worst version of this feature:
+Settings said *Connected* while every browser action sat for the full timeout
+and then failed. A laptop that slept, a browser that was killed, a FIN that
+never arrived — all leave a socket that reads as fine and answers nothing. The
+bridge pings on a heartbeat and `connected` asks when the extension was last
+heard from; a stale client is dropped and anything waiting on it fails at once,
+naming the reason. Browsers answer a WebSocket ping at the protocol level,
+without the service worker being woken, so this stays true exactly when it must
+— while Chrome has the worker asleep.
+
+The heartbeat **ticks finely and decides from elapsed time** rather than
+sleeping for the whole interval: a loop parked in an eight-second wait cannot
+notice a shutdown, and a test that shortens the timings finds a loop that never
+re-reads them.
+
+**`my_tabs` is on the CODING agent, not just inside the Browser Agent.** Asked
+"what tabs do I have open?", the model said it had no access — true, since
+`control_chrome` was its only browser tool and nothing said the user's own tabs
+were reachable. A question does not deserve a sub-agent either. It is offered
+unconditionally rather than only when connected, so the answer is "your browser
+isn't connected, here is why" instead of "I can't": a tool the model does not
+know exists cannot tell it anything.
+
 **Three ways this fails in silence, all of them found by one bug report.** The
 symptom was a second Chrome window opening with a blank tab, which says nothing
 about any of the causes:

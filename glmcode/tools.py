@@ -1716,6 +1716,47 @@ def fetch_http_cat(status_code: int, out_path: Path) -> Path:
 # --------------------------------------------------------------------- #
 # Git tools
 
+def my_tabs() -> str:
+    """What the user has open in their own browser, if the extension is there.
+
+    A tool on the CODING agent, not just inside the Browser Agent, because
+    "what tabs do I have open?" is a QUESTION -- spinning up a whole browser
+    sub-agent to answer it is heavy, slow, and was evidently not something the
+    model thought to do at all: asked directly, it said it had no access.
+
+    Offered unconditionally rather than only when connected, so that the honest
+    answer to that question is "your browser isn't connected, here is why"
+    instead of "I can't". A tool the model does not know exists cannot tell it
+    anything.
+    """
+    from .browser_extension import bridge
+    from .extension_bridge import BridgeError
+
+    b = bridge(start=False)
+    if b is None or not b.connected:
+        return ("Not connected to your browser, so I can't see your tabs.\n"
+                "The browser extension does this: Settings -> Browser -> Set it "
+                "up. It needs the browser it is installed in to be open, and its "
+                "toolbar button must not be showing a pause mark.\n"
+                "I can still drive a separate browser of my own with "
+                "control_chrome.")
+    try:
+        tabs = b.call("tabs", timeout=8) or []
+    except BridgeError as e:
+        return f"Couldn't reach your browser: {e}"
+    if not tabs:
+        return "Your browser is connected but has no open tabs."
+    lines = ["Open in your browser right now:"]
+    for t in tabs:
+        title = (t.get("title") or "").strip()[:80] or "(untitled)"
+        mark = "  <- frontmost" if t.get("active") else ""
+        lines.append(f'  [{t.get("id")}] {title}{mark}')
+        lines.append(f'        {(t.get("url") or "")[:120]}')
+    lines.append("\nTo DO something in one of these, use control_chrome with a "
+                 "goal that names the page -- it drives this same browser.")
+    return "\n".join(lines)
+
+
 def git_status(path: str = ".") -> str:
     """Show git repository status (uncommitted changes, branches, etc.)."""
     p = _resolve(path)
@@ -2622,6 +2663,15 @@ TOOL_SCHEMAS = [
         ["path"],
     ),
     _schema(
+        "my_tabs",
+        "What the USER has open in their own browser right now: every tab, with an id, "
+        "title and URL. Answer questions about their tabs with this -- it is instant and "
+        "needs no sub-agent. It only works when their browser extension is connected, and "
+        "says so plainly when it is not. To ACT on one of those pages, use control_chrome.",
+        {},
+        [],
+    ),
+    _schema(
         "git_log",
         "Show recent git commit history.",
         {
@@ -3109,6 +3159,7 @@ TOOL_FUNCTIONS = {
     "git_branch": git_branch,
     "git_diff": git_diff,
     "why": why,
+    "my_tabs": my_tabs,
     "git_log": git_log,
     "git_commit": git_commit,
     "git_push": git_push,
@@ -3134,7 +3185,7 @@ READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "find_references",
                  "search_code", "code_diagnostics", "go_to_definition",
                  "scan_secrets", "todo_write", "remember", "show_image",
                  "compact_context", "read_output", "stop_process",
-                 "list_processes", "review_changes", "why"}
+                 "list_processes", "review_changes", "why", "my_tabs"}
 # Tools that modify files (auto-approved in autoedit mode).
 FILE_WRITE_TOOLS = {"write_file", "edit_file", "replace_in_files", "git_commit"}
 # Network read tools (prompt in ask mode, auto-approved in autoedit/yolo).

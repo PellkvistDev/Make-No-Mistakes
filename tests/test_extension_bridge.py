@@ -172,6 +172,58 @@ def test_it_reports_who_connected(bridge, ext):
     assert bridge.hello["agent"] == "mnm-extension"
 
 
+def test_a_socket_that_stops_answering_is_not_reported_as_connected(bridge, ext,
+                                                                    monkeypatch):
+    """The worst version of this feature, reported from a real machine:
+    Settings said "Connected" while every browser action failed. Holding an
+    open socket is not evidence of a live browser -- a laptop that slept, a
+    browser that was killed, a FIN that never arrived all leave a descriptor
+    that reads as fine and answers nothing."""
+    import glmcode.extension_bridge as eb
+    monkeypatch.setattr(eb, "STALE_AFTER", 0.6)
+    monkeypatch.setattr(eb, "PING_EVERY", 0.15)
+    assert bridge.connected is True
+    ext.deaf = True                     # alive socket, nobody home
+    for _ in range(60):
+        if not bridge.connected:
+            break
+        time.sleep(0.05)
+    assert bridge.connected is False, "a dead connection still read as connected"
+
+
+def test_a_dropped_connection_fails_waiting_calls_at_once(bridge, ext, monkeypatch):
+    """Otherwise the call sits for the whole timeout on a browser the bridge
+    has already worked out is gone."""
+    import glmcode.extension_bridge as eb
+    monkeypatch.setattr(eb, "STALE_AFTER", 0.6)
+    monkeypatch.setattr(eb, "PING_EVERY", 0.15)
+    ext.handle("hang", lambda p: None, answer=False)
+    ext.deaf = True
+    result = {}
+
+    def call():
+        try:
+            bridge.call("hang", timeout=30)
+        except BridgeError as e:
+            result["err"] = str(e)
+
+    t = threading.Thread(target=call)
+    t.start()
+    t.join(10)
+    assert not t.is_alive(), "the call waited out its full timeout"
+    assert "stopped answering" in result.get("err", "")
+
+
+def test_a_healthy_extension_stays_connected(bridge, ext, monkeypatch):
+    """The heartbeat must not invent a disconnection: a browser answering pings
+    is connected however quiet the conversation is."""
+    import glmcode.extension_bridge as eb
+    monkeypatch.setattr(eb, "STALE_AFTER", 0.6)
+    monkeypatch.setattr(eb, "PING_EVERY", 0.15)
+    time.sleep(1.2)
+    assert bridge.connected is True
+
+
 def test_a_ping_is_ponged(bridge, ext):
     """Chrome pings to keep the socket (and the service worker) alive. A server
     that ignored it would be dropped."""
@@ -217,6 +269,7 @@ class _Ext:
         assert _accept_key(key).encode() in raw
         self._handlers, self._fails, self._silent = {}, {}, set()
         self._pongs, self._stop = [], False
+        self.deaf = False   # stop answering, without closing the socket
         self._buf = b""
         threading.Thread(target=self._loop, daemon=True).start()
         self._send(json.dumps({"type": "hello", "agent": "mnm-extension",
@@ -282,6 +335,12 @@ class _Ext:
                 opcode, data = frame
                 if opcode == 0xA:
                     self._pongs.append(data)
+                    continue
+                if opcode == 0x9:
+                    # A real browser answers a ping at the protocol level,
+                    # without the page or the service worker being involved.
+                    if not self.deaf:
+                        self._send_frame(data, 0xA)
                     continue
                 if opcode != 0x1:
                     continue
