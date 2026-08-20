@@ -4480,10 +4480,16 @@ function renderExtSheet(st) {
     // window -- which is what made this button look like the bug.
     btn.textContent = "Bring " + b.name + " to the front";
     btn.addEventListener("click", async () => {
-      await navigator.clipboard.writeText("chrome://extensions");
+      // The browser comes forward FIRST. Copying is a nicety and it can fail
+      // (no focus, no permission, WebView2's page context) -- awaiting it
+      // first meant one rejected promise stopped the button doing the one
+      // thing it is for.
       const res = await api().open_extensions_page(b.path);
       if (res && res.error) return toast(res.error, "error", 5000);
-      toast("Copied chrome://extensions — paste it in the address bar.", "info", 5000);
+      const copied = await copyText("chrome://extensions").then(() => true, () => false);
+      toast(copied ? "Copied chrome://extensions — paste it in the address bar."
+                   : "Now paste chrome://extensions into the address bar.",
+            "info", 5000);
     });
     box.appendChild(btn);
   });
@@ -4535,14 +4541,23 @@ $("ext-sheet-close").addEventListener("click", () => { $("browser-ext-sheet").hi
 $("browser-ext-sheet").addEventListener("click", (e) => {
   if (e.target === $("browser-ext-sheet")) $("browser-ext-sheet").hidden = true;
 });
-$("ext-copy-url").addEventListener("click", () => {
-  navigator.clipboard.writeText("chrome://extensions");
-  toast("Copied. Paste it in your browser's address bar.", "info", 3000);
-});
-$("ext-copy-path").addEventListener("click", () => {
-  navigator.clipboard.writeText($("ext-path").textContent.trim());
-  toast("Folder path copied.", "info", 3000);
-});
+// copyText, not navigator.clipboard directly: the clipboard API is not always
+// available in WebView2's page context, which is the desktop app on Windows --
+// so calling it raw would have made all of these silently do nothing there.
+// And a copy that failed has to SAY so, because copying is the whole job.
+async function copyOrSay(text, ok) {
+  try {
+    await copyText(text);
+    toast(ok, "info", 3000);
+  } catch {
+    toast("Couldn't reach the clipboard — select and copy it by hand.",
+          "warn", 5000);
+  }
+}
+$("ext-copy-url").addEventListener("click",
+  () => copyOrSay("chrome://extensions", "Copied. Paste it in your browser's address bar."));
+$("ext-copy-path").addEventListener("click",
+  () => copyOrSay($("ext-path").textContent.trim(), "Folder path copied."));
 $("ext-open-folder").addEventListener("click", async () => {
   const res = await api().open_extension_folder();
   if (res && res.error) toast(res.error, "error", 5000);

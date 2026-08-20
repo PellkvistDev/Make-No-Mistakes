@@ -229,6 +229,27 @@ def test_clicking_one_brings_that_browser_forward(desktop):
     assert calls and calls[0]["args"][0] == "/usr/bin/microsoft-edge"
 
 
+def test_a_clipboard_that_refuses_does_not_stop_the_button(desktop):
+    """Found by CI, where the headless browser's clipboard rejects. Copying was
+    awaited BEFORE the call that matters, so one rejected promise stopped the
+    button doing the only thing it exists for. It is also not hypothetical in
+    the real app: the clipboard API is not always available in WebView2's page
+    context, which is the desktop app on Windows."""
+    _open_browser_tab(desktop, browser_extension_status=dict(
+        EXT_WAITING, browsers=[CHROME]), open_extensions_page={"ok": True})
+    desktop.page.evaluate(
+        """() => { navigator.clipboard.writeText = () => Promise.reject(new Error('nope'));
+                   document.execCommand = () => false; }""")
+    desktop.page.click("#browser-ext-install")
+    desktop.page.wait_for_timeout(250)
+    desktop.page.click("#ext-browsers button:nth-child(1)")
+    desktop.page.wait_for_timeout(250)
+    calls = desktop.calls("open_extensions_page")
+    assert calls and calls[0]["args"][0] == CHROME["path"]
+    # and it tells you to paste it yourself rather than claiming it copied
+    assert "paste chrome://extensions" in desktop.page.inner_text("body")
+
+
 def test_with_no_browser_found_the_paste_step_still_stands(desktop):
     """The address is the step that always works, so nothing depends on having
     detected a browser."""
