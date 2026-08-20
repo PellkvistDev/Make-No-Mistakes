@@ -39,6 +39,7 @@ import queue
 import socket
 import struct
 import threading
+import time
 import uuid
 
 # RFC 6455 §1.3. Concatenated with the client's key, SHA-1'd, base64'd.
@@ -49,9 +50,18 @@ _GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 # feature. Keep the two lists identical -- extension/background.js.
 PORTS = (8765, 8766, 8767, 8768, 8769)
 
-DEFAULT_TIMEOUT = 30.0
+# Long enough for a slow page load behind a browser action, short enough that a
+# browser which has genuinely gone away is not sat behind for half a minute.
+DEFAULT_TIMEOUT = 20.0
 # How often the accept loop wakes to notice it has been told to stop.
 ACCEPT_POLL = 0.25
+# Heartbeat. Browsers answer a WebSocket ping at the protocol level, without
+# the service worker being woken, so this keeps telling the truth even while
+# Chrome has the worker asleep.
+PING_EVERY = 8.0
+STALE_AFTER = 30.0
+# How often the heartbeat wakes to decide anything.
+HEARTBEAT_TICK = 0.5
 
 OP_CONT, OP_TEXT, OP_BIN, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 
@@ -142,6 +152,7 @@ class ExtensionBridge:
         self._thread: threading.Thread | None = None
         self.on_change = None          # called when a client connects/leaves
         self.hello: dict = {}          # what the extension said about itself
+        self._last_seen = 0.0          # when the extension last said anything
 
     # -- lifecycle ---------------------------------------------------- #
 
@@ -173,6 +184,7 @@ class ExtensionBridge:
             raise BridgeError(f"No free port in {self.ports}: {last}")
         self._thread = threading.Thread(target=self._accept_loop, daemon=True)
         self._thread.start()
+        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
         return self.port
 
     def stop(self) -> None:
@@ -203,7 +215,71 @@ class ExtensionBridge:
 
     @property
     def connected(self) -> bool:
-        return self._client is not None
+        """A socket AND recent proof the other end is still there.
+
+        Holding an open socket is not evidence of a live browser. A laptop that
+        slept, a browser that was killed, a network stack that never delivered
+        the FIN -- all leave a socket that reads as fine and answers nothing.
+        Reported as connected, that produced the worst version of this feature:
+        Settings said "Connected", and every browser action then sat for the
+        full timeout before failing.
+
+        So the bridge pings, and this asks when the extension was last heard
+        from rather than whether a file descriptor exists.
+        """
+        if self._client is None:
+            return False
+        return (time.monotonic() - self._last_seen) < STALE_AFTER
+
+    def _heartbeat_loop(self) -> None:
+        """Ping the extension, and drop it when it stops answering.
+
+        Browsers answer a WebSocket ping at the protocol level, without the
+        page or the service worker being involved, so this stays true even
+        while the worker is asleep -- which is exactly when we must not decide
+        the extension has gone away.
+        """
+        # Ticks finely and decides from elapsed time, rather than sleeping for
+        # the whole interval: a loop parked in an 8-second wait cannot notice a
+        # shutdown, and cannot react at all to a bridge configured with shorter
+        # timings.
+        last_ping = 0.0
+        while not self._stop.is_set():
+            self._stop.wait(HEARTBEAT_TICK)
+            if self._stop.is_set():
+                return
+            conn = self._client
+            if conn is None:
+                continue
+            now = time.monotonic()
+            if (now - self._last_seen) >= STALE_AFTER:
+                # Answered nothing for long enough that the socket is a fiction.
+                self._drop(conn, "stopped answering")
+                continue
+            if (now - last_ping) < PING_EVERY:
+                continue
+            last_ping = now
+            try:
+                with self._send_lock:
+                    conn.sendall(encode_frame(b"", OP_PING))
+            except OSError:
+                self._drop(conn, "the connection broke")
+
+    def _drop(self, conn, why: str) -> None:
+        with self._client_lock:
+            if self._client is not conn:
+                return
+            self._client = None
+        try:
+            conn.close()
+        except OSError:
+            pass
+        with self._pending_lock:
+            waiting = list(self._pending.values())
+            self._pending.clear()
+        for q in waiting:
+            q.put({"error": f"the browser extension {why}"})
+        self._notify()
 
     # -- server ------------------------------------------------------- #
 
@@ -229,6 +305,7 @@ class ExtensionBridge:
             # One extension at a time. A second connection replaces the first,
             # which is what a browser restart or an extension reload looks
             # like from here -- refusing it would need a manual reconnect.
+            self._last_seen = time.monotonic()
             with self._client_lock:
                 old, self._client = self._client, conn
             if old is not None:
@@ -279,6 +356,7 @@ class ExtensionBridge:
         try:
             while True:
                 opcode, data = read_frame(conn)
+                self._last_seen = time.monotonic()
                 if opcode == OP_CLOSE:
                     break
                 if opcode == OP_PING:
