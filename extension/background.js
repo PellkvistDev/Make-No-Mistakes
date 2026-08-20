@@ -54,6 +54,7 @@ function connect() {
     // Every port in the list gets tried in turn, so a port taken by something
     // else costs a second rather than the feature.
     retryMs = RETRY_MIN_MS;
+    chrome.alarms.clear("reconnect");
     setBadge("on");
     send({ type: "hello", agent: "mnm-extension", version:
            chrome.runtime.getManifest().version });
@@ -77,13 +78,31 @@ function connect() {
   ws.onerror = () => { try { ws.close(); } catch {} };
 }
 
+// An MV3 service worker is killed after 30 seconds idle, and a pending
+// setTimeout does NOT survive that. Relying on one meant: install the
+// extension before the app is listening, retry for half a minute, get
+// terminated, and never reconnect -- the extension sits there dead while the
+// app waits for a connection that will never come, and control_chrome quietly
+// launches a separate browser instead. An alarm is the one timer that outlives
+// the worker; the timeout is kept for the fast retries inside a live worker.
 function scheduleRetry() {
   if (paused) return;
   portIndex += 1;
   const wait = retryMs;
   retryMs = Math.min(retryMs * 2, RETRY_MAX_MS);
   setTimeout(connect, wait);
+  chrome.alarms.create("reconnect", { periodInMinutes: 0.5 });
 }
+
+chrome.alarms.onAlarm.addListener((a) => {
+  if (a.name === "reconnect") connect();
+});
+
+// Anything the user does in the browser wakes the worker, so a reconnect
+// happens the moment they touch a tab rather than up to half a minute later.
+// connect() is a no-op when a socket is already open.
+chrome.tabs.onActivated.addListener(() => connect());
+chrome.windows.onFocusChanged.addListener(() => connect());
 
 function send(obj) {
   if (socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(obj));

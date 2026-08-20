@@ -15,6 +15,19 @@ says *Connected* as soon as both ends are up.
 Chrome, Edge, Brave, Arc and anything else Chromium-based all work; the app's
 Settings panel has a button that opens this folder for you.
 
+## If it says it isn't connected
+
+The app has to be running for the extension to have anything to connect to, and
+the extension reconnects on its own — within a few seconds if you click around
+in the browser, within thirty otherwise. If it stays disconnected:
+
+- Is the toolbar button showing `||`? That is paused. Click it.
+- Is **Use my own browser** actually on in Settings → Browser?
+- Reload the extension on `chrome://extensions` (the circular arrow).
+
+When it is off, the agent falls back to launching a separate browser of its own
+and **says so in the chat** rather than leaving you watching the wrong window.
+
 ## What it does, and what it cannot
 
 It talks **only** to the app, on `127.0.0.1`. Nothing is uploaded, there is no

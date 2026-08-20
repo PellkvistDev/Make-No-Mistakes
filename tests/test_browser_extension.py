@@ -225,3 +225,117 @@ def test_it_counts_as_the_users_browser(wired):
     someone's real session."""
     sess, _ = wired
     assert sess.is_attached is True
+
+
+# --------------------------------------------------------------------- #
+# Reported: "I installed the extension and told it to use my open browser,
+# and it opened a new blank Chrome window."
+#
+# Three separate faults, each of which fails in silence.
+
+import types  # noqa: E402
+
+from glmcode import browser_extension as bx  # noqa: E402
+from glmcode.config import Config  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_bridge_module():
+    bx.reset_for_tests()
+    yield
+    bx.reset_for_tests()
+
+
+def test_the_port_is_opened_at_boot_not_when_settings_is_first_looked_at():
+    """The bridge used to start lazily, from the Settings panel's status call.
+    So the ordinary launch -- app starts, setting already on, nobody opens
+    Settings -- left NOTHING for the browser to connect to, and the extension
+    sat there unable to reach a thing."""
+    import sys
+    import types as t
+    sys.modules.setdefault("webview", t.SimpleNamespace(
+        Window=object, FOLDER_DIALOG=object(), OPEN_DIALOG=object(), SAVE_DIALOG=object()))
+    from glmcode.gui import app as gui_app
+
+    cfg = Config()
+    cfg.browser_use_mine = True
+    api = gui_app.Api.__new__(gui_app.Api)
+    api._cfg = cfg
+    assert bx.bridge(start=False) is None          # nothing listening yet
+    # The one line boot() runs; calling boot() itself would drag in the whole app.
+    bx.bridge(start=bx.enabled(api._cfg))
+    assert bx.bridge(start=False) is not None
+    assert bx.bridge(start=False).port
+
+
+def test_boot_opens_nothing_when_the_setting_is_off():
+    """Someone who never turns this on never has a port open."""
+    cfg = Config()
+    bx.bridge(start=bx.enabled(cfg))
+    assert bx.bridge(start=False) is None
+
+
+def test_falling_back_to_a_launched_browser_says_so_out_loud():
+    """The observable symptom was a second window opening with a blank tab, and
+    nothing about that says 'your extension isn't connected'."""
+    import glmcode.agent as agent_mod
+
+    built, warnings = {}, []
+
+    class FakeSession:
+        def __init__(self, **kw):
+            built.update(kw)
+            self.is_open = True
+
+        def start(self):
+            pass
+
+    fake_mod = types.ModuleType("glmcode.browser_session")
+    fake_mod.BrowserSession = FakeSession
+    import sys
+    sys.modules["glmcode.browser_session"] = fake_mod
+    try:
+        ag = agent_mod.Agent.__new__(agent_mod.Agent)
+        ag.browser_session = None
+        ag.cfg = Config()
+        ag.cfg.browser_use_mine = True          # on, but nothing connected
+        ag.events = types.SimpleNamespace(info=lambda m: None,
+                                          warn=lambda m: warnings.append(m))
+        ag._ensure_browser_session()
+    finally:
+        sys.modules.pop("glmcode.browser_session", None)
+
+    assert warnings, "it fell back to a separate browser without saying anything"
+    said = warnings[0]
+    assert "isn't connected" in said
+    assert "separate browser window" in said
+    # And it still worked -- the fallback is right, the silence was the bug.
+    assert built.get("connect_url") is None and "headless" in built
+
+
+def test_no_warning_when_the_user_never_asked_for_their_own_browser():
+    import glmcode.agent as agent_mod
+
+    warnings = []
+
+    class FakeSession:
+        def __init__(self, **kw):
+            self.is_open = True
+
+        def start(self):
+            pass
+
+    fake_mod = types.ModuleType("glmcode.browser_session")
+    fake_mod.BrowserSession = FakeSession
+    import sys
+    sys.modules["glmcode.browser_session"] = fake_mod
+    try:
+        ag = agent_mod.Agent.__new__(agent_mod.Agent)
+        ag.browser_session = None
+        ag.cfg = Config()
+        ag.events = types.SimpleNamespace(info=lambda m: None,
+                                          warn=lambda m: warnings.append(m))
+        ag._ensure_browser_session()
+    finally:
+        sys.modules.pop("glmcode.browser_session", None)
+    assert warnings == []

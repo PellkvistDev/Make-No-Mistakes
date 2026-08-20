@@ -725,6 +725,27 @@ the app.
   cares only whose browser this is. The Browser Agent gets
   `BROWSER_ATTACHED_NOTE` either way.
 
+**Three ways this fails in silence, all of them found by one bug report.** The
+symptom was a second Chrome window opening with a blank tab, which says nothing
+about any of the causes:
+
+- **An MV3 service worker is killed after 30 seconds idle, and a pending
+  `setTimeout` does not survive it.** The reconnect loop was a `setTimeout`, so
+  the ordinary install order — load the extension while the app is not yet
+  listening — burned a few retries, got terminated, and never tried again.
+  `chrome.alarms` is the one timer that outlives the worker; `tabs.onActivated`
+  and `windows.onFocusChanged` cover the gap below the alarm's 30-second floor,
+  since browsing wakes the worker anyway. `connect()` must therefore stay a
+  no-op when a socket already exists, or browsing sprays connections.
+- **The port was opened lazily, by the Settings panel's status call.** So a
+  normal launch — app starts, setting already on, nobody opens Settings — left
+  nothing to connect to. `boot()` opens it now when the setting is on, and only
+  then.
+- **The fallback was silent.** With the setting on and nothing connected,
+  `control_chrome` quietly launched a separate browser. It warns now
+  (`not_connected_hint()`), naming the port and what to check, because the
+  feature looked broken rather than off.
+
 What the extension route gives up: input is dispatched as page events, so a site
 that checks `event.isTrusted` (bot detection on sign-in pages, mostly) will
 refuse it. The launched browser uses real browser-level input and remains the

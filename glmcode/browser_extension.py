@@ -52,6 +52,23 @@ def bridge_if_connected(cfg):
     return b if (b is not None and b.connected) else None
 
 
+def not_connected_hint() -> str:
+    """What to say when 'use my own browser' is on but nothing is on the end.
+
+    Names the state AND the next move, because the observable symptom is a
+    second browser window opening with a blank tab, and nothing about that says
+    "your extension isn't connected".
+    """
+    b = bridge(start=True)
+    where = f"port {b.port}" if b and b.port else "a local port"
+    return ("'Use my own browser' is on, but the extension isn't connected, so "
+            f"I'm falling back to a separate browser window. The app is "
+            f"listening on {where}. Check: is the browser you installed the "
+            "extension in actually open? Is its toolbar button showing a pause "
+            "mark (click it to resume)? Settings -> Browser says Connected the "
+            "moment both ends are up.")
+
+
 def status(cfg) -> dict:
     """What Settings shows: is it on, is the port up, is a browser on it."""
     b = bridge(start=enabled(cfg))

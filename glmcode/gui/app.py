@@ -378,6 +378,17 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
 
     def boot(self):
         _startup_log("[py] boot() called")
+        # Open the extension's port NOW if the setting is on. It used to be
+        # opened lazily, the first time Settings -> Browser was rendered, which
+        # meant a normal launch -- app starts, setting already on, nobody opens
+        # Settings -- left nothing for the browser to connect to. The extension
+        # would sit there unable to reach anything and control_chrome would
+        # quietly launch a separate browser instead.
+        try:
+            from .. import browser_extension
+            browser_extension.bridge(start=browser_extension.enabled(self._cfg))
+        except Exception:
+            pass
         has_key = self._ensure_client() is not None
         # Setup is shown when this install has not been through it -- not
         # merely when no key can be found. The key is persisted with `setx`,
