@@ -134,7 +134,10 @@ def test_the_apps_tools_are_translated_rather_than_duplicated():
     assert "dispatch_worker" in names
     d = next(d for d in decls if d["name"] == "dispatch_worker")
     assert d["parameters"]["type"] == "object"
-    assert set(d["parameters"]["properties"]) == {"name", "task"}
+    # kind picks the worker: "code" works on the project, "browser" drives the
+    # web browser. Named exactly so the translation is checked to carry every
+    # property across rather than the ones someone remembered.
+    assert set(d["parameters"]["properties"]) == {"name", "task", "kind"}
     assert d["parameters"]["required"] == ["task"]
     assert d["description"]
     # Flattened: no OpenAI-style {"type": "function", "function": {...}} left.

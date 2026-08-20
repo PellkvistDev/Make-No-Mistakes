@@ -384,11 +384,18 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
         # Settings -- left nothing for the browser to connect to. The extension
         # would sit there unable to reach anything and control_chrome would
         # quietly launch a separate browser instead.
+        # Not swallowed silently. "Nothing was listening" is the one failure
+        # this feature has that the user cannot see from the outside -- the
+        # extension just reports connection refused, in a console they would
+        # have to go looking for.
         try:
             from .. import browser_extension
-            browser_extension.bridge(start=browser_extension.enabled(self._cfg))
-        except Exception:
-            pass
+            if browser_extension.enabled(self._cfg):
+                b = browser_extension.bridge(start=True)
+                _startup_log(f"[py] extension port: {b.port}" if b
+                             else "[py] extension port: NONE — every port busy")
+        except Exception as e:                             # never blocks boot
+            _startup_log(f"[py] extension port failed: {type(e).__name__}: {e}")
         has_key = self._ensure_client() is not None
         # Setup is shown when this install has not been through it -- not
         # merely when no key can be found. The key is persisted with `setx`,

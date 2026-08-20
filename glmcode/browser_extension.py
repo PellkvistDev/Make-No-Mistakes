@@ -94,6 +94,12 @@ def status(cfg, listen: bool = False) -> dict:
         "connected": bool(b and b.connected),
         "browser": (b.hello.get("agent") if b else "") or "",
         "version": (b.hello.get("version") if b else "") or "",
+        # What the connection actually did, most recent first. Every report of
+        # this feature so far has come down to "it said connected but wasn't",
+        # and neither end could say when it went or why. Chrome's extensions
+        # page shows errors with no usable timestamp, so it cannot settle it
+        # either. This can.
+        "log": list(reversed(b.events)) if b else [],
     }
 
 
