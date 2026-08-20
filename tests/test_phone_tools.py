@@ -452,6 +452,15 @@ def test_review_changes_takes_no_arguments():
 
 
 @needs_node
+def test_the_prompt_names_when_to_call_why():
+    """A tool the model never thinks to call is not a feature -- and this one
+    is only ever reached for on a hunch, which is the hardest kind to have."""
+    p = _node("out(C.SYSTEM_PROMPT);")
+    assert "why()" in p
+    assert "tried and reverted" in p
+
+
+@needs_node
 def test_the_phone_prompt_names_when_to_reach_for_them():
     # A tool the model never thinks to call is not a feature, and the phone is
     # where this matters most: the screen locks, the app is backgrounded, and a
@@ -727,3 +736,188 @@ def test_both_scans_agree_on_what_the_repo_contains():
     assert "a.py" in r["afterGrep"]
 
 
+
+
+# --------------------------------------------------------------------- #
+# why
+#
+# The desktop grew this because an agent reads CODE, which is the one artefact
+# that cannot say what was tried and reverted: a line that came back looks
+# exactly like a line never touched. That argument is not weaker on the phone.
+# It is stronger -- this device has the least context, the shortest turns, and
+# no shell to go looking with.
+
+FILE = (
+    "import os\n"
+    "\n"
+    "# The cap is 40 because a bigger frame drops the scan rate to a crawl\n"
+    "# on the device this is for.\n"
+    "CAP = 40\n"
+    "\n"
+    "\n"
+    "def scan(frame,\n"
+    "         cap=CAP):\n"
+    '    """Decode one frame. Capped on purpose -- see CAP."""\n'
+    "    return frame[:cap]\n"
+    "\n"
+    "\n"
+    "def other():\n"
+    "    return 1\n"
+)
+
+COMMITS = [
+    {"sha": "aaaaaaaaaaaa", "commit": {
+        "author": {"date": "2026-08-01T10:00:00Z"},
+        "message": "Cap the decode frame\n\nA full 1920x1080 frame was tried and reverted: jsQR is plain\n"
+                   "JavaScript costing per pixel.\n\nCo-authored-by: Claude <noreply@anthropic.com>\n"
+                   "Claude-Session: https://claude.ai/code/session_x"}},
+    {"sha": "bbbbbbbbbbbb", "commit": {
+        "author": {"date": "2026-07-20T09:00:00Z"},
+        "message": "Add the scanner"}},
+]
+
+
+def _with_history(files=None, commits=None, extra=""):
+    import json as _json
+    return """
+      const gh = fakeGh(%s);
+      gh.__commits = %s;
+      gh.commits = async (p, n) => gh.__commits.slice(0, n || 5);
+      const t = C.makeTools(gh, {});
+      %s
+    """ % (_json.dumps(files or {"a.py": FILE}), _json.dumps(commits if commits is not None else COMMITS), extra)
+
+
+@needs_node
+def test_why_quotes_the_line_and_the_comment_above_it():
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 5 }));'))
+    assert "a.py:5" in r
+    assert "5 | CAP = 40" in r
+    assert "WHAT THE CODE SAYS ABOUT ITSELF" in r
+    assert "drops the scan rate to a crawl" in r
+
+
+@needs_node
+def test_why_reads_the_docstring_under_a_wrapped_signature():
+    """Signatures wrap routinely, so the docstring is not reliably at def + 1.
+    Looking only upwards finds half the reasons in this codebase."""
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 11 }));'))
+    assert "from the enclosing block" in r
+    assert "Decode one frame" in r
+
+
+@needs_node
+def test_a_comment_between_two_functions_is_not_claimed_by_the_one_above():
+    """The nearest def ABOVE a line is frequently the one that already ended.
+    Handing back a neighbour's docstring reads exactly like an answer, which is
+    worse than returning nothing -- so the heuristic fails closed."""
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 15 }));'))
+    assert "Decode one frame" not in r
+
+
+@needs_node
+def test_why_reports_the_commits_with_their_bodies():
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 5 }));'))
+    assert "aaaaaaaa" in r
+    assert "2026-08-01" in r
+    assert "Cap the decode frame" in r
+    assert "tried and reverted" in r
+    assert "These are reasons, not a changelog" in r
+
+
+@needs_node
+def test_trailers_are_stripped():
+    """Plumbing, not a reason, and it costs context on every call."""
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 5 }));'))
+    assert "Co-authored-by" not in r
+    assert "Claude-Session" not in r
+
+
+@needs_node
+def test_why_says_the_history_is_the_files_not_the_lines():
+    """The desktop reads `git log -L` and answers for the LINE. Over the API
+    the finest filter is the path. Implying otherwise would hand back a
+    confident wrong reason."""
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 5 }));'))
+    assert "cannot filter by line" in r
+    assert "may not all be about line 5" in r
+
+
+@needs_node
+def test_a_file_with_no_commits_still_gets_what_the_code_says():
+    """A tool that answers nothing for an uncommitted file is useless exactly
+    when the agent has just written it."""
+    r = _node(_with_history(commits=[],
+                            extra='out(await t.why({ path: "a.py", line: 5 }));'))
+    assert "drops the scan rate to a crawl" in r
+    assert "No commit has touched this yet" in r
+
+
+@needs_node
+def test_a_history_call_that_fails_still_returns_the_comment():
+    r = _node("""
+      const gh = fakeGh({ "a.py": %s });
+      gh.commits = async () => { throw new Error("GitHub 409: repository is empty"); };
+      const t = C.makeTools(gh, {});
+      out(await t.why({ path: "a.py", line: 5 }));
+    """ % __import__("json").dumps(FILE))
+    assert "drops the scan rate to a crawl" in r
+    assert "Couldn't read the history" in r
+    assert "repository is empty" in r
+
+
+@needs_node
+def test_why_without_a_line_is_the_whole_files_history():
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py" }));'))
+    assert "WHAT CHANGED THIS FILE" in r
+    assert "cannot filter by line" not in r
+    assert "WHAT THE CODE SAYS ABOUT ITSELF" not in r
+
+
+@needs_node
+def test_a_line_past_the_end_is_said_plainly():
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 900 }));'))
+    assert "there is no line 900" in r
+
+
+@needs_node
+def test_an_unreadable_file_is_reported_not_raised():
+    r = _node(_with_history(extra='out(await t.why({ path: "nope.py", line: 1 }));'))
+    assert "Couldn't read nope.py" in r
+
+
+@needs_node
+def test_max_commits_is_bounded():
+    many = [{"sha": "s%d" % i, "commit": {"author": {"date": "2026-01-01T00:00:00Z"},
+                                          "message": "c%d" % i}} for i in range(30)]
+    r = _node(_with_history(commits=many, extra="""
+      const asked = [];
+      gh.commits = async (p, n) => { asked.push(n); return gh.__commits.slice(0, n); };
+      await t.why({ path: "a.py", max_commits: 999 });
+      await t.why({ path: "a.py", max_commits: 0 });
+      out(asked);
+    """))
+    assert r == [20, 5]
+
+
+@needs_node
+def test_a_long_commit_body_is_trimmed_rather_than_sent_whole():
+    body = "\n".join("line %d" % i for i in range(80))
+    long = [{"sha": "cccccccc", "commit": {"author": {"date": "2026-01-01T00:00:00Z"},
+                                           "message": "subject\n\n" + body}}]
+    r = _node(_with_history(commits=long,
+                            extra='out(await t.why({ path: "a.py" }));'))
+    assert "line 29" in r
+    assert "line 40" not in r
+    assert "more lines" in r
+
+
+@needs_node
+def test_why_asks_github_for_the_path_it_was_given():
+    r = _node(_with_history(extra="""
+      const asked = [];
+      gh.commits = async (p, n) => { asked.push(p); return []; };
+      await t.why({ path: "./a.py" });
+      out(asked);
+    """))
+    assert r == ["a.py"]          # the leading ./ is normalised away

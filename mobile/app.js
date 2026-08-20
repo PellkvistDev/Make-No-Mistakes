@@ -2688,7 +2688,11 @@
   function planMode() { return pref("mnm.plan", "0") === "1"; }
   function subagentsOn() { return pref("mnm.subagents", "1") === "1"; }
   function hapticsOn() { return pref("mnm.haptics", "1") === "1"; }
-  const READ_TOOL_NAMES = ["list_dir", "glob", "read_file", "grep", "search_code"];
+  // `why` belongs here for the same reason view_image does: it is read-only,
+  // and "what was already tried and reverted" is exactly a planning question --
+  // the one a plan that repeats a mistake was missing.
+  const READ_TOOL_NAMES = ["list_dir", "glob", "read_file", "grep", "search_code",
+                           "why"];
   // view_image is read-only, and looking at a mockup is exactly a planning job,
   // so plan mode gets it too (session.readTools already wires the implementation).
   const READ_SCHEMAS = AC.TOOL_SCHEMAS.filter((s) => READ_TOOL_NAMES.includes(s.function.name))

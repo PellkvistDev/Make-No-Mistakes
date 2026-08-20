@@ -431,6 +431,16 @@
         return gh("GET",
           `/repos/${owner}/${repo}/compare/${encodeURIComponent(baseSha)}...${encodeURIComponent(branch)}`);
       },
+      // Commits that touched a path, newest first. The desktop reads
+      // `git log -L a,b:file` -- the per-LINE history. There is no API for
+      // that: GitHub can filter commits by path and no finer. So this is the
+      // file's history, and `why` says so rather than implying a precision it
+      // does not have.
+      async commits(path, n) {
+        return gh("GET", `/repos/${owner}/${repo}/commits`
+          + `?path=${encodeURIComponent(path)}&sha=${encodeURIComponent(branch)}`
+          + `&per_page=${Math.max(1, Math.min(n || 5, 20))}`);
+      },
       // Create the branch as an ORPHAN (no code history) with a single marker
       // file, so session data lives here without touching main/PRs.
       async createOrphanBranch() {
@@ -1413,6 +1423,173 @@
       return `Remembered in ${path}: ${text}`;
     };
 
+    // --- why: the reasons are in git, and the phone could not reach them --- //
+    //
+    // The desktop grew this tool because an agent reads CODE, which is the one
+    // artefact that cannot say what was tried and reverted: a line that came
+    // back looks exactly like a line never touched. So it proposes the thing
+    // that was measured and undone, and the only defence is that a human
+    // remembers.
+    //
+    // That argument is not weaker on the phone. It is stronger -- this device
+    // has the least context, the shortest turns, and no shell to go looking
+    // with. Leaving it out here would mean the reasons are reachable from one
+    // of the two machines that work on the same repository.
+    const COMMENT_STARTS = ["#", "//", "/*", "*", "*/", "--", ";", "<!--"];
+    const DEF_PATTERN = new RegExp(
+      "^\\s*(?:async\\s+)?(?:def|class|function|fn|func|type|interface|struct|impl)\\b"
+      + "|^\\s*(?:export\\s+)?(?:const|let|var)\\s+\\w+\\s*=\\s*(?:async\\s*)?(?:\\(|function)"
+      + "|^\\s*\\w+\\s*[:=]\\s*(?:async\\s*)?\\([^)]*\\)\\s*=>");
+    const TRAILER = /^(Co-Authored-By|Co-authored-by|Signed-off-by|Claude-Session|Generated with|https:\/\/claude\.ai)/i;
+    const TRIPLE_D = '"' + '""';
+    const TRIPLE_S = "'" + "''";
+    const indentOf = (s) => s.length - s.replace(/^\s+/, "").length;
+
+    // A blank line ends the run as firmly as code does. A comment separated
+    // from the thing it describes is usually about something else, and
+    // dragging it in attributes the wrong reason to the wrong code -- worse
+    // than returning nothing, because it reads exactly like an answer.
+    function commentRunAbove(lines, idx, limit) {
+      const out = [];
+      for (let i = idx - 1; i >= 0 && out.length < (limit || 40); i--) {
+        const t = lines[i].trim();
+        if (!t || !COMMENT_STARTS.some((c) => t.startsWith(c))) break;
+        out.push(lines[i].replace(/\s+$/, ""));
+      }
+      return out.reverse().join("\n");
+    }
+
+    // The nearest def ABOVE is not good enough: a comment between two
+    // functions belongs to the one below, and the nearest def above is the one
+    // that already ended. Indentation is the check -- the target has to be
+    // nested deeper than the header that supposedly contains it. Cheap, no
+    // parser, and it fails closed.
+    function enclosingDef(lines, idx) {
+      const want = idx < lines.length ? indentOf(lines[idx]) : 0;
+      for (let i = Math.min(idx, lines.length - 1); i >= 0; i--) {
+        if (DEF_PATTERN.test(lines[i]) && indentOf(lines[i]) < want) return i;
+      }
+      return -1;
+    }
+
+    // Signatures wrap routinely, so the docstring is not reliably at idx+1.
+    // Walk to the end of the header (parens balanced, line ending in a colon)
+    // and look at what follows.
+    function docstringBelow(lines, idx, limit) {
+      let depth = 0, head = -1;
+      for (let j = idx; j < Math.min(idx + 12, lines.length); j++) {
+        depth += (lines[j].split("(").length - 1) - (lines[j].split(")").length - 1);
+        if (depth <= 0 && /:\s*$/.test(lines[j])) { head = j; break; }
+      }
+      if (head < 0 || head + 1 >= lines.length) return "";
+      const first = lines[head + 1].trim();
+      const quote = first.startsWith(TRIPLE_D) ? TRIPLE_D
+                  : first.startsWith(TRIPLE_S) ? TRIPLE_S : "";
+      if (!quote) return "";
+      const body = [lines[head + 1].replace(/\s+$/, "")];
+      const opens = first.split(quote).length - 1;
+      if (opens >= 2 && first.length > quote.length) return body[0];
+      for (let j = head + 2; j < Math.min(head + 2 + (limit || 40), lines.length); j++) {
+        body.push(lines[j].replace(/\s+$/, ""));
+        if (lines[j].includes(quote)) break;
+      }
+      return body.join("\n");
+    }
+
+    function formatCommit(c, maxBody) {
+      const msg = String((c && c.commit && c.commit.message) || "");
+      const nl = msg.indexOf("\n");
+      const subject = (nl < 0 ? msg : msg.slice(0, nl)).trim();
+      const author = (c.commit && c.commit.author) || {};
+      const date = String(author.date || "").slice(0, 10);
+      const out = [`  ${String(c.sha || "").slice(0, 8)}  ${date}  ${subject}`];
+      // Trailers are plumbing, not a reason, and they cost context every call.
+      let body = (nl < 0 ? "" : msg.slice(nl + 1)).split("\n")
+        .map((l) => l.replace(/\s+$/, ""))
+        .filter((l) => !TRAILER.test(l.trim()));
+      while (body.length && !body[body.length - 1]) body.pop();
+      while (body.length && !body[0]) body.shift();
+      if (body.length > maxBody) {
+        const dropped = body.length - maxBody;
+        body = body.slice(0, maxBody).concat(
+          [`... (+${dropped} more lines — open the commit for all of it)`]);
+      }
+      return out.concat(body.map((l) => (l ? "      " + l : ""))).join("\n");
+    }
+
+    const WHY_CLOSING =
+      "\nThese are reasons, not a changelog. A commit saying something was "
+      + "TRIED and reverted is telling you not to do it again — check that "
+      + "before you repeat it.";
+
+    api.why = async (a) => {
+      const path = String((a && a.path) || "").replace(/^\.?\/*/, "");
+      if (!path) return "ERROR: why() needs a path.";
+      const line = Math.max(0, parseInt((a && a.line) || 0, 10) || 0);
+      const n = Math.max(1, Math.min(parseInt((a && a.max_commits) || 5, 10) || 5, 20));
+
+      let f;
+      try { f = await load(path); }
+      catch (e) { return `Couldn't read ${path}: ${(e && e.message) || e}`; }
+      const lines = f.text.split("\n");
+      const out = [];
+
+      // The comment block is computed and returned FIRST, and the history is
+      // added to it. A file the agent has only just written has no commits at
+      // all, and a tool that answers nothing for one is useless exactly when
+      // it was most likely to be asked.
+      if (line) {
+        if (line > lines.length) {
+          return `${path} has ${lines.length} lines, so there is no line ${line}. `
+               + "Read the file and ask about a line that exists.";
+        }
+        out.push(`${path}:${line}`);
+        out.push(`    ${line} | ${lines[line - 1].replace(/\s+$/, "").slice(0, 160)}`);
+        const said = [];
+        const direct = commentRunAbove(lines, line - 1);
+        if (direct) said.push(direct);
+        const d = enclosingDef(lines, line - 1);
+        if (d >= 0 && d !== line - 1) {
+          const block = [commentRunAbove(lines, d), lines[d].replace(/\s+$/, ""),
+                         docstringBelow(lines, d)].filter(Boolean).join("\n");
+          if (block && !said.includes(block)) {
+            said.push(`(from the enclosing block, line ${d + 1})\n${block}`);
+          }
+        }
+        if (said.length) {
+          out.push("\nWHAT THE CODE SAYS ABOUT ITSELF");
+          for (const x of said) out.push(x);
+        }
+      } else {
+        out.push(path);
+      }
+
+      let commits;
+      try { commits = await gh.commits(path, n); }
+      catch (e) {
+        out.push(`\n(Couldn't read the history: ${(e && e.message) || e})`);
+        return out.join("\n");
+      }
+      if (!Array.isArray(commits) || !commits.length) {
+        out.push("\nNo commit has touched this yet — it is uncommitted, or it "
+                 + "arrived under a different name.");
+        return out.join("\n");
+      }
+      // Said plainly rather than glossed over: the desktop's `why` reads
+      // `git log -L a,b:file` and answers for the LINE. Over the API the
+      // finest filter is the path, so these commits touched the file and may
+      // have nothing to do with the line asked about. Implying otherwise would
+      // hand back a confident wrong reason -- the exact failure the
+      // enclosing-block heuristics above fail closed to avoid.
+      out.push(line
+        ? "\nWHAT CHANGED THIS FILE, newest first (the GitHub API cannot filter "
+          + "by line, so these may not all be about line " + line + ")"
+        : "\nWHAT CHANGED THIS FILE, newest first");
+      for (const c of commits) out.push(formatCommit(c, 30));
+      out.push(WHY_CLOSING);
+      return out.join("\n");
+    };
+
     // What this chat has changed, as a diff. The desktop reads its shadow git
     // repo; the phone commits straight to a branch, so the equivalent question
     // is "what do my commits look like against where I started" -- which the
@@ -1511,6 +1688,21 @@
       "reads it too. For facts that outlive the conversation, not for a running task list (that " +
       "is todo_write).",
       { text: str("The note, in one sentence") }, ["text"]),
+    // Same trigger as the desktop's, with one honest difference stated: over
+    // the API the finest filter is the path, not the line.
+    tool("why",
+      "Why a piece of code is the way it is: the comment or docstring that explains it, plus the " +
+      "commits that touched that file WITH their full messages. Reach for it before changing " +
+      "anything whose reason is not obvious from the code — a constant, a workaround, a retry or " +
+      "timeout, an ordering that looks arbitrary, a guard that looks redundant. Code cannot tell " +
+      "you what was already tried and reverted; a line that came back looks identical to one " +
+      "never touched, and the commit that removed an approach usually says why it did not work.",
+      { path: str("File path in the repo"),
+        line: { type: "integer",
+                description: "1-based line to explain. Omit for the whole file's history." },
+        max_commits: { type: "integer",
+                       description: "How many commits to report, newest first (default 5, max 20)" } },
+      ["path"]),
     tool("review_changes",
       "Show everything this chat has changed so far, as a diff against where it started. Use it " +
       "to check your own work before saying a task is done, or when you are not sure what state " +
@@ -1637,6 +1829,14 @@
     "anything with more than two or three steps, keep a todo_write list and update it as you go, " +
     "so whoever picks this up (you, later, or the desktop) can see where it got to. Before you say " +
     "a task is done, use review_changes to look at what you actually changed.\n\n" +
+    // Named for the same reason: this repository writes down WHY in commit
+    // bodies, and code is the one artefact that cannot say what was tried and
+    // reverted. A line that came back looks identical to one never touched.
+    "Before you change something whose reason is not obvious — a constant, a workaround, a " +
+    "retry, an ordering that looks arbitrary, a guard that looks redundant — call why() on " +
+    "it. Code cannot tell you what was already tried and reverted — a line that came back looks " +
+    "identical to one never touched — and the commit that removed an approach usually says why " +
+    "it did not work.\n\n" +
     "THIS CHAT IS SHARED WITH THE USER'S DESKTOP. The same conversation moves between the two, and " +
     "the desktop has tools you do not have here (a shell, tests, a browser). Earlier turns may " +
     "therefore show tool calls that don't exist on this device — treat those as history, not as " +
