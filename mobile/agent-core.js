@@ -423,6 +423,14 @@
         try { const r = await gh("GET", `/repos/${owner}/${repo}/git/ref/heads/${branch}`); return r.object.sha; }
         catch { return null; }
       },
+      // What changed between a starting commit and where the branch is now.
+      // This is the phone's answer to the desktop's shadow git repo: it has no
+      // filesystem of its own, so "what have I changed" is a question about
+      // its own commits, which the compare API answers with the patches.
+      async compare(baseSha) {
+        return gh("GET",
+          `/repos/${owner}/${repo}/compare/${encodeURIComponent(baseSha)}...${encodeURIComponent(branch)}`);
+      },
       // Create the branch as an ORPHAN (no code history) with a single marker
       // file, so session data lives here without touching main/PRs.
       async createOrphanBranch() {
@@ -1171,6 +1179,20 @@
       const f = await gh.getFile(path);
       cache.set(path, f); return f;
     }
+    // GitHub refuses a write to a path that already exists unless it is told
+    // which blob is being replaced, so the sha has to survive a write -- and
+    // the response to the write is where the NEW one comes from. Caching the
+    // text with no sha (what this used to do) made the SECOND edit of a file
+    // in one chat fail every time: load() served the cached entry, its sha was
+    // undefined, and the request went out without one.
+    function newSha(res) {
+      return (res && res.content && res.content.sha) || undefined;
+    }
+    // Fallback for a cache entry that predates the above, or a fake in a test:
+    // ask GitHub what the file is now rather than sending nothing.
+    async function currentSha(path) {
+      try { return (await gh.getFile(path)).sha; } catch { return undefined; }
+    }
     function tokenize(s) {
       const out = [];
       for (const m of String(s).matchAll(/[A-Za-z0-9_]+/g)) {
@@ -1248,8 +1270,8 @@
         if (!(await confirmWrite("write", a.path, a.content))) return "User declined to write " + a.path;
         await beforeWrite(a.path);
         let sha; try { sha = (await gh.getFile(a.path)).sha; } catch { sha = undefined; }
-        await gh.putFile(a.path, a.content, a.message || `Update ${a.path}`, sha);
-        cache.set(a.path, { text: a.content, sha: undefined }); treeCache = null;
+        const w = await gh.putFile(a.path, a.content, a.message || `Update ${a.path}`, sha);
+        cache.set(a.path, { text: a.content, sha: newSha(w) }); treeCache = null;
         onCommit(a.path);
         return "Wrote and committed " + a.path;
       },
@@ -1262,12 +1284,119 @@
           : f.text.replace(a.old_string, a.new_string);
         if (!(await confirmWrite("edit", a.path, next))) return "User declined to edit " + a.path;
         await beforeWrite(a.path);
-        await gh.putFile(a.path, next, a.message || `Edit ${a.path}`, f.sha);
-        cache.set(a.path, { text: next, sha: undefined }); treeCache = null;
+        const e = await gh.putFile(a.path, next, a.message || `Edit ${a.path}`,
+                                   f.sha || (await currentSha(a.path)));
+        cache.set(a.path, { text: next, sha: newSha(e) }); treeCache = null;
         onCommit(a.path);
         return "Edited and committed " + a.path;
       },
     };
+    // --- scaffolding the phone can run on its own ------------------------ //
+    // These need no shell and no new network permission, which is why they
+    // were the wrong things to be missing. The phone is precisely where a
+    // multi-step task gets interrupted halfway -- on a bus, at a desk, put
+    // down mid-thought -- so the tools that keep one on the rails matter MORE
+    // here than on the desktop, not less.
+
+    // Pure in-memory state. Mirrors clean_todo_items in glmcode/tools.py:
+    // same three statuses, same cap, same "one thing in progress" discipline.
+    let todos = [];
+    api.todo_write = async (a) => {
+      const STATUSES = ["pending", "in_progress", "completed"];
+      const list = Array.isArray(a && a.todos) ? a.todos : [];
+      // `content`, not `task`, because the desktop's todo_write takes
+      // `content` -- and a chat that syncs between the two carries the earlier
+      // calls in its own history. A model reading its past call with one field
+      // name and a schema with another will use whichever it read last.
+      todos = list.slice(0, 40).map((t) => ({
+        content: String((t && t.content) || "").trim().slice(0, 200),
+        status: STATUSES.includes(t && t.status) ? t.status : "pending",
+      })).filter((t) => t.content);
+      const done = todos.filter((t) => t.status === "completed").length;
+      return `Todo list updated: ${done}/${todos.length} completed.`;
+    };
+    api.__todos = () => todos;
+
+    // The desktop keeps its memory OUTSIDE the repo (~/.makenomistakes/memory.md).
+    // The phone has no filesystem of its own -- everything it can write is a
+    // commit -- so its notes go in the project's own agent file, which the
+    // desktop already reads into its system prompt. Different file, same job,
+    // and the tool description says so rather than implying the desktop's.
+    //
+    // WHICH file matters more than it looks: prompts._project_memory returns
+    // the FIRST of these that exists, so creating GLM.md in a repo that has a
+    // CLAUDE.md would silently shadow it, and the project's real instructions
+    // would stop being read at all. Append to whichever one is already there;
+    // only invent a name when there is none.
+    const MEMORY_NAMES = ["GLM.md", "AGENTS.md", "CLAUDE.md"];
+    const MEMORY_HEADING = "## Remembered notes";
+    const MEMORY_INTRO = MEMORY_HEADING + "\n\n" +
+      "Added from a phone chat with `remember`.\n";
+    api.remember = async (a) => {
+      const text = String((a && a.text) || "").trim();
+      if (!text) return "ERROR: nothing to remember \u2014 text was empty.";
+      let path = null, existing = "", sha;
+      for (const name of MEMORY_NAMES) {
+        try {
+          const f = await gh.getFile(name);
+          path = name; existing = f.text || ""; sha = f.sha;
+          break;
+        } catch (e) { /* not this one */ }
+      }
+      if (!path) { path = MEMORY_NAMES[0]; existing = ""; sha = undefined; }
+      let next = existing.replace(/\s*$/, "");
+      if (!next.includes(MEMORY_HEADING)) {
+        next = (next ? next + "\n\n" : "") + MEMORY_INTRO;
+      }
+      next = next.replace(/\s*$/, "\n") + `- ${text}\n`;
+      await beforeWrite(path);
+      const r = await gh.putFile(path, next, `Remember: ${text.slice(0, 60)}`, sha);
+      cache.set(path, { text: next, sha: newSha(r) });
+      treeCache = null;
+      onCommit(path);
+      return `Remembered in ${path}: ${text}`;
+    };
+
+    // What this chat has changed, as a diff. The desktop reads its shadow git
+    // repo; the phone commits straight to a branch, so the equivalent question
+    // is "what do my commits look like against where I started" -- which the
+    // GitHub compare API answers directly.
+    api.review_changes = async () => {
+      // A function, not a value: the host records the starting commit in the
+      // background when a chat opens, so at the moment makeTools runs it is
+      // usually not known yet. Asking for it when the tool is CALLED is the
+      // difference between a working diff and a permanent "nothing recorded".
+      const base = typeof opts.baseRef === "function" ? await opts.baseRef()
+                                                     : opts.baseRef;
+      if (!base) {
+        return "No starting point recorded for this chat, so there is nothing " +
+               "to compare against yet. Changes you make from now on will show up here.";
+      }
+      let cmp;
+      try {
+        cmp = await gh.compare(base);
+      } catch (e) {
+        return `Couldn't read the diff: ${(e && e.message) || e}`;
+      }
+      const files = (cmp && cmp.files) || [];
+      if (!files.length) return "Nothing has changed in this chat yet.";
+      const out = [`${files.length} file${files.length === 1 ? "" : "s"} changed ` +
+                   `since this chat started:`];
+      let budget = 20000;
+      for (const f of files) {
+        out.push(`\n--- ${f.filename} (+${f.additions} -${f.deletions})`);
+        const patch = f.patch || "(no textual diff — binary or too large)";
+        out.push(patch.length > budget ? patch.slice(0, budget) + "\n... [truncated]"
+                                       : patch);
+        budget -= Math.min(budget, patch.length);
+        if (budget <= 0) {
+          out.push("\n... [remaining files not shown]");
+          break;
+        }
+      }
+      return out.join("\n");
+    };
+
     // Delegation: only exposed when the host wires a spawner (main agent only,
     // so sub-agents can't spawn further sub-agents).
     if (opts.spawn) {
@@ -1296,6 +1425,34 @@
     tool("search_code", "Find the most relevant code for a description.", { query: str("What you're looking for") }, ["query"]),
     tool("write_file", "Create or overwrite a file and commit it.", { path: str("Path"), content: str("Full new contents"), message: str("Commit message") }, ["path", "content"]),
     tool("edit_file", "Replace an exact string in a file and commit.", { path: str("Path"), old_string: str("Exact text to replace"), new_string: str("Replacement"), replace_all: bool("Replace all"), message: str("Commit message") }, ["path", "old_string", "new_string"]),
+    // Scaffolding. The phone is where a multi-step task gets interrupted
+    // halfway, so keeping one on the rails matters MORE here than on the
+    // desktop -- and none of these needs a shell or a new network permission,
+    // which is what made their absence the wrong kind of gap.
+    tool("todo_write",
+      "Keep a running checklist for a multi-step task, and update it as you go. Write the WHOLE " +
+      "list each time. Exactly one item should be in_progress at a time. Use it whenever a task " +
+      "has more than two or three steps — this chat can be interrupted at any moment, and the " +
+      "list is what lets you pick it back up.",
+      { todos: { type: "array", description: "The complete todo list (replaces the previous one)",
+                 items: { type: "object", properties: {
+                   content: str("What to do"),
+                   status: { type: "string", enum: ["pending", "in_progress", "completed"],
+                             description: "Where it stands" } },
+                   required: ["content", "status"] } } },
+      ["todos"]),
+    tool("remember",
+      "Save a durable note about this project — a convention, a gotcha, a standing instruction " +
+      "the user gave you that will matter next time. It is appended to the project's agent file " +
+      "(GLM.md / AGENTS.md / CLAUDE.md) and committed, so it survives this chat and the desktop " +
+      "reads it too. For facts that outlive the conversation, not for a running task list (that " +
+      "is todo_write).",
+      { text: str("The note, in one sentence") }, ["text"]),
+    tool("review_changes",
+      "Show everything this chat has changed so far, as a diff against where it started. Use it " +
+      "to check your own work before saying a task is done, or when you are not sure what state " +
+      "the files are actually in. Read-only; no arguments.",
+      {}),
   ];
   function tool(name, description, props, required) {
     return { type: "function", function: { name, description, parameters: { type: "object", properties: props, required: required || [] } } };
@@ -1409,6 +1566,14 @@
     "when it next syncs, or via CI. So: make correct, complete, minimal edits; read before you edit; " +
     "prefer search_code/grep to find things; and in your final reply note anything that still needs to " +
     "be run or verified on a real machine. Be concise.\n\n" +
+    // Naming the trigger, because a tool the model never thinks to call is not a
+    // feature. The phone is also where it matters most: a turn here is cut off by
+    // the screen locking or the app being backgrounded, and a list written down is
+    // the difference between resuming and starting over.
+    "This turn can be cut short at any moment — the phone locks, or the app is backgrounded. For " +
+    "anything with more than two or three steps, keep a todo_write list and update it as you go, " +
+    "so whoever picks this up (you, later, or the desktop) can see where it got to. Before you say " +
+    "a task is done, use review_changes to look at what you actually changed.\n\n" +
     "THIS CHAT IS SHARED WITH THE USER'S DESKTOP. The same conversation moves between the two, and " +
     "the desktop has tools you do not have here (a shell, tests, a browser). Earlier turns may " +
     "therefore show tool calls that don't exist on this device — treat those as history, not as " +

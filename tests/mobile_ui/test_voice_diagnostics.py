@@ -47,18 +47,24 @@ def test_it_reports_the_tools_the_session_was_given(phone):
     not out of the source that was supposed to build it."""
     p = _to_chat(phone).page
     # Build a setup exactly as voiceOpen does, without needing a socket.
-    p.evaluate("""() => {
+    # The expected count comes from the page, not from a literal here: what is
+    # being checked is that the diagnostic reports the message that was BUILT,
+    # and a number written down in this file would instead break every time a
+    # tool is added -- which is a test about the tool list, not the diagnostic.
+    n = p.evaluate("""() => {
       const AC = window.AgentCore;
       const schemas = [...AC.TOOL_SCHEMAS, AC.VIEW_IMAGE_SCHEMA,
                        AC.NEEDS_DESKTOP_SCHEMA, ...(AC.WORKER_SCHEMAS || [])];
       const s = AC.liveSetup(AC.LIVE_MODEL, AC.LIVE_VOICE_PROMPT, schemas, {});
       const d = ((s.setup.tools || [])[0] || {}).functionDeclarations || [];
       window.__diagPoke(d.map((x) => x.name), s.setup.systemInstruction.parts[0].text.length);
+      return d.length;
     }""")
     out = _diag(phone)
     assert "dispatch_worker" in out
     assert "write_file" in out
-    assert "15 —" in out, out
+    assert n > 10, n            # a plausible list, not an empty one
+    assert f"{n} \u2014" in out, out
 
 
 def test_it_reports_whether_the_prompt_still_mentions_workers(phone):
