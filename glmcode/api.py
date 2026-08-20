@@ -128,8 +128,22 @@ def _stamp(result, model: str):
 
 
 def note_rate_limited(base_url: str, model: str) -> None:
+    """One observed 429: start its cooldown, and count it for the day.
+
+    Called at every point a 429 is actually SEEN, and nowhere else. It used to
+    be called again at the top of the next attempt, for the model that had
+    failed on the previous one -- harmless for a cooldown, which is just a
+    timestamp being overwritten, but it double-counts a counter. The refusal
+    count is the one honest number this app has about a free tier, so it is
+    worth not inflating.
+    """
     with _rate_limit_lock:
         _rate_limited_at[(base_url, model)] = time.monotonic()
+    try:
+        from . import usage as _usage
+        _usage.record_limited(model)
+    except Exception:
+        pass
 
 
 def is_cooling_down(base_url: str, model: str) -> bool:
@@ -280,7 +294,8 @@ class ZaiClient:
                 # of a chain: the wait is what it exists to avoid.
                 if (isinstance(last_err, ApiError) and last_err.status == 429
                         and tried < len(chain)):
-                    note_rate_limited(self.base_url, payload["model"])
+                    # Whoever saw that 429 already noted it -- both the outer
+                    # path below and the inner one at the end of this branch.
                     payload["model"] = model = chain[tried]
                     tried += 1
                     if on_status:
@@ -299,6 +314,8 @@ class ZaiClient:
                                       model)
                     except ApiError as e:
                         if e.status in RETRYABLE:
+                            if e.status == 429:
+                                note_rate_limited(self.base_url, payload["model"])
                             last_err = e
                             continue
                         raise

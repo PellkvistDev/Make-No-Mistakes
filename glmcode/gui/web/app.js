@@ -3006,7 +3006,15 @@ function renderDefaultsRow(res) {
 }
 
 async function populateModelPicker(data) {
-  const res = data || await api().providers();
+  // A bridge call that REJECTS, which is what a dead or wedged pywebview
+  // gives you. openSettings fires this without awaiting it, so a rejection
+  // here is an unhandled one -- it takes down nothing visible, which is
+  // exactly why it went unnoticed. The panel is better off keeping whatever
+  // it last had than throwing on the way past.
+  let res = data;
+  if (!res) {
+    try { res = await api().providers(); } catch (e) { return; }
+  }
   if (!res || !res.providers) return;
   providersCache = res;
   renderApiList(res);
@@ -3072,7 +3080,9 @@ function quotaRing(q) {
     : frac >= 0.8 ? " low" : "");
   wrap.title = `${used} of ${q.rpd} requests today`
     + (q.rpm ? ` · ${q.rpm}/minute` : "")
-    + "\nCounted by this app, so it can differ from your provider's own total.";
+    + "\nCounted by this app, so it can differ from your provider's own total."
+    + (q.limited ? `\nRefused ${q.limited}× today — so this allowance is`
+                   + " not what your provider is actually enforcing." : "");
   wrap.innerHTML =
     '<svg viewBox="0 0 20 20" aria-hidden="true">'
     + '<circle class="mq-bg" cx="10" cy="10" r="8"/>'
@@ -3080,6 +3090,28 @@ function quotaRing(q) {
     + "</svg><em></em>";
   wrap.querySelector("em").textContent = `${used}/${q.rpd}`;
   return wrap;
+}
+
+/* What the provider itself said, as opposed to what the table above guesses.
+ * Shown for ANY model that has been refused today, including one with no known
+ * free-tier row -- those get no ring, and "no ring" used to be indistinguishable
+ * from "nothing has gone wrong". `cooling` is the live half: it says this model
+ * is being skipped RIGHT NOW, which is the answer to "why did it switch on me". */
+function limitedBadge(q) {
+  const b = document.createElement("span");
+  b.className = "model-limited" + (q.cooling ? " cooling" : "");
+  b.textContent = q.cooling ? "resting" : `${q.limited}× limited`;
+  // timeAgo takes an ISO string in every other caller; a millisecond number
+  // goes through new Date() just as well, and the stamp is stored in unix
+  // seconds because that is what Python wrote.
+  const ago = q.limited_at ? timeAgo(q.limited_at * 1000) : "";
+  b.title = `Rate-limited ${q.limited} time${q.limited === 1 ? "" : "s"} today`
+    + (ago ? ` · last ${ago}` : "")
+    + (q.cooling
+        ? "\nStill resting, so a turn started now goes to the next model in your"
+          + " fallback list."
+        : "\nCounted from the 429s this app actually received.");
+  return b;
 }
 
 const CHECK_SVG = '<svg class="model-opt-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
@@ -3107,6 +3139,7 @@ function buildModelMenu(res) {
     // belongs next to the model rather than in a settings page.
     const q = (res.providers || []).find((p) => p.name === e.provider)?.quota?.[e.model];
     if (q && q.rpd) opt.appendChild(quotaRing(q));
+    if (q && q.limited) opt.appendChild(limitedBadge(q));
     opt.addEventListener("click", () => selectModel(e));
     menu.appendChild(opt);
   }
@@ -3788,6 +3821,7 @@ async function openSettings() {
   populateBackups();
   populateModelPicker();
   populateBrowserModelSelect();
+  populateRateLimits();
   populateMcp();
   populateCommands();
   renderPathRules();
@@ -3824,6 +3858,40 @@ async function populateBrowserModelSelect() {
     }
   }
   sel.value = [...sel.options].some((o) => o.value === cur) ? cur : JSON.stringify(["", ""]);
+}
+
+/* Today's 429s, under the fallback list they exist to justify.
+ *
+ * Everywhere else in this app a model's usage is drawn as a fraction of
+ * free_limits() -- a table in this repository. That table is a best effort and
+ * goes stale silently, so the number people were being asked to tune their
+ * fallback chain by was, in the bad case, a confident fiction. What the
+ * provider REFUSED is not: it is the only first-hand measurement here.
+ *
+ * Says "nothing today" rather than rendering an empty line -- an absent list
+ * and a list of nothing read identically, and only one of them means the
+ * chain is not being exercised. */
+async function populateRateLimits() {
+  const el = $("fallback-limits");
+  if (!el) return;
+  let res;
+  try { res = await api().providers(); } catch (e) { return; }
+  const rows = [];
+  for (const p of (res.providers || [])) {
+    for (const [model, q] of Object.entries(p.quota || {})) {
+      if (q && q.limited) rows.push({ model, prov: p.name, q });
+    }
+  }
+  if (!rows.length) {
+    el.textContent = "Nothing has been rate-limited today.";
+    return;
+  }
+  rows.sort((a, b) => b.q.limited - a.q.limited);
+  el.textContent = rows.map((r) =>
+    `${r.model} — ${r.q.limited}×`
+    + (r.q.cooling ? " (resting now)" : "")
+    + (r.q.limited_at ? `, last ${timeAgo(r.q.limited_at * 1000)}` : "")
+  ).join(" · ");
 }
 
 $("opt-browser-model").addEventListener("change", async (e) => {
@@ -4453,6 +4521,7 @@ function renderUpdate(st) {
   line.className = "row-sub ext-on";
   btn.textContent = "Update & restart";
 }
+
 
 async function checkUpdate() {
   $("update-status").textContent = "Checking…";

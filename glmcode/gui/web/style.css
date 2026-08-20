@@ -2207,3 +2207,16 @@ body.sidebar-open #sidebar { transform: translateX(0); }
 .model-quota.low em { color: #e8b339; }
 .model-quota.spent .mq-fg { stroke: #ff6b6b; }
 .model-quota.spent em { color: #ff6b6b; }
+/* Refusals. Separate from the ring because it is a different KIND of
+   fact: the ring is this app's count measured against a table it
+   ships, and a 429 is the provider itself saying no. A model with no
+   known allowance gets no ring at all and still needs to be able to
+   say it is being refused. */
+.model-limited {
+  display: inline-flex; align-items: center; gap: 4px; flex: none;
+  margin-left: auto; font-size: 10.5px; color: #e8b339;
+  border: 1px solid rgba(232, 179, 57, 0.35); border-radius: 999px;
+  padding: 1px 6px; white-space: nowrap;
+}
+.model-quota + .model-limited { margin-left: 6px; }
+.model-limited.cooling { color: #ff6b6b; border-color: rgba(255, 107, 107, 0.45); }

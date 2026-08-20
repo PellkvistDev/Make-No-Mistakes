@@ -59,6 +59,77 @@ def test_counting_never_raises(monkeypatch):
     assert usage.today() == {}        # nor does reading it back
 
 
+# ---- refusals, which are the only first-hand number here -------------------
+#
+# `today()` is a count measured against providers.free_limits(), a table in
+# this repository. It is a best effort: it goes stale when a tier changes and
+# has no row at all for most models. A 429 is the provider itself saying no.
+
+def test_refusals_are_counted_per_model():
+    usage.record_limited("gemini-3.6-flash")
+    usage.record_limited("gemini-3.6-flash")
+    usage.record_limited("gemini-3.5-flash")
+    got = usage.limited_today()
+    assert got["gemini-3.6-flash"]["n"] == 2
+    assert got["gemini-3.5-flash"]["n"] == 1
+
+
+def test_the_last_refusal_is_stamped():
+    """"11 times today" is history. "the last one was a minute ago" is what
+    tells you the chain is being walked right now."""
+    import time
+    before = time.time()
+    usage.record_limited("m")
+    at = usage.limited_today()["m"]["at"]
+    assert before <= at <= time.time() + 1
+
+
+def test_refusals_and_requests_are_kept_together():
+    """Read side by side on purpose: "4 of 20 used" next to "refused 11 times"
+    says plainly that the table is wrong, which is the one thing the count on
+    its own can never say."""
+    usage.record("m")
+    usage.record_limited("m")
+    assert usage.today() == {"m": 1}
+    assert usage.limited_today()["m"]["n"] == 1
+
+
+def test_a_new_day_clears_the_refusals_too():
+    usage.record_limited("m")
+    stale = json.loads(usage.USAGE_FILE.read_text())
+    stale["day"] = "2000-01-01"
+    usage.USAGE_FILE.write_text(json.dumps(stale))
+    assert usage.limited_today() == {}
+
+
+def test_a_counter_file_from_before_this_existed_still_reads():
+    """`limited` was added after `counts`, so a file written by an older build
+    has no such key. Defaulted rather than migrated -- the worst case of
+    getting a counter wrong is one day of missing numbers."""
+    usage.USAGE_FILE.write_text(json.dumps(
+        {"day": usage._today(), "counts": {"m": 5}}))
+    assert usage.today() == {"m": 5}
+    assert usage.limited_today() == {}
+    usage.record_limited("m")                      # and starts counting
+    assert usage.limited_today()["m"]["n"] == 1
+    assert usage.today() == {"m": 5}               # without losing the other half
+
+
+def test_counting_a_refusal_never_raises(monkeypatch):
+    def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(usage, "_read", boom)
+    usage.record_limited("m")
+    assert usage.limited_today() == {}
+
+
+def test_a_model_with_no_refusals_is_absent_rather_than_zero():
+    """The UI decides whether to draw anything from presence. A row of zero
+    would badge every model that has ever been asked."""
+    usage.record("m")
+    assert usage.limited_today() == {}
+
+
 # ---- what the quota page actually said ------------------------------------
 
 GOOGLE = "https://generativelanguage.googleapis.com/v1beta/openai"
@@ -132,3 +203,57 @@ def test_a_provider_offering_only_unrecommended_models_still_offers_them():
     """Better a menu of the untested than an empty one -- the same rule the
     preview-only case needed."""
     assert providers.shortlist(["gemma-4-31b-it"]) == ["gemma-4-31b-it"]
+
+
+# ---- and what the UI is handed --------------------------------------------
+
+def test_the_providers_payload_carries_the_refusals(monkeypatch):
+    """The wiring, end to end. Everything above proves the counter works; this
+    is whether the number ever reaches the screen -- which is the half that
+    was missing when the model menu could only draw a fraction of a table."""
+    from glmcode.config import load_config
+    from glmcode.gui import app as gui_app
+
+    cfg = load_config()
+    google = "https://generativelanguage.googleapis.com/v1beta/openai"
+    model = providers.chat_models(google)[0]
+    usage.record(model)
+    usage.record_limited(model)
+    usage.record_limited(model)
+    monkeypatch.setattr(gui_app, "all_providers", lambda c: [
+        {"name": "Google", "base_url": google, "models": [model],
+         "all_models": [model]}])
+
+    stand_in = types.SimpleNamespace(_cfg=cfg, session_provider="",
+                                     session_model="")
+    q = gui_app.Api.providers(stand_in)["providers"][0]["quota"][model]
+    assert q["used"] == 1
+    assert q["limited"] == 2
+    assert q["limited_at"] > 0
+    assert q["cooling"] is False        # nothing has been asked, so nothing rests
+
+
+def test_a_model_refused_moments_ago_is_reported_as_resting(monkeypatch):
+    """"Why did it switch models on me" is answered by `cooling`, not by the
+    count: a chain that walked past this model an hour ago and one walking past
+    it right now have the same tally."""
+    from glmcode import api
+    from glmcode.config import load_config
+    from glmcode.gui import app as gui_app
+
+    cfg = load_config()
+    google = "https://generativelanguage.googleapis.com/v1beta/openai"
+    model = providers.chat_models(google)[0]
+    api.clear_cooldowns()
+    try:
+        api.note_rate_limited(google, model)
+        monkeypatch.setattr(gui_app, "all_providers", lambda c: [
+            {"name": "Google", "base_url": google, "models": [model],
+             "all_models": [model]}])
+        stand_in = types.SimpleNamespace(_cfg=cfg, session_provider="",
+                                         session_model="")
+        q = gui_app.Api.providers(stand_in)["providers"][0]["quota"][model]
+        assert q["cooling"] is True
+        assert q["limited"] == 1        # note_rate_limited counts it too
+    finally:
+        api.clear_cooldowns()

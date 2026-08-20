@@ -493,6 +493,12 @@
           chat whenever a different one answered. Leave empty to just wait out the limit.</span></div>
         <textarea id="opt-fallbacks" class="text-input" rows="3" spellcheck="false"
                   placeholder="gemini-2.5-flash&#10;gemini-2.5-flash-lite"></textarea></div>
+      <div class="row"><div class="row-text"><label>Refused today</label>
+        <span class="row-sub">The 429s this app actually received, per model. This is the
+          number to tune the list above by — the allowance shown in the model menu is
+          measured against a table in this app, and a provider can enforce something
+          else entirely.</span>
+        <span id="fallback-limits" class="row-sub"></span></div></div>
 
       <h3 style="margin-top:22px">Update</h3>
       <div class="row"><div class="row-text"><label>App version</label>
