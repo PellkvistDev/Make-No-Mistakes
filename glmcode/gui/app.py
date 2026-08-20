@@ -849,6 +849,7 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
             "browser_keep_logins": c.browser_keep_logins,
             "browser_connect_url": c.browser_connect_url,
             "browser_own": c.browser_own,
+            "model_fallbacks": list(c.model_fallbacks or []),
             "browser_provider": c.browser_provider, "browser_model": c.browser_model,
             "path_rules": [dict(r) for r in c.path_rules],
             "github_clone_root": c.github_clone_root,
@@ -872,6 +873,17 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
                      "reduce_effects", "browser_headless", "browser_keep_logins",
                      "verify_edits", "auto_fix_tests"):
             setattr(c, key, bool(value))
+        elif key == "model_fallbacks":
+            # A list of model ids, in order. Cleaned rather than trusted: it
+            # comes from a text field, and a blank or duplicated entry would
+            # silently make the chain shorter than it looks.
+            seen, chain = set(), []
+            for m in (value if isinstance(value, list) else []):
+                m = str(m or "").strip()[:120]
+                if m and m not in seen:
+                    seen.add(m)
+                    chain.append(m)
+            c.model_fallbacks = chain[:6]
         elif key == "browser_own":
             c.browser_own = "auto" if str(value) in ("auto", "True", "true") or value is True else "off"
         elif key == "browser_connect_url":

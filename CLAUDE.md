@@ -669,6 +669,54 @@ call is not a feature: reach for it when a line looks *unnecessary* — a magic
 constant, a workaround, a retry, an ordering that looks arbitrary, a guard that
 looks redundant.
 
+## A rate limit should slow you down, not stop you
+
+The free tiers this app is built around are metered in requests per day and per
+minute. Hitting one does not make you a worse programmer; it just stops you.
+`model_fallbacks` is an ordered chain — "3.6 flash, then 3.5 flash, then 3.5
+flash lite" — walked when the preferred model is refusing for quota.
+
+Two things it costs, and both are worth paying:
+
+- **The prompt cache.** This app re-sends ~12,400 tokens of system prompt and
+  tool schemas on every request, and a different model has no cache for that
+  prefix. But the alternative is not "keep the cache" — it is "get nothing",
+  because the preferred model is refusing.
+- **Quality.** A weaker model is worse at tool calling, and switching mid-task
+  is where that shows.
+
+The conversation itself is unaffected: history is plain OpenAI-format messages
+and this app already switches models per chat.
+
+What keeps the cost bounded:
+
+- **Only a 429 walks the chain.** A weaker model is not the answer to a server
+  fault or a bad request, and falling back on any error would quietly answer
+  every hiccup with a worse model.
+- **Switching does not sit out the backoff.** The wait is the thing the chain
+  exists to avoid; sleeping the full `retry-after` and then switching gives up
+  the entire benefit.
+- **A rate-limited model is skipped for `MODEL_COOLDOWN`, then tried again.**
+  Asking one that just refused for quota spends a request to be told the same
+  thing — but a per-minute limit recovers in a minute, and being exiled to the
+  weakest model for the rest of the session is the failure this must not have.
+- **If the whole chain is cooling down, it asks the preferred model anyway.**
+  Waiting beats refusing outright.
+- **Cooldowns are per endpoint.** The same model name on another provider is a
+  different quota.
+- **Only the main turn gets the chain.** Sub-agents and compaction keep the
+  plain path: the main turn is the long, tool-calling one a rate limit actually
+  kills, and it is the one whose model the user chose.
+- **The switch is said out loud, once.** A silent downgrade is the worst
+  version of this — the chat quietly gets worse at tool calling and nothing
+  anywhere explains why. Once per switch, not per request: news the first time,
+  noise after that.
+
+Not done, and deliberately: no per-model context-limit check. Model context
+windows differ, and a fallback with a smaller one can fail on a long chat — but
+inventing a table of limits would be a guess that goes stale, and the failure
+is loud rather than silent.
+
 ## Updating is a pull and a restart, and both halves fail quietly
 
 The app is installed by cloning it, so the Update button in Settings → General

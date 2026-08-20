@@ -411,6 +411,10 @@ class Config:
     # defaulted to False, so a persisted False is indistinguishable from a
     # choice, and every existing install would have stayed off.
     browser_own: str = "auto"
+    # Models to fall back to, in order, when the chat's model is rate-limited.
+    # Same endpoint and key -- only the model name changes -- because that is
+    # the shape the free tiers have: one API, several models, one quota each.
+    model_fallbacks: list = field(default_factory=list)
     browser_connect_url: str = ""
     browser_provider: str = ""       # control_chrome: dedicated Browser Agent provider ("" = same as chat)
     browser_model: str = ""          # control_chrome: dedicated Browser Agent model ("" = same as chat)

@@ -485,6 +485,15 @@
           full frosted-glass look if your machine handles it smoothly.</span></div>
         <button id="opt-reduce-fx" class="switch" role="switch" aria-checked="false"><span></span></button></div>
 
+      <h3 style="margin-top:22px">When the model is rate-limited</h3>
+      <div class="row"><div class="row-text"><label for="opt-fallbacks">Fall back to</label>
+        <span class="row-sub">Models to try, in order, when this chat&rsquo;s model is out of
+          quota — same API and key, only the model changes. One per line, strongest first.
+          It goes back to your usual model as soon as the limit clears, and tells you in the
+          chat whenever a different one answered. Leave empty to just wait out the limit.</span></div>
+        <textarea id="opt-fallbacks" class="text-input" rows="3" spellcheck="false"
+                  placeholder="gemini-2.5-flash&#10;gemini-2.5-flash-lite"></textarea></div>
+
       <h3 style="margin-top:22px">Update</h3>
       <div class="row"><div class="row-text"><label>App version</label>
         <span id="update-status" class="row-sub">Checking…</span></div>

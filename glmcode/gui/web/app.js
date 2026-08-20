@@ -3624,6 +3624,8 @@ function syncSettingsUI() {
   // Not while it's being typed into -- rewriting the field under the cursor
   // is how a half-typed endpoint turns into a saved wrong one.
   $("opt-browser-mine").setAttribute("aria-checked", settings.browser_own !== "off");
+  if (document.activeElement !== $("opt-fallbacks"))
+    $("opt-fallbacks").value = (settings.model_fallbacks || []).join("\n");
   if (document.activeElement !== $("opt-browser-connect"))
     $("opt-browser-connect").value = settings.browser_connect_url || "";
   $("opt-browser-connect").classList.toggle("attached-on", !!settings.browser_connect_url);
@@ -4403,6 +4405,16 @@ $("gh-foot-pull").addEventListener("click", async () => {
 });
 $("gh-foot-sync").addEventListener("click", async () => {
   if (await ghAction($("gh-foot-sync"), () => api().github_sync())) refreshGithubRepo();
+});
+
+// Saved on blur, not per keystroke: a half-typed model id is a model that
+// does not exist, and storing it would put a guaranteed failure in the chain.
+$("opt-fallbacks").addEventListener("change", async () => {
+  const lines = $("opt-fallbacks").value.split("\n").map((s) => s.trim()).filter(Boolean);
+  const res = await api().set_setting("model_fallbacks", lines);
+  if (res && res.error) return toast(res.error, "error", 5000);
+  settings = res;
+  $("opt-fallbacks").value = (settings.model_fallbacks || []).join("\n");
 });
 
 // -- update ------------------------------------------------------------ //

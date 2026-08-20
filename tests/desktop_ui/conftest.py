@@ -117,6 +117,7 @@ DEFAULT_SETTINGS = {
     "browser_headless": False, "browser_keep_logins": False,
     "browser_model": "", "browser_provider": "",
     "browser_own": "auto", "browser_connect_url": "",
+    "model_fallbacks": [],
     "tts_engine": "", "tts_voice": "", "tts_speed": 1.0, "piper_voice": "",
     "stt_model": "", "stt_language": "", "voice_earcons": False,
     "voice_ptt_key": "", "voice_reply_language": "", "voice_sensitivity": 0.5,
