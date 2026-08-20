@@ -21,6 +21,7 @@ import webview
 from .. import __version__
 from ..agent import Agent
 from ..api import IMAGE_EXTENSIONS, ZaiClient
+from .. import api as api_mod
 from ..backup import BackupRepo
 from .. import backup as backup_module
 from .. import providers as providers_mod
@@ -1042,6 +1043,11 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
         """
         out = []
         used = usage_mod.today()
+        # The refusals, which are the only first-hand number here. `used` is
+        # measured against free_limits(), a table in this repository: it goes
+        # stale when a provider changes a tier and knows nothing about models
+        # it has no row for. A 429 is the provider saying no.
+        refused = usage_mod.limited_today()
         for p in all_providers(self._cfg):
             models = p.get("models") or []
             # Where this provider's keys come from, so the key field can point
@@ -1054,10 +1060,18 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
             quota = {}
             for m in (p.get("all_models") or models):
                 lim = providers_mod.free_limits(p["base_url"], m)
-                if lim or used.get(m):
+                hit = refused.get(m) or {}
+                if lim or used.get(m) or hit:
                     quota[m] = {"used": used.get(m, 0),
                                 "rpd": (lim or {}).get("rpd"),
-                                "rpm": (lim or {}).get("rpm")}
+                                "rpm": (lim or {}).get("rpm"),
+                                # Times this model refused today, and whether
+                                # it is refusing right NOW -- which is what
+                                # answers "why did it switch models on me".
+                                "limited": int(hit.get("n", 0)),
+                                "limited_at": hit.get("at", 0),
+                                "cooling": api_mod.is_cooling_down(
+                                    p["base_url"], m)}
             out.append({"name": p["name"], "base_url": p["base_url"],
                         "models": models, "quota": quota,
                         # Everything the provider listed, when that is more

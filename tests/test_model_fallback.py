@@ -219,3 +219,55 @@ def test_the_agent_passes_the_chain_through():
     assert ag._fallback_models() == []
     ag.cfg.model_fallbacks = ["b", "", "c"]
     assert ag._fallback_models() == ["b", "c"]
+
+
+# --------------------------------------------------------------------- #
+# What gets counted
+#
+# The refusal count is the only first-hand number this app has about a free
+# tier -- everything else is a fraction of a table in this repository. So it is
+# worth not inflating, and note_rate_limited is called at every point a 429 is
+# actually SEEN and nowhere else. It used to be called again at the top of the
+# next attempt for the model that had failed on the previous one: harmless for
+# a cooldown, which is a timestamp being overwritten, and a double count here.
+
+def _counted(monkeypatch):
+    seen = []
+    monkeypatch.setattr(api, "note_rate_limited",
+                        lambda base, model: seen.append(model))
+    return seen
+
+
+def test_one_refusal_is_noted_once(monkeypatch):
+    seen = _counted(monkeypatch)
+    c = client(monkeypatch, {"flash-3.6": "429"})
+    chat(c, "flash-3.6", ["flash-3.5"])
+    assert seen == ["flash-3.6"]
+
+
+def test_walking_the_whole_chain_notes_each_model_once(monkeypatch):
+    seen = _counted(monkeypatch)
+    c = client(monkeypatch, {"flash-3.6": "429", "flash-3.5": "429"})
+    out = chat(c, "flash-3.6", ["flash-3.5", "flash-lite"])
+    assert out.model == "flash-lite"
+    assert seen == ["flash-3.6", "flash-3.5"]
+
+
+def test_a_500_is_not_counted_as_a_rate_limit(monkeypatch):
+    seen = _counted(monkeypatch)
+    c = client(monkeypatch, {"flash-3.6": "500"})
+    with pytest.raises(api.ApiError):
+        chat(c, "flash-3.6", [])
+    assert seen == []
+
+
+def test_the_count_reaches_the_usage_file(monkeypatch, tmp_path):
+    """End to end, through the real note_rate_limited -- the wiring between
+    the cooldown and the counter is the part a fake would skip."""
+    from glmcode import usage
+    monkeypatch.setattr(usage, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(usage, "USAGE_FILE", tmp_path / "model_usage.json")
+    c = client(monkeypatch, {"flash-3.6": "429"})
+    chat(c, "flash-3.6", ["flash-3.5"])
+    assert usage.limited_today()["flash-3.6"]["n"] == 1
+    assert "flash-3.5" not in usage.limited_today()
