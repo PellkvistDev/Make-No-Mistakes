@@ -1203,6 +1203,9 @@
     }
     const BIN = /\.(png|jpg|jpeg|gif|webp|ico|pdf|zip|gz|woff2?|ttf|mp4|mp3|wasm|lock)$/i;
     const IMG = /\.(png|jpe?g|gif|webp|bmp|avif|svg|ico)$/i;
+    // How much of one file read_file will spend on a single call. The phone
+    // has less context than the desktop, not more.
+    const READ_BUDGET = 12000;
 
     const api = {
       async list_dir(a) {
@@ -1233,7 +1236,36 @@
         }
         const f = await load(a.path);
         const lines = f.text.split("\n");
-        return lines.map((l, i) => `${String(i + 1).padStart(4)} | ${l}`).join("\n").slice(0, 12000);
+        const start = Math.max(1, parseInt(a.offset, 10) || 1);
+        const limit = Math.max(1, Math.min(parseInt(a.limit, 10) || 2000, 2000));
+        if (start > lines.length) {
+          return `${a.path} has ${lines.length} lines, so there is nothing at line ${start}.`;
+        }
+        const want = lines.slice(start - 1, start - 1 + limit);
+        // Cut on a LINE boundary, and only after the budget is spent. This
+        // used to be a flat .slice(0, 12000) on the joined text, which ended
+        // mid-line -- and a half line looks exactly like a whole one, so
+        // edit_file was handed old_string values that never existed in the
+        // file. The character budget stays, because one minified file can be
+        // the whole of it on a single line.
+        const shown = [];
+        let used = 0;
+        for (const [i, l] of want.entries()) {
+          const row = `${String(start + i).padStart(4)} | ${l}`;
+          if (shown.length && used + row.length > READ_BUDGET) break;
+          shown.push(row);
+          used += row.length + 1;
+        }
+        const last = start + shown.length - 1;
+        let text = shown.join("\n");
+        // ...and SAY it was cut. Silence here is the worst version: the model
+        // concludes the symbol it was looking for is not in the file, which is
+        // a wrong answer rather than a missing one.
+        if (last < lines.length) {
+          text += `\n... [${lines.length - last} more line${lines.length - last === 1 ? "" : "s"}. `
+                + `read_file with offset=${last + 1} for the rest]`;
+        }
+        return text;
       },
       async grep(a) {
         const rx = new RegExp(a.pattern, a.case_insensitive ? "i" : "");
@@ -1420,7 +1452,14 @@
   const TOOL_SCHEMAS = [
     tool("list_dir", "List files/folders under a directory in the repo.", { path: str("Directory (default root)") }),
     tool("glob", "Find files by glob, e.g. '**/*.js'.", { pattern: str("Glob pattern") }, ["pattern"]),
-    tool("read_file", "Read a file (with line numbers).", { path: str("File path") }, ["path"]),
+    tool("read_file",
+      "Read a text file. Output lines are prefixed with 'N | ' line numbers (the prefix is not " +
+      "part of the file). A long file is cut off and says so — call it again with offset to " +
+      "carry on from there.",
+      { path: str("File path"),
+        offset: { type: "integer", description: "1-based line to start from (default 1)" },
+        limit: { type: "integer", description: "Max lines to read (default 2000)" } },
+      ["path"]),
     tool("grep", "Search file contents by regex.", { pattern: str("Regex"), case_insensitive: bool("Case-insensitive") }, ["pattern"]),
     tool("search_code", "Find the most relevant code for a description.", { query: str("What you're looking for") }, ["query"]),
     tool("write_file", "Create or overwrite a file and commit it.", { path: str("Path"), content: str("Full new contents"), message: str("Commit message") }, ["path", "content"]),

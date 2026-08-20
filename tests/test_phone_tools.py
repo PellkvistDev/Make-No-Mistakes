@@ -459,3 +459,140 @@ def test_the_phone_prompt_names_when_to_reach_for_them():
     p = _node("out(C.SYSTEM_PROMPT);")
     assert "todo_write" in p
     assert "review_changes" in p
+
+
+# --------------------------------------------------------------------- #
+# read_file
+#
+# It cut the file off at 12,000 characters and said nothing. Two failures in
+# one: the model concludes the symbol it was looking for is not in the file --
+# a wrong answer rather than a missing one -- and the cut landed MID-LINE, so
+# edit_file was handed old_string values that never existed anywhere.
+
+@needs_node
+def test_read_file_numbers_the_lines_it_shows():
+    r = _node("""
+      const t = C.makeTools(fakeGh({ "a.py": "one\\ntwo\\nthree\\n" }), {});
+      out(await t.read_file({ path: "a.py" }));
+    """)
+    assert "   1 | one" in r and "   3 | three" in r
+
+
+@needs_node
+def test_a_long_file_says_it_was_cut_and_where_to_carry_on():
+    r = _node("""
+      const big = Array.from({ length: 4000 }, (_, i) => "line " + i).join("\\n");
+      const t = C.makeTools(fakeGh({ "big.txt": big }), {});
+      out(await t.read_file({ path: "big.txt" }));
+    """)
+    assert "more lines" in r
+    assert "offset=" in r
+
+
+@needs_node
+def test_the_cut_lands_on_a_line_boundary():
+    """A half line looks exactly like a whole one, and edit_file matches on
+    exact strings."""
+    r = _node("""
+      const big = Array.from({ length: 4000 }, (_, i) => "line " + i + " " + "x".repeat(40)).join("\\n");
+      const t = C.makeTools(fakeGh({ "big.txt": big }), {});
+      const text = await t.read_file({ path: "big.txt" });
+      const rows = text.split("\\n").filter((l) => /^\\s*\\d+ \\| /.test(l));
+      out(rows[rows.length - 1]);
+    """)
+    assert r.rstrip().endswith("x" * 40), r
+
+
+@needs_node
+def test_offset_carries_on_from_where_it_stopped():
+    r = _node("""
+      const big = Array.from({ length: 4000 }, (_, i) => "line " + i).join("\\n");
+      const t = C.makeTools(fakeGh({ "big.txt": big }), {});
+      const first = await t.read_file({ path: "big.txt" });
+      const at = parseInt(/offset=(\\d+)/.exec(first)[1], 10);
+      const next = await t.read_file({ path: "big.txt", offset: at });
+      out({ at, head: next.split("\\n")[0] });
+    """)
+    assert f"{r['at']} | line {r['at'] - 1}" in r["head"], r
+
+
+@needs_node
+def test_the_whole_file_is_reachable_by_repeating():
+    """The notice is only worth anything if following it actually gets there."""
+    r = _node("""
+      const big = Array.from({ length: 4000 }, (_, i) => "line " + i).join("\\n");
+      const t = C.makeTools(fakeGh({ "big.txt": big }), {});
+      let at = 1, rounds = 0, sawLast = false;
+      while (rounds++ < 20) {
+        const text = await t.read_file({ path: "big.txt", offset: at });
+        if (text.includes("line 3999")) { sawLast = true; break; }
+        const m = /offset=(\\d+)/.exec(text);
+        if (!m) break;
+        at = parseInt(m[1], 10);
+      }
+      out({ sawLast, rounds });
+    """)
+    assert r["sawLast"], r
+
+
+@needs_node
+def test_a_short_file_gets_no_notice():
+    r = _node("""
+      const t = C.makeTools(fakeGh({ "a.py": "one\\ntwo\\n" }), {});
+      out(await t.read_file({ path: "a.py" }));
+    """)
+    assert "more lines" not in r
+
+
+@needs_node
+def test_limit_is_honoured_and_bounded():
+    r = _node("""
+      const big = Array.from({ length: 500 }, (_, i) => "line " + i).join("\\n");
+      const t = C.makeTools(fakeGh({ "big.txt": big }), {});
+      const three = await t.read_file({ path: "big.txt", limit: 3 });
+      out(three.split("\\n").filter((l) => /^\\s*\\d+ \\| /.test(l)).length);
+    """)
+    assert r == 3
+
+
+@needs_node
+def test_an_offset_past_the_end_is_said_plainly():
+    r = _node("""
+      const t = C.makeTools(fakeGh({ "a.py": "one\\ntwo\\n" }), {});
+      out(await t.read_file({ path: "a.py", offset: 900 }));
+    """)
+    assert "nothing at line 900" in r
+
+
+@needs_node
+def test_one_enormous_line_still_comes_back():
+    """A minified file can be the whole of itself on a single line. The budget
+    must not be able to produce an empty answer."""
+    r = _node("""
+      const t = C.makeTools(fakeGh({ "min.js": "x".repeat(80000) }), {});
+      const text = await t.read_file({ path: "min.js" });
+      out({ len: text.length, head: text.slice(0, 12) });
+    """)
+    assert r["len"] > 1000
+    assert r["head"].strip().startswith("1 |")
+
+
+@needs_node
+def test_an_image_is_refused_with_the_tool_that_works():
+    r = _node("""
+      const t = C.makeTools(fakeGh({ "logo.png": "..." }), {});
+      out(await t.read_file({ path: "logo.png" }));
+    """)
+    assert "view_image" in r
+
+
+@needs_node
+def test_read_file_offers_the_same_arguments_as_the_desktop():
+    """A chat syncs between the two, so its history carries calls made on the
+    other one. An argument the phone ignores is a read the model believes it
+    did and did not."""
+    desktop = [s["function"] for s in DESKTOP_SCHEMAS
+               if s["function"]["name"] == "read_file"][0]
+    phone = _schema("read_file")
+    for name in desktop["parameters"]["properties"]:
+        assert name in phone["parameters"]["properties"], name
