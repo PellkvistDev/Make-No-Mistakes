@@ -792,6 +792,46 @@ about any of the causes:
   (`not_connected_hint()`), naming the port and what to check, because the
   feature looked broken rather than off.
 
+**An open socket is not evidence of a live browser.** `connected` used to mean
+"a file descriptor exists", which produced the worst version of this feature:
+Settings said *Connected* while every browser action sat for the full timeout
+and then failed. A laptop that slept, a browser that was killed, a FIN that
+never arrived — all leave a socket that reads as fine and answers nothing. The
+bridge pings on a heartbeat and `connected` asks when the extension was last
+heard from; a stale client is dropped and anything waiting on it fails at once,
+naming the reason. Browsers answer a WebSocket ping at the protocol level,
+without the service worker being woken, so this stays true exactly when it must
+— while Chrome has the worker asleep.
+
+The heartbeat **ticks finely and decides from elapsed time** rather than
+sleeping for the whole interval: a loop parked in an eight-second wait cannot
+notice a shutdown, and a test that shortens the timings finds a loop that never
+re-reads them.
+
+**A blink is not a failure.** The socket goes away for ordinary reasons — Chrome
+recycling the service worker, an extension reload, a browser restart — each a
+gap well under a second. A call arriving inside one waits for the reconnect and
+retries on the new socket, because a task dying because the transport blinked is
+not something the model or the user can act on. Only READS are repeated
+(`SAFE_TO_REPEAT`): a click whose connection dropped might or might not have
+happened, and a form submitted twice is not something a later snapshot undoes.
+
+**`SO_REUSEADDR` means two different things.** On Unix it only permits rebinding
+a port left in `TIME_WAIT`. On **Windows** it permits binding a port that is
+already in ACTIVE USE, and which socket then receives connections is undefined —
+so a second copy of the app can take the port from under a running bridge, and
+the extension starts getting `ERR_CONNECTION_REFUSED` while the first app still
+believes it owns the socket. `SO_EXCLUSIVEADDRUSE` is the Windows option that
+means what `SO_REUSEADDR` means everywhere else.
+
+**The connection log is in Settings because nothing else could settle it.**
+Every report of this feature came down to "it said connected but wasn't", and
+neither end could say when it went or why: Chrome's extensions page timestamps
+its errors too vaguely, and the app was throwing the information away. The
+bridge keeps the last dozen connect/drop events with reasons and real
+timestamps, and `boot()` no longer swallows the one failure the user cannot see
+from outside — a port that never opened.
+
 **The whole feature is: open some tabs, open the app, ask for something, and it
 works.** Anything the user has to do beyond installing the extension once is a
 bug in this feature, and it has had two.

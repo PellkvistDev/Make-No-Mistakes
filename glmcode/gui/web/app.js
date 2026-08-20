@@ -4446,6 +4446,16 @@ function renderExtStatus(st) {
   tabLine.hidden = !label;
   tabLine.textContent = label ? "Would act on: " + label : "";
 
+  // What the connection actually did. "It said connected but wasn't" is the
+  // one report this feature keeps producing, and Chrome's extensions page
+  // timestamps its errors too vaguely to settle it.
+  const log = (st && st.log) || [];
+  $("browser-ext-log-row").hidden = log.length === 0;
+  $("browser-ext-log").textContent = log.map((e) => {
+    const t = new Date((e.at || 0) * 1000).toLocaleTimeString();
+    return `${t}  ${e.what}${e.why ? " — " + e.why : ""}`;
+  }).join("\n");
+
   if (!$("browser-ext-sheet").hidden) renderExtSheet(st);
 }
 

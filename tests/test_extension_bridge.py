@@ -211,7 +211,9 @@ def test_a_dropped_connection_fails_waiting_calls_at_once(bridge, ext, monkeypat
     t.start()
     t.join(10)
     assert not t.is_alive(), "the call waited out its full timeout"
-    assert "stopped answering" in result.get("err", "")
+    # 'hang' is not a read, so it is NOT silently repeated -- the honest answer
+    # is that we cannot tell whether it happened.
+    assert "can't tell whether it happened" in result.get("err", "")
 
 
 def test_a_healthy_extension_stays_connected(bridge, ext, monkeypatch):
@@ -398,3 +400,115 @@ def ext(bridge):
     assert bridge.connected, "the client never registered"
     yield e
     e.close()
+
+
+# --------------------------------------------------------------------- #
+# Surviving a blink, and being able to say what happened afterwards
+
+def test_a_read_survives_the_socket_being_replaced(bridge, ext):
+    """Reported: "it does switch tab, then it fails and says the browser
+    extension is not connected". An extension's socket goes away for ordinary
+    reasons -- Chrome recycling the service worker, an extension reload -- and
+    each is a gap of well under a second. A task dying because the transport
+    blinked is not something the model or the user can do anything about."""
+    ext.handle("tabs", lambda p: [{"id": 1, "title": "A", "url": "u",
+                                   "active": True, "usable": True}])
+    assert bridge.call("tabs")            # working to start with
+
+    ext.close()                            # the blink
+    replacement = _Ext(bridge.port)
+    replacement.handle("tabs", lambda p: [{"id": 2, "title": "B", "url": "u",
+                                           "active": True, "usable": True}])
+    try:
+        got = bridge.call("tabs", timeout=8)
+        assert got[0]["id"] == 2, "the call did not reach the new connection"
+    finally:
+        replacement.close()
+
+
+def test_a_read_waits_for_the_extension_to_come_back(bridge, ext):
+    """The gap is usually shorter than this; the point is that a call arriving
+    inside it waits rather than failing the whole task."""
+    ext.handle("info", lambda p: {"url": "back"})
+    bridge.call("info")
+    ext.close()
+    for _ in range(60):                    # the drop is noticed asynchronously
+        if not bridge.connected:
+            break
+        time.sleep(0.05)
+    assert bridge.connected is False
+
+    later = {}
+
+    def reconnect_soon():
+        time.sleep(0.6)
+        e = _Ext(bridge.port)
+        e.handle("info", lambda p: {"url": "back"})
+        later["ext"] = e
+
+    threading.Thread(target=reconnect_soon, daemon=True).start()
+    try:
+        assert bridge.call("info", timeout=8)["url"] == "back"
+    finally:
+        if later.get("ext"):
+            later["ext"].close()
+
+
+def test_an_action_is_never_silently_repeated(bridge, ext):
+    """A click whose connection dropped might or might not have happened, and
+    guessing is worse than saying so -- a form submitted twice is not something
+    a snapshot afterwards can undo."""
+    ext.handle("click", lambda p: None, answer=False)
+    result = {}
+
+    def call():
+        try:
+            bridge.call("click", ref=1, timeout=20)
+        except BridgeError as e:
+            result["err"] = str(e)
+
+    t = threading.Thread(target=call)
+    t.start()
+    time.sleep(0.2)
+    ext.close()
+    t.join(10)
+    assert "can't tell whether it happened" in result.get("err", "")
+
+
+def test_a_browser_that_never_connected_is_told_apart_from_one_that_left(bridge):
+    """Different problems, different fixes: install the extension, versus your
+    browser closed."""
+    with pytest.raises(BridgeError) as e:
+        bridge.call("info", timeout=1)
+    assert "isn't connected" in str(e.value)
+
+
+def test_the_connection_log_records_what_happened(bridge, ext):
+    """Every report of this feature has come down to "it said connected but
+    wasn't", and neither end could say when it went or why."""
+    assert any(e["what"] == "connected" for e in bridge.events)
+    ext.close()
+    for _ in range(40):
+        if any(e["what"] == "dropped" for e in bridge.events):
+            break
+        time.sleep(0.05)
+    dropped = [e for e in bridge.events if e["what"] == "dropped"]
+    assert dropped and dropped[-1]["why"]
+    assert dropped[-1]["at"] > 0          # a real timestamp, unlike Chrome's page
+
+
+def test_windows_does_not_let_a_second_process_steal_the_port():
+    """SO_REUSEADDR means two different things. On Unix it only permits
+    rebinding a port in TIME_WAIT. On WINDOWS it permits binding a port that is
+    already in ACTIVE USE, and which socket then receives connections is
+    undefined -- so a second copy of the app takes the port from under a
+    running bridge and the extension starts getting connection refused."""
+    import glmcode.extension_bridge as eb
+    src = __import__("pathlib").Path(eb.__file__).read_text(encoding="utf-8")
+    assert "SO_EXCLUSIVEADDRUSE" in src
+    call = 'srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)'
+    assert call in src
+    before = src[src.index("def start"):src.index(call)]
+    assert 'sys.platform == "win32"' in before, \
+        "the SO_REUSEADDR call must sit in a non-Windows branch"
+    assert "SO_EXCLUSIVEADDRUSE" in before

@@ -38,6 +38,7 @@ import json
 import queue
 import socket
 import struct
+import sys
 import threading
 import time
 import uuid
@@ -62,12 +63,32 @@ PING_EVERY = 8.0
 STALE_AFTER = 30.0
 # How often the heartbeat wakes to decide anything.
 HEARTBEAT_TICK = 0.5
+# How long a call waits for the extension to dial back in before giving up. The
+# socket blinks for ordinary reasons -- Chrome recycling the service worker, an
+# extension reload, a browser restart -- and each is well under a second.
+RECONNECT_GRACE = 6.0
+
+# Commands that can be repeated on a fresh socket without doing anything twice.
+# A call whose connection dropped might or might not have run; for a click or a
+# form fill that is not a question worth guessing at, so only reads are retried.
+SAFE_TO_REPEAT = frozenset({
+    "status", "tabs", "info", "snapshot", "text", "exists", "enabled",
+    "screenshot",
+})
 
 OP_CONT, OP_TEXT, OP_BIN, OP_CLOSE, OP_PING, OP_PONG = 0x0, 0x1, 0x2, 0x8, 0x9, 0xA
 
 
 class BridgeError(RuntimeError):
     """The extension is not connected, or did not answer."""
+
+
+class _Blinked(Exception):
+    """The CONNECTION went away, as opposed to the call failing.
+
+    Internal: never reaches a caller. It is the difference between "the browser
+    said no" and "the wire moved", and only the second one is worth retrying.
+    """
 
 
 def _accept_key(key: str) -> str:
@@ -153,6 +174,11 @@ class ExtensionBridge:
         self.on_change = None          # called when a client connects/leaves
         self.hello: dict = {}          # what the extension said about itself
         self._last_seen = 0.0          # when the extension last said anything
+        self._reconnect_grace = RECONNECT_GRACE
+        # The last few connect/disconnect events, with reasons. The one thing
+        # every report of this feature has needed and none could supply: when
+        # the extension went, and what the app thought happened.
+        self.events: list[dict] = []
 
     # -- lifecycle ---------------------------------------------------- #
 
@@ -163,7 +189,25 @@ class ExtensionBridge:
         last = None
         for port in self.ports:
             srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # SO_REUSEADDR means two different things. On Unix it only permits
+            # rebinding a port left in TIME_WAIT, which is what is wanted here.
+            # On WINDOWS it permits a second socket to bind a port that is
+            # ALREADY IN ACTIVE USE, and which of the two then receives
+            # connections is not defined -- so a second copy of this app (or
+            # anything else) can silently take the port from under a running
+            # bridge, and the extension's connections start being refused
+            # while the first app still believes it owns the socket.
+            #
+            # SO_EXCLUSIVEADDRUSE is the Windows option that means what
+            # SO_REUSEADDR means everywhere else: nobody else gets this port.
+            if sys.platform == "win32":
+                try:
+                    srv.setsockopt(socket.SOL_SOCKET,
+                                   socket.SO_EXCLUSIVEADDRUSE, 1)
+                except (AttributeError, OSError):
+                    pass
+            else:
+                srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 srv.bind(("127.0.0.1", port))       # loopback only, always
                 srv.listen(1)
@@ -265,11 +309,16 @@ class ExtensionBridge:
             except OSError:
                 self._drop(conn, "the connection broke")
 
+    def _log(self, what: str, why: str = "") -> None:
+        self.events.append({"at": time.time(), "what": what, "why": why})
+        del self.events[:-12]
+
     def _drop(self, conn, why: str) -> None:
         with self._client_lock:
             if self._client is not conn:
                 return
             self._client = None
+        self._log("dropped", why)
         try:
             conn.close()
         except OSError:
@@ -278,7 +327,7 @@ class ExtensionBridge:
             waiting = list(self._pending.values())
             self._pending.clear()
         for q in waiting:
-            q.put({"error": f"the browser extension {why}"})
+            q.put({"gone": True, "why": why})
         self._notify()
 
     # -- server ------------------------------------------------------- #
@@ -306,6 +355,8 @@ class ExtensionBridge:
             # which is what a browser restart or an extension reload looks
             # like from here -- refusing it would need a manual reconnect.
             self._last_seen = time.monotonic()
+            self._log("connected", "replacing an earlier connection"
+                      if self._client is not None else "")
             with self._client_lock:
                 old, self._client = self._client, conn
             if old is not None:
@@ -373,8 +424,11 @@ class ExtensionBridge:
             pass
         finally:
             with self._client_lock:
-                if self._client is conn:
+                was_current = self._client is conn
+                if was_current:
                     self._client = None
+            if was_current:
+                self._log("dropped", "the browser closed the connection")
             try:
                 conn.close()
             except OSError:
@@ -384,7 +438,7 @@ class ExtensionBridge:
             with self._pending_lock:
                 waiting = list(self._pending.values())
             for q in waiting:
-                q.put({"error": "the browser extension disconnected"})
+                q.put({"gone": True})
             self._notify()
 
     def _dispatch(self, msg: dict) -> None:
@@ -414,6 +468,41 @@ class ExtensionBridge:
 
     # -- request/response --------------------------------------------- #
 
+    def _wait_for_client(self):
+        """The live socket, waiting briefly for a reconnect if there isn't one.
+
+        An extension's socket does not stay up forever, and it is not supposed
+        to: Chrome recycles the service worker, the extension is reloaded, the
+        browser restarts. Each of those is a gap of well under a second before
+        it dials back in. Failing a browser action into that gap is what
+        produced "it switched tab, then said the extension isn't connected" --
+        a task dying because the transport blinked, which is not a thing the
+        model, or the user, can do anything about.
+
+        So a call that arrives during a blink waits for it to end. Only a
+        browser that is genuinely gone -- closed, or the extension removed --
+        runs the clock out, and that one gets the message about it.
+        """
+        conn = self._client
+        if conn is not None:
+            return conn
+        if self._reconnect_grace > 0 and not self._never_connected():
+            deadline = time.monotonic() + self._reconnect_grace
+            while time.monotonic() < deadline and not self._stop.is_set():
+                time.sleep(0.05)
+                conn = self._client
+                if conn is not None:
+                    return conn
+        raise BridgeError(
+            "The browser extension isn't connected. Open the browser you "
+            "installed it in, or check Settings -> Browser." if self._never_connected()
+            else "The browser extension dropped and did not come back. Is that "
+                 "browser still open, and is its toolbar button showing a pause "
+                 "mark?")
+
+    def _never_connected(self) -> bool:
+        return self._last_seen == 0.0
+
     def call(self, command: str, timeout: float | None = None, **params):
         """Ask the extension to do one thing and wait for its answer.
 
@@ -421,11 +510,28 @@ class ExtensionBridge:
         away mid-call, or when the extension reports a failure -- callers turn
         that into the same BrowserError any other backend would raise.
         """
-        conn = self._client
-        if conn is None:
-            raise BridgeError(
-                "The browser extension isn't connected. Open the browser you "
-                "installed it in, or check Settings -> Browser.")
+        wait = timeout if timeout is not None else self.timeout
+        try:
+            return self._once(command, params, wait)
+        except _Blinked:
+            # The socket went away with the call in flight. For a read that is
+            # nothing but bad luck, and repeating it on the new connection is
+            # exactly what the caller would do by hand.
+            if command not in SAFE_TO_REPEAT:
+                raise BridgeError(
+                    f"The browser extension disconnected while '{command}' was "
+                    "running, so I can't tell whether it happened. Look at the "
+                    "page before repeating it.")
+            try:
+                return self._once(command, params, wait)
+            except _Blinked:
+                raise BridgeError(
+                    "The browser extension keeps dropping the connection. Is "
+                    "that browser still open?")
+
+    def _once(self, command: str, params: dict, wait: float):
+        """One attempt. Raises _Blinked if the connection went, not the call."""
+        conn = self._wait_for_client()
         rid = uuid.uuid4().hex
         q: queue.Queue = queue.Queue(maxsize=1)
         with self._pending_lock:
@@ -434,16 +540,18 @@ class ExtensionBridge:
         try:
             with self._send_lock:
                 conn.sendall(encode_frame(payload.encode("utf-8")))
-        except OSError as e:
+        except OSError:
             with self._pending_lock:
                 self._pending.pop(rid, None)
-            raise BridgeError(f"Could not reach the extension: {e}")
+            raise _Blinked()
         try:
-            reply = q.get(timeout=timeout if timeout is not None else self.timeout)
+            reply = q.get(timeout=wait)
         except queue.Empty:
             with self._pending_lock:
                 self._pending.pop(rid, None)
             raise BridgeError(f"The browser did not answer '{command}' in time.")
+        if reply.get("gone"):
+            raise _Blinked()
         if reply.get("error"):
             raise BridgeError(str(reply["error"]))
         return reply.get("result")
