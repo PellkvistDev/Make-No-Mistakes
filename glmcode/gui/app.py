@@ -796,7 +796,7 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
             "browser_headless": c.browser_headless,
             "browser_keep_logins": c.browser_keep_logins,
             "browser_connect_url": c.browser_connect_url,
-            "browser_use_mine": c.browser_use_mine,
+            "browser_own": c.browser_own,
             "browser_provider": c.browser_provider, "browser_model": c.browser_model,
             "path_rules": [dict(r) for r in c.path_rules],
             "github_clone_root": c.github_clone_root,
@@ -820,8 +820,8 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
                      "reduce_effects", "browser_headless", "browser_keep_logins",
                      "verify_edits", "auto_fix_tests"):
             setattr(c, key, bool(value))
-        elif key == "browser_use_mine":
-            c.browser_use_mine = bool(value)
+        elif key == "browser_own":
+            c.browser_own = "auto" if str(value) in ("auto", "True", "true") or value is True else "off"
         elif key == "browser_connect_url":
             # Turning this on hands the agent the user's live logged-in
             # browser, so the value is checked rather than stored as typed: a
@@ -2519,12 +2519,14 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
         return st
 
     def open_extensions_page(self, path: str = ""):
-        """Open chrome://extensions in the chosen browser.
+        """Bring the chosen browser to the front, ready for the address to be
+        pasted in.
 
-        That page cannot be linked to and cannot be reached from another app
-        except by passing it on the command line, which a running browser
-        handles by opening a tab. It removes the copy-the-URL-and-paste-it step,
-        which is the one people get wrong by pasting it into the wrong browser.
+        It does NOT navigate. No program can open another program's chrome://
+        page: Chrome refuses those URLs on the command line, a page cannot link
+        to them, and there is no API. Passing one anyway is worse than doing
+        nothing -- the browser drops the URL and opens an empty window, which
+        is exactly what this button used to do and why it looked broken.
         """
         from .. import installed_browsers
         if not path:
@@ -2532,8 +2534,8 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
             if not found:
                 return {"error": "No Chromium-based browser found on this machine."}
             path = found[0]["path"]
-        ok, err = installed_browsers.open_extensions_page(path)
-        return {"ok": True} if ok else {"error": err}
+        ok, err = installed_browsers.open_browser(path)
+        return {"ok": True, "url": installed_browsers.EXTENSIONS_URL} if ok else {"error": err}
 
     def open_extension_folder(self):
         """Reveal the extension folder in the OS file manager, so 'Load

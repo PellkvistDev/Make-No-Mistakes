@@ -87,19 +87,30 @@ def find() -> list[dict]:
     return found
 
 
-def open_extensions_page(path: str) -> tuple[bool, str]:
-    """Open chrome://extensions in that browser. Returns (ok, error).
+# There is NO way for one program to open another program's chrome:// page.
+# Chrome refuses those URLs from the command line (they were a malware vector),
+# a web page cannot link to them, and there is no API. Passing the URL anyway
+# is worse than doing nothing: the browser drops it and opens an empty window,
+# which is what a button labelled "Open in Chrome" appeared to do -- and made
+# it look as if the whole feature had misfired.
+#
+# So the page is not opened. The address is copied, and the user pastes it,
+# which takes them two seconds and always works.
+EXTENSIONS_URL = "chrome://extensions"
 
-    Passing a chrome:// URL on the command line is the one way to reach that
-    page from outside the browser -- it cannot be linked to, and a running
-    browser handles the argument by opening a tab rather than starting a
-    second copy, which is exactly what is wanted here.
+
+def open_browser(path: str) -> tuple[bool, str]:
+    """Bring that browser up (no URL). Returns (ok, error).
+
+    Useful only for the case where the browser is not running at all -- with
+    no argument, a running browser is simply focused rather than given a blank
+    window, which is the behaviour that made the URL version look broken.
     """
     exe = Path(path)
     if not exe.exists():
         return False, f"That browser isn't where it was: {path}"
     try:
-        subprocess.Popen([str(exe), "chrome://extensions"], **NO_WINDOW_KWARGS)
+        subprocess.Popen([str(exe)], **NO_WINDOW_KWARGS)
     except OSError as e:
         return False, f"Couldn't start {exe.name}: {e}"
     return True, ""

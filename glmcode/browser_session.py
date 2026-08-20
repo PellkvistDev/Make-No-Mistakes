@@ -337,6 +337,65 @@ class BrowserSession:
         panel. Returns '' on any failure (best-effort live frame)."""
         return self._call("screenshot_b64", max_width=max_width)
 
+    # -- tabs: only meaningful when it is the user's own browser -------- #
+
+    @property
+    def supports_tabs(self) -> bool:
+        """True only for a browser full of the user's own tabs.
+
+        A browser this app launched has exactly the one page it made, so
+        offering the model a tab list there would be three tools that always
+        answer with the page it is already on -- noise in a prompt that is
+        already the longest one in the app.
+        """
+        # Answered from the BACKEND, not from the page, so it is true before
+        # the session has started. The page only exists after start(), and a
+        # property that silently said False until then would drop the tab tools
+        # for anyone who asked in the wrong order.
+        return self.bridge is not None or bool(
+            getattr(self._page, "supports_tabs", False))
+
+    def list_tabs(self) -> str:
+        return self._call("list_tabs")
+
+    def select_tab(self, tab_id) -> str:
+        return self._call("select_tab", tab_id=tab_id)
+
+    def open_tab(self, url: str = "") -> str:
+        return self._call("open_tab", url=url)
+
+    def _op_list_tabs(self) -> str:
+        tabs = self._page.list_tabs()
+        if not tabs:
+            return "No open tabs."
+        lines = ["The browser's open tabs. Act on one with browser_switch_tab(id),",
+                 "or leave them alone and browser_new_tab(url) for your own work.", ""]
+        for t in tabs:
+            mark = " <- currently driving" if t.get("active") else ""
+            title = (t.get("title") or "").strip()[:70] or "(untitled)"
+            lines.append(f'  [{t.get("id")}] {title}{mark}')
+            lines.append(f'        {(t.get("url") or "")[:110]}')
+            if not t.get("usable"):
+                lines.append("        (a browser page -- extensions cannot touch this one)")
+        return "\n".join(lines)
+
+    def _op_select_tab(self, tab_id) -> str:
+        try:
+            tab_id = int(tab_id)
+        except (TypeError, ValueError):
+            raise BrowserError(f"browser_switch_tab needs a tab id from "
+                               f"browser_tabs (got {tab_id!r}).")
+        info = self._page.select_tab(tab_id)
+        self._sync_viewport()
+        return (f"Now driving [{info.get('id')}] {info.get('title') or ''}\n"
+                + self._op_snapshot())
+
+    def _op_open_tab(self, url: str) -> str:
+        info = self._page.open_tab(url or "")
+        self._sync_viewport()
+        return (f"Opened a new tab [{info.get('id')}] and switched to it.\n"
+                + self._op_snapshot())
+
     # -- operations (driver thread only) ---------------------------------- #
 
     def _op_navigate(self, url: str) -> str:
@@ -867,6 +926,23 @@ class ExtensionPage:
         if ref is None or not self._call("exists", ref=ref):
             return None
         return _ExtHandle(self, ref)
+
+    # -- tabs (extension backend only) -------------------------------- #
+
+    supports_tabs = True
+
+    def list_tabs(self) -> list:
+        return self._call("tabs") or []
+
+    def select_tab(self, tab_id) -> dict:
+        info = self._call("select_tab", id=int(tab_id)) or {}
+        self._refresh()
+        return info
+
+    def open_tab(self, url: str = "") -> dict:
+        info = self._call("new_tab", url=url, timeout=45) or {}
+        self._refresh()
+        return info
 
     def wait_for_timeout(self, ms) -> None:
         time.sleep(max(0.0, float(ms) / 1000.0))

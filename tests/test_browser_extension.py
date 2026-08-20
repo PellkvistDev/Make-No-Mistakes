@@ -259,7 +259,7 @@ def test_the_port_is_opened_at_boot_not_when_settings_is_first_looked_at():
     from glmcode.gui import app as gui_app
 
     cfg = Config()
-    cfg.browser_use_mine = True
+    cfg.browser_own = "auto"
     api = gui_app.Api.__new__(gui_app.Api)
     api._cfg = cfg
     assert bx.bridge(start=False) is None          # nothing listening yet
@@ -269,9 +269,11 @@ def test_the_port_is_opened_at_boot_not_when_settings_is_first_looked_at():
     assert bx.bridge(start=False).port
 
 
-def test_boot_opens_nothing_when_the_setting_is_off():
-    """Someone who never turns this on never has a port open."""
+def test_boot_opens_nothing_when_it_has_been_turned_off():
+    """The port is open by default, because it has to be for the extension to
+    ever reach anything -- but turning the feature off closes it."""
     cfg = Config()
+    cfg.browser_own = "off"
     bx.bridge(start=bx.enabled(cfg))
     assert bx.bridge(start=False) is None
 
@@ -299,7 +301,7 @@ def test_falling_back_to_a_launched_browser_says_so_out_loud():
         ag = agent_mod.Agent.__new__(agent_mod.Agent)
         ag.browser_session = None
         ag.cfg = Config()
-        ag.cfg.browser_use_mine = True          # on, but nothing connected
+        # on by default now -- nothing connected is the interesting half
         ag.events = types.SimpleNamespace(info=lambda m: None,
                                           warn=lambda m: warnings.append(m))
         ag._ensure_browser_session()
@@ -314,7 +316,7 @@ def test_falling_back_to_a_launched_browser_says_so_out_loud():
     assert built.get("connect_url") is None and "headless" in built
 
 
-def test_no_warning_when_the_user_never_asked_for_their_own_browser():
+def test_no_warning_when_the_user_turned_their_own_browser_off():
     import glmcode.agent as agent_mod
 
     warnings = []
@@ -334,6 +336,7 @@ def test_no_warning_when_the_user_never_asked_for_their_own_browser():
         ag = agent_mod.Agent.__new__(agent_mod.Agent)
         ag.browser_session = None
         ag.cfg = Config()
+        ag.cfg.browser_own = "off"
         ag.events = types.SimpleNamespace(info=lambda m: None,
                                           warn=lambda m: warnings.append(m))
         ag._ensure_browser_session()
@@ -345,16 +348,33 @@ def test_no_warning_when_the_user_never_asked_for_their_own_browser():
 # --------------------------------------------------------------------- #
 # Finding the browsers, and letting someone verify before committing
 
-def test_the_panel_can_listen_before_the_switch_is_on():
-    """The install sheet used to say "Waiting for the extension..." forever for
-    anyone who had not flipped the switch first -- there was nothing to wait
-    on, because the port only opened once the feature was already enabled.
-    Verifying the install BEFORE handing over a logged-in browser is the right
-    order."""
+def test_the_panel_can_listen_even_when_it_is_switched_off():
+    """Someone who turned this off should still be able to open the panel, see
+    the extension connect, and decide to turn it back on -- verifying before
+    committing is the right order for a feature that hands over a logged-in
+    browser."""
     cfg = Config()
+    cfg.browser_own = "off"
     assert bx.status(cfg)["port"] is None            # off, and nothing opened
     st = bx.status(cfg, listen=True)
     assert st["port"] and st["enabled"] is False
+
+
+def test_it_is_on_unless_it_was_turned_off():
+    """The extension being installed IS the opt-in. Loading an unpacked
+    extension into your own browser is a deliberate, several-step act, and
+    asking for a switch afterwards meant people finished the hard part and then
+    found nothing worked."""
+    assert bx.enabled(Config()) is True
+    off = Config()
+    off.browser_own = "off"
+    assert bx.enabled(off) is False
+
+
+def test_a_config_without_the_field_at_all_is_on():
+    """Old configs, and anything constructing a stand-in cfg."""
+    import types as t
+    assert bx.enabled(t.SimpleNamespace()) is True
 
 
 def test_browser_detection_returns_names_and_paths():
@@ -366,19 +386,132 @@ def test_browser_detection_returns_names_and_paths():
 
 def test_opening_a_browser_that_is_not_there_says_so():
     from glmcode import installed_browsers
-    ok, err = installed_browsers.open_extensions_page("/nope/not/a/browser")
+    ok, err = installed_browsers.open_browser("/nope/not/a/browser")
     assert ok is False and "isn't where it was" in err
 
 
-def test_it_passes_the_extensions_url_on_the_command_line(monkeypatch, tmp_path):
-    """That page cannot be linked to and cannot be reached from another app any
-    other way. A running browser handles the argument by opening a tab, which
-    is the whole point -- it must not start a second copy."""
+
+
+# --------------------------------------------------------------------- #
+# Tabs. Reported: "shouldn't it first get a list of the open tabs, so it can
+# choose, or choose to open a new tab? It's just weird as it is right now."
+#
+# It was: the agent silently acted on whatever tab happened to be in front,
+# which in someone's own browser is rarely what the goal is about.
+
+TABS = [
+    {"id": 7, "title": "Inbox (12)", "url": "https://mail.example.com/", "active": True, "usable": True},
+    {"id": 8, "title": "Pull requests", "url": "https://github.com/a/b/pulls", "active": False, "usable": True},
+    {"id": 9, "title": "Extensions", "url": "chrome://extensions", "active": False, "usable": False},
+]
+
+
+@pytest.fixture
+def tabbed(wired):
+    sess, ext = wired
+    ext.handle("tabs", lambda p: TABS)
+    ext.handle("select_tab", lambda p: next(t for t in TABS if t["id"] == p["id"]))
+    ext.handle("new_tab", lambda p: {"id": 42, "title": "New Tab", "url": p.get("url", ""),
+                                     "active": True, "usable": True})
+    return sess, ext
+
+
+def test_the_agent_can_see_the_tabs(tabbed):
+    sess, _ = tabbed
+    out = sess.list_tabs()
+    assert "[7] Inbox (12)" in out and "[8] Pull requests" in out
+    assert "<- currently driving" in out
+
+
+def test_a_browser_page_is_flagged_as_untouchable(tabbed):
+    """Chrome forbids extensions from touching chrome:// pages. Saying so in
+    the list beats letting the model pick one and get an error."""
+    assert "extensions cannot touch this one" in tabbed[0].list_tabs()
+
+
+def test_switching_tab_returns_a_snapshot_of_the_new_one(tabbed):
+    sess, _ = tabbed
+    out = sess.select_tab(8)
+    assert "Now driving [8] Pull requests" in out
+    assert "Main content:" in out          # the ordinary snapshot follows
+
+
+def test_opening_a_new_tab_is_a_first_class_move(tabbed):
+    """Their place in a tab they were reading is not the agent's to take."""
+    sess, _ = tabbed
+    out = sess.open_tab("example.com")
+    assert "Opened a new tab [42]" in out
+    assert "Main content:" in out
+
+
+def test_a_bad_tab_id_is_refused_before_it_reaches_the_browser(tabbed):
+    sess, _ = tabbed
+    with pytest.raises(BrowserError) as e:
+        sess.select_tab("the second one")
+    assert "browser_tabs" in str(e.value)
+
+
+def test_tab_tools_are_offered_only_for_the_users_own_browser(wired):
+    """A browser this app launched has the one page it made, so three tools
+    that always answer with the page the agent is already on would be noise in
+    the longest prompt in the app."""
+    sess, _ = wired
+    assert sess.supports_tabs is True
+    from glmcode.browser_session import BrowserSession
+    assert BrowserSession(launch_factory=lambda *a: (lambda: None, object())
+                          ).supports_tabs is False
+
+
+def test_the_prompt_sends_it_to_the_tabs_the_user_already_has_open():
+    """The whole point: "I have some tabs open, tell it to do something in
+    those tabs, and it should just work." An earlier version told the model to
+    PREFER a new tab, which fights exactly that."""
+    from glmcode.prompts import BROWSER_ATTACHED_NOTE as note
+    assert "browser_tabs first, always" in note
+    assert "work in that tab" in note
+    assert "browser_new_tab) when the goal needs a page" in note   # the other case
+    assert "default move" not in note
+
+
+def test_the_tab_tools_are_wired_end_to_end():
+    from glmcode.tools import BROWSER_ACTION_TOOLS, BROWSER_TAB_SCHEMAS
+    names = [s["function"]["name"] for s in BROWSER_TAB_SCHEMAS]
+    assert names == ["browser_tabs", "browser_switch_tab", "browser_new_tab"]
+    # The permission engine keys on this set; a tool missing from it is one the
+    # Browser Agent cannot call at all.
+    assert set(names) <= BROWSER_ACTION_TOOLS
+
+
+# --------------------------------------------------------------------- #
+# Reported: "the 'open in chrome' button is just launching a fresh empty
+# window."
+
+def test_we_no_longer_pretend_we_can_open_a_chrome_url():
+    """No program can open another program's chrome:// page: Chrome refuses
+    those URLs on the command line, a page cannot link to them, and there is no
+    API. Passing one anyway got the browser to DROP it and show an empty
+    window, which is what the button appeared to do."""
+    from glmcode import installed_browsers
+    src = pathlib.Path(installed_browsers.__file__).read_text(encoding="utf-8")
+    assert 'subprocess.Popen([str(exe), "chrome://' not in src
+    assert not hasattr(installed_browsers, "open_extensions_page")
+
+
+def test_bringing_a_browser_forward_passes_no_url(monkeypatch, tmp_path):
+    """With no argument a running browser is focused rather than handed a blank
+    window -- which is the behaviour that made the URL version look broken."""
     from glmcode import installed_browsers
     exe = tmp_path / "chrome"
     exe.write_text("#!/bin/sh\n")
     seen = {}
     monkeypatch.setattr(installed_browsers.subprocess, "Popen",
                         lambda argv, **kw: seen.update(argv=argv))
-    ok, err = installed_browsers.open_extensions_page(str(exe))
-    assert ok and seen["argv"] == [str(exe), "chrome://extensions"]
+    ok, err = installed_browsers.open_browser(str(exe))
+    assert ok and seen["argv"] == [str(exe)]
+
+
+def test_supports_tabs_is_answerable_before_the_session_starts():
+    """The page only exists after start(). A property that said False until
+    then would silently drop the tab tools for anyone who asked first."""
+    from glmcode.browser_session import BrowserSession
+    assert BrowserSession(bridge=object()).supports_tabs is True

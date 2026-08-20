@@ -15,7 +15,8 @@ By hand, if you prefer:
 1. Open `chrome://extensions` in the browser you want the agent to drive.
 2. Turn on **Developer mode** (top right).
 3. **Load unpacked** → choose this folder.
-4. Turn on Settings → Browser → **Use my own browser**.
+That is all. There is no switch to find afterwards — the app uses your browser
+whenever the extension is connected.
 
 Chrome, Edge, Brave, Vivaldi, Arc and anything else Chromium-based all work.
 
@@ -38,7 +39,10 @@ It talks **only** to the app, on `127.0.0.1`. Nothing is uploaded, there is no
 account, and no server is involved. The toolbar button pauses it at any time —
 while paused it disconnects and refuses every command.
 
-It drives the **active tab in the frontmost window**. Browser pages
+The agent asks which tabs are open and picks one — by default it opens a
+**new** tab for its own work rather than taking over one you are reading.
+When it switches to an existing tab it brings that tab to the front, so you
+can see where it is working. Browser pages
 (`chrome://`, the Web Store, other extensions) are off limits — Chrome forbids
 extensions from touching those, and it says so rather than failing quietly.
 

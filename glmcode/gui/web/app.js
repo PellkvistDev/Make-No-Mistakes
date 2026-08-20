@@ -3623,7 +3623,7 @@ function syncSettingsUI() {
   $("opt-browser-logins").setAttribute("aria-checked", !!settings.browser_keep_logins);
   // Not while it's being typed into -- rewriting the field under the cursor
   // is how a half-typed endpoint turns into a saved wrong one.
-  $("opt-browser-mine").setAttribute("aria-checked", !!settings.browser_use_mine);
+  $("opt-browser-mine").setAttribute("aria-checked", settings.browser_own !== "off");
   if (document.activeElement !== $("opt-browser-connect"))
     $("opt-browser-connect").value = settings.browser_connect_url || "";
   $("opt-browser-connect").classList.toggle("attached-on", !!settings.browser_connect_url);
@@ -4426,21 +4426,16 @@ function renderExtStatus(st) {
   const connected = !!(st && st.connected);
   const on = !!(st && st.enabled);
 
-  if (connected && on) {
-    line.textContent = "Connected — working in your browser.";
-    line.className = "row-sub ext-on";
-  } else if (connected) {
-    // The interesting case, and the one that used to look like a dead end:
-    // the hard part is DONE and only the switch above is left.
-    line.textContent = "Extension is connected. Turn the switch above on to use it.";
-    line.className = "row-sub ext-on";
-  } else if (on) {
-    line.textContent = st && st.port
-      ? "Set up, but your browser isn't connected right now."
-      : "Couldn't open a local port for the extension to connect to.";
-    line.className = "row-sub ext-off";
-  } else {
+  if (!on) {
     line.textContent = "Off — the agent uses its own separate browser.";
+    line.className = "row-sub ext-off";
+  } else if (connected) {
+    line.textContent = "Connected — I'll work in your tabs.";
+    line.className = "row-sub ext-on";
+  } else {
+    line.textContent = st && st.port
+      ? "Install the extension and I'll work in your tabs instead."
+      : "Couldn't open a local port for the extension to connect to.";
     line.className = "row-sub ext-off";
   }
   install.textContent = connected ? "Set up again" : "Set it up";
@@ -4467,8 +4462,7 @@ function renderExtSheet(st) {
 
   // The last step only appears once the hard part is done, so the sheet never
   // offers a switch that cannot work yet.
-  $("ext-finish").hidden = !(connected && !st.enabled);
-  if (connected && st.enabled) $("ext-sheet-close").textContent = "Done";
+  $("ext-finish").hidden = !connected;
 
   const box = $("ext-browsers");
   const none = $("ext-browsers-none");
@@ -4479,11 +4473,23 @@ function renderExtSheet(st) {
   box.innerHTML = "";
   list.forEach((b, i) => {
     const btn = document.createElement("button");
-    btn.className = i === 0 ? "btn btn-primary btn-small" : "btn btn-small";
-    btn.textContent = "Open in " + b.name;
+    btn.className = "btn btn-small";
+    // Brings that browser to the front so the address can be pasted. It does
+    // NOT navigate: no program can open another program's chrome:// page, and
+    // passing the URL anyway got the browser to drop it and show an empty
+    // window -- which is what made this button look like the bug.
+    btn.textContent = "Bring " + b.name + " to the front";
     btn.addEventListener("click", async () => {
+      // The browser comes forward FIRST. Copying is a nicety and it can fail
+      // (no focus, no permission, WebView2's page context) -- awaiting it
+      // first meant one rejected promise stopped the button doing the one
+      // thing it is for.
       const res = await api().open_extensions_page(b.path);
-      if (res && res.error) toast(res.error, "error", 5000);
+      if (res && res.error) return toast(res.error, "error", 5000);
+      const copied = await copyText("chrome://extensions").then(() => true, () => false);
+      toast(copied ? "Copied chrome://extensions — paste it in the address bar."
+                   : "Now paste chrome://extensions into the address bar.",
+            "info", 5000);
     });
     box.appendChild(btn);
   });
@@ -4507,7 +4513,7 @@ function stopExtPolling() {
 }
 
 async function setUseMine(next) {
-  const res = await api().set_setting("browser_use_mine", next);
+  const res = await api().set_setting("browser_own", next ? "auto" : "off");
   if (res && res.error) { toast(res.error, "error", 5000); return null; }
   settings = res;
   $("opt-browser-mine").setAttribute("aria-checked", next);
@@ -4517,20 +4523,12 @@ async function setUseMine(next) {
 $("opt-browser-mine").addEventListener("click", async () => {
   const next = $("opt-browser-mine").getAttribute("aria-checked") !== "true";
   const st = await setUseMine(next);
-  // Turning it on with nothing connected is the common first move, and the
-  // sheet is the only thing that makes it work -- so open it rather than
-  // leaving a switch that appears to do nothing.
+  // Switched on with nothing connected: the extension is the only thing that
+  // makes it work, so offer the instructions rather than leaving a switch that
+  // appears to do nothing.
   if (next && st && !st.connected) openExtSheet();
 });
 
-// The last step of the sheet: the extension is connected, so the only thing
-// left is the switch. Doing it here means nobody finishes the install and then
-// has to find the control they were sent away from.
-$("ext-enable-now").addEventListener("click", async () => {
-  await setUseMine(true);
-  toast("Using your own browser now.", "info", 3000);
-  $("browser-ext-sheet").hidden = true;
-});
 
 function openExtSheet() {
   $("browser-ext-sheet").hidden = false;
@@ -4543,14 +4541,23 @@ $("ext-sheet-close").addEventListener("click", () => { $("browser-ext-sheet").hi
 $("browser-ext-sheet").addEventListener("click", (e) => {
   if (e.target === $("browser-ext-sheet")) $("browser-ext-sheet").hidden = true;
 });
-$("ext-copy-url").addEventListener("click", () => {
-  navigator.clipboard.writeText("chrome://extensions");
-  toast("Copied. Paste it in your browser's address bar.", "info", 3000);
-});
-$("ext-copy-path").addEventListener("click", () => {
-  navigator.clipboard.writeText($("ext-path").textContent.trim());
-  toast("Folder path copied.", "info", 3000);
-});
+// copyText, not navigator.clipboard directly: the clipboard API is not always
+// available in WebView2's page context, which is the desktop app on Windows --
+// so calling it raw would have made all of these silently do nothing there.
+// And a copy that failed has to SAY so, because copying is the whole job.
+async function copyOrSay(text, ok) {
+  try {
+    await copyText(text);
+    toast(ok, "info", 3000);
+  } catch {
+    toast("Couldn't reach the clipboard — select and copy it by hand.",
+          "warn", 5000);
+  }
+}
+$("ext-copy-url").addEventListener("click",
+  () => copyOrSay("chrome://extensions", "Copied. Paste it in your browser's address bar."));
+$("ext-copy-path").addEventListener("click",
+  () => copyOrSay($("ext-path").textContent.trim(), "Folder path copied."));
 $("ext-open-folder").addEventListener("click", async () => {
   const res = await api().open_extension_folder();
   if (res && res.error) toast(res.error, "error", 5000);

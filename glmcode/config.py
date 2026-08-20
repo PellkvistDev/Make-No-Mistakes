@@ -401,7 +401,16 @@ class Config:
     # control_chrome: drive the browser the user already has open, through
     # the extension. The one that needs no relaunch, so it is the one the
     # UI offers; browser_connect_url stays for the DevTools-port route.
-    browser_use_mine: bool = False
+    # control_chrome and the user's own browser. "auto" -- the default -- means
+    # the extension is used whenever it is connected: installing an unpacked
+    # extension into your own browser is already a deliberate act, and asking
+    # for a second opt-in afterwards is how someone ends up with everything set
+    # up and nothing working. "off" is the way out.
+    #
+    # A NEW field rather than flipping browser_use_mine's default: that one
+    # defaulted to False, so a persisted False is indistinguishable from a
+    # choice, and every existing install would have stayed off.
+    browser_own: str = "auto"
     browser_connect_url: str = ""
     browser_provider: str = ""       # control_chrome: dedicated Browser Agent provider ("" = same as chat)
     browser_model: str = ""          # control_chrome: dedicated Browser Agent model ("" = same as chat)

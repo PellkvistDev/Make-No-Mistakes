@@ -110,7 +110,35 @@ function send(obj) {
 
 // -- which tab ------------------------------------------------------------ //
 
+// A tab the agent has explicitly switched to. Without this, "work in my
+// browser" silently meant "whatever tab is in front right now", so the user
+// switching tabs mid-task moved the agent with them.
+let pinnedTabId = null;
+
+function tabInfo(t, active) {
+  return { id: t.id, title: t.title || "", url: t.url || "",
+           active: !!active, windowId: t.windowId,
+           usable: !/^(chrome|edge|about|devtools|chrome-extension):/i.test(t.url || "") };
+}
+
+async function listTabs() {
+  const tabs = await chrome.tabs.query({});
+  const focused = (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+  const driving = pinnedTabId != null ? pinnedTabId : (focused && focused.id);
+  return tabs.map((t) => tabInfo(t, t.id === driving));
+}
+
 async function activeTab() {
+  // A pinned tab wins, so a long task does not follow the user around as they
+  // switch tabs. It is dropped as soon as it stops existing.
+  if (pinnedTabId != null) {
+    try {
+      const t = await chrome.tabs.get(pinnedTabId);
+      if (t) return t;
+    } catch {
+      pinnedTabId = null;
+    }
+  }
   // The window the user is looking at, not the first one they opened. A
   // normal window only: driving a devtools or popup window is never what was
   // meant, and lastFocusedWindow is what "in front of me" actually means.
@@ -138,7 +166,10 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
   // A navigation replaces the frame, and with it the isolated world.
   if (info.status === "loading") injected.delete(tabId);
 });
-chrome.tabs.onRemoved.addListener((tabId) => injected.delete(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  injected.delete(tabId);
+  if (pinnedTabId === tabId) pinnedTabId = null;
+});
 
 async function act(tabId, action) {
   await ensureInjected(tabId);
@@ -173,6 +204,38 @@ async function run(command, p) {
     const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
     const t = tabs[0];
     return { ok: true, url: (t && t.url) || "", title: (t && t.title) || "" };
+  }
+  if (command === "tabs") return await listTabs();
+  if (command === "select_tab") {
+    const id = Number(p.id);
+    let t;
+    try {
+      t = await chrome.tabs.get(id);
+    } catch {
+      throw new Error(`There is no tab ${id} any more. List the tabs again.`);
+    }
+    pinnedTabId = id;
+    // Brought to the front on purpose: the user should be able to SEE which
+    // tab the agent is working in, and a background tab throttles timers and
+    // rendering in ways that make a page behave differently.
+    await chrome.tabs.update(id, { active: true });
+    try { await chrome.windows.update(t.windowId, { focused: true }); } catch {}
+    injected.delete(id);
+    return tabInfo(await chrome.tabs.get(id), true);
+  }
+  if (command === "new_tab") {
+    let url = String(p.url || "").trim();
+    if (url && !/^(https?|file|data|about):/i.test(url)) url = "https://" + url;
+    const t = await chrome.tabs.create(url ? { url, active: true } : { active: true });
+    pinnedTabId = t.id;
+    if (url) await waitForLoad(t.id);
+    injected.delete(t.id);
+    return tabInfo(await chrome.tabs.get(t.id), true);
+  }
+  if (command === "release") {
+    // Back to following the user's active tab.
+    pinnedTabId = null;
+    return true;
   }
 
   const tab = await activeTab();

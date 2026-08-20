@@ -3166,9 +3166,44 @@ CONTROL_CHROME_TOOLS = {"control_chrome"}
 # control_chrome sub-agent that the user already approved, and sub-agents
 # auto-deny any prompt -- so these must run without asking (the gate was the
 # control_chrome approval). Each just manipulates that one dedicated browser.
+
+# Only offered when the browser is the user's OWN -- a launched browser has the
+# one page this app made, so a tab list there would be three tools that always
+# answer with the page the agent is already on.
+BROWSER_TAB_SCHEMAS = [
+    _schema(
+        "browser_tabs",
+        "List the tabs open in the user's browser, with an id, title and URL for each, "
+        "and which one you are currently driving. Call this FIRST, always: their open "
+        "tabs are the workspace the goal is usually about, and you cannot pick the "
+        "right one without seeing them.",
+        {},
+        [],
+    ),
+    _schema(
+        "browser_switch_tab",
+        "Drive a different open tab, by the id browser_tabs gave you, and bring it to "
+        "the front. Use this when the goal is about a page the user ALREADY has open "
+        "(the thing they are looking at, a dashboard they left running). Returns a "
+        "snapshot of it.",
+        {"id": {"type": "integer", "description": "Tab id from browser_tabs"}},
+        ["id"],
+    ),
+    _schema(
+        "browser_new_tab",
+        "Open a NEW tab and work there. For when the goal needs a page that is not open "
+        "yet -- if it is about something they already have open, browser_switch_tab to "
+        "that instead of opening a second copy of it. Returns a snapshot of the new tab.",
+        {"url": {"type": "string", "description": "URL to open (optional; blank opens a new tab page)"}},
+        [],
+    ),
+]
+
+
 BROWSER_ACTION_TOOLS = {"browser_navigate", "browser_snapshot", "browser_click",
                         "browser_click_at", "browser_type", "browser_key",
-                        "browser_read", "browser_screenshot", "browser_wait"}
+                        "browser_read", "browser_screenshot", "browser_wait",
+                        "browser_tabs", "browser_switch_tab", "browser_new_tab"}
 
 
 def execute_tool(name: str, args: dict) -> str:
