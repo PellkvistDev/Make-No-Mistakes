@@ -1176,6 +1176,13 @@ function handle(ev) {
       scrollDown();
       break;
     }
+    /* The coding agent has the same worker tools the spoken side has, and its
+       worker_update events arrive on the ordinary sid -- where nothing was
+       listening. A worker dispatched by typing therefore appeared nowhere in
+       the app at all. */
+    case "worker_update":
+      noteWorker(ev);
+      break;
     case "steered": {
       const t = ensureTurn();
       t.wrap.appendChild(buildSteeredEl(ev.text || ""));
@@ -1193,6 +1200,9 @@ function handle(ev) {
       break;
     }
     case "subagent_stream": {
+      // A worker's own thread also feeds the rail's "what is it doing" line,
+      // whichever agent dispatched it.
+      noteWorkerActivity(ev);
       renderSubagentEvent(ev.id, ev);
       break;
     }
@@ -1508,6 +1518,31 @@ function syncBrowserPauseBtn(row, ev) {
 
 const subagentThreads = {};   // aid -> per-thread render state (mirrors `current`)
 const subagentStatus = {};    // aid -> "running" | "done" | "error"
+/* Background workers, whoever dispatched them.
+ *
+ * This used to live on `voice`, and worker_update was handled only on the
+ * voice route -- so a worker the CODING agent dispatched (it has the same
+ * three tools) updated nothing and appeared nowhere in the app. One store,
+ * written by both routes, read by the voice dock and the activity rail. */
+const liveWorkers = {};       // id -> {id, name, status, activity}
+
+function noteWorker(ev) {
+  const prev = liveWorkers[ev.id] || {};
+  liveWorkers[ev.id] = { id: ev.id, name: ev.name || prev.name || ev.id,
+                         status: ev.status, activity: prev.activity || "" };
+  renderVoiceWorkers();
+  renderActivityRail();
+}
+
+function noteWorkerActivity(ev) {
+  const w = liveWorkers[ev.id];
+  if (!w || w.status !== "running") return;
+  const line = workerActivity(ev.kind, ev);
+  if (!line) return;
+  w.activity = line;
+  renderVoiceWorkers();
+  renderActivityRail();
+}
 const subagentSteerPending = {}; // aid -> queued (undelivered) steering text, or absent
 let activeSubagentId = null;
 
@@ -5907,7 +5942,8 @@ async function startVoice(viaWake = false) {
   voice.active = true;
   voice.speaking = voice.thinking = voice.recording = voice.transcribing = false;
   voice.announceQ = [];
-  voice.workers = {};
+  // NOT cleared here any more: workers outlive a voice session, and one the
+  // coding agent dispatched has nothing to do with this one starting.
   voice.perm = null;
   voice.permQ = [];
   voice.muted = false;
@@ -5938,6 +5974,7 @@ async function startVoice(viaWake = false) {
   $("voice-dock").hidden = false;
   $("voice-chip").setAttribute("aria-pressed", "true");
   $("voice-chip").classList.add("active");
+  setTalkState(true);
   // Web Audio analyser for the energy VAD.
   const Ctx = window.AudioContext || window.webkitAudioContext;
   voice.ctx = new Ctx();
@@ -6006,6 +6043,7 @@ function stopVoice() {
   $("voice-dock").hidden = true;
   $("voice-chip").setAttribute("aria-pressed", "false");
   $("voice-chip").classList.remove("active");
+  setTalkState(false);
   try { api().voice_mode(false); } catch (e) { /* ignore */ }
   // Re-arm the wake listener AFTER the voice mic has fully released. Grabbing
   // the device again in the same tick can fail (still busy), and that failure
@@ -6378,7 +6416,7 @@ function classifyPermission(text) {
 function renderVoiceWorkers() {
   const el = $("voice-workers");
   if (!el) return;
-  const ws = Object.values(voice.workers);
+  const ws = Object.values(liveWorkers);
   if (!ws.length) { el.innerHTML = ""; return; }
   el.innerHTML = "";
   for (const w of ws) {
@@ -6478,10 +6516,7 @@ function handleVoiceEvent(ev) {
       break;
     }
     case "worker_update": {
-      const prev = voice.workers[ev.id] || {};
-      voice.workers[ev.id] = { id: ev.id, name: ev.name, status: ev.status,
-                               activity: prev.activity || "" };
-      renderVoiceWorkers();
+      noteWorker(ev);
       if (ev.status === "done" || ev.status === "error") {
         earcon(ev.status === "done" ? "done" : "stop");  // a cue before it speaks up
         voice.announceQ.push({ name: ev.name, status: ev.status, result: ev.result || "" });
@@ -6491,11 +6526,7 @@ function handleVoiceEvent(ev) {
     }
     case "subagent_stream": {
       // Live activity from a background worker's own thread.
-      const w = voice.workers[ev.id];
-      if (w && w.status === "running") {
-        const line = workerActivity(ev.kind, ev);
-        if (line) { w.activity = line; renderVoiceWorkers(); }
-      }
+      noteWorkerActivity(ev);
       break;
     }
     case "worker_permission":
@@ -6749,7 +6780,9 @@ async function armWake(retry = true) {
   src.connect(wake.analyser);
   wake.armed = true;
   $("voice-chip").classList.add("armed");
+  $("talk-btn").classList.add("armed");
   $("voice-chip").title = `Listening for “${(settings.voice_wake_word || "hey assistant")}” — click to open voice`;
+  $("talk-btn").title = `Listening for “${(settings.voice_wake_word || "hey assistant")}” — or click to start talking`;
   wake.timer = setInterval(wakeTick, WK_FRAME_MS);
 }
 
@@ -6761,7 +6794,9 @@ function disarmWake() {
   if (wake.ctx) { try { wake.ctx.close(); } catch (e) { /* ignore */ } wake.ctx = null; }
   wake.armed = false;
   $("voice-chip").classList.remove("armed");
+  $("talk-btn").classList.remove("armed");
   $("voice-chip").title = "Talk to it — hands-free voice conversation";
+  if (!voice.active) $("talk-btn").title = "Talk to it — a hands-free voice conversation";
 }
 
 function wakeEnergy() {
@@ -6870,6 +6905,10 @@ function refreshWake() {
 }
 
 $("voice-chip").addEventListener("click", () => { if (voice.active) stopVoice(); else startVoice(false); });
+/* The same action, where the hands are. The titlebar chip stays -- it is a
+   known spot and it is where the wake-word "armed" state has always shown --
+   but this is the one meant to be found. */
+$("talk-btn").addEventListener("click", () => { if (voice.active) stopVoice(); else startVoice(false); });
 $("voice-close").addEventListener("click", stopVoice);
 /* Collapse to just the orb.
  *
@@ -7269,4 +7308,77 @@ function stopLiveVoice() {
 
 function liveEngineOn() {
   return !!(settings && settings.voice_engine === "live");
+}
+
+/* The one control that both starts and ends it. Two buttons showing one
+   session, so they must never disagree about whether it is running. */
+function setTalkState(on) {
+  const b = $("talk-btn");
+  if (!b) return;
+  b.setAttribute("aria-pressed", String(on));
+  b.setAttribute("aria-label", on ? "End the voice conversation" : "Talk to it");
+  b.title = on ? "End the voice conversation"
+               : "Talk to it — a hands-free voice conversation";
+  b.querySelector(".talk-label").textContent = on ? "Listening" : "Talk";
+  renderActivityRail();       // voice is a rail item while it is running
+}
+
+/* ---- live activity rail ------------------------------------------------ *
+ *
+ * What is running, in the empty margin beside the chat. Ambient: it answers
+ * "is anything happening" without opening anything, which was previously
+ * unanswerable -- a dispatched worker existed only inside the sub-agent panel
+ * or the voice dock, both of which you had to open first.
+ *
+ * It renders from state the app already keeps (voice.workers, subagentStatus)
+ * rather than a registry of its own, so it cannot drift out of step with the
+ * panels it links to. */
+const RAIL_STATUS_CLASS = {
+  running: "ai-run", done: "ai-done", stopped: "ai-done",
+  error: "ai-err", reverted: "ai-done",
+};
+
+function railItems() {
+  const out = [];
+  if (voice.active) {
+    out.push({ key: "voice", cls: "ai-voice", name: "Voice", what: "",
+               open: () => {
+                 // Un-collapse rather than toggle: the rail is how you find it
+                 // again after collapsing it, so this has one direction.
+                 $("voice-dock").classList.remove("collapsed");
+                 $("voice-collapse").setAttribute("aria-expanded", "true");
+               } });
+  }
+  // Background workers only. spawn_agents sub-agents already appear as
+  // clickable rows inside the turn that made them, and repeating those here
+  // would be furniture rather than information.
+  for (const w of Object.values(liveWorkers)) {
+    out.push({ key: w.id, cls: RAIL_STATUS_CLASS[w.status] || "ai-run",
+               name: w.name, what: w.status === "running" ? (w.activity || "") : w.status,
+               open: () => openSubagentPanel(w.id, w.name, w.status) });
+  }
+  return out;
+}
+
+function renderActivityRail() {
+  const rail = $("activity-rail");
+  const box = $("activity-items");
+  if (!rail || !box) return;
+  const items = railItems();
+  // Empty means gone, not an empty box: a rail with nothing in it is furniture
+  // that makes the window look busier while saying nothing.
+  rail.hidden = items.length === 0;
+  box.innerHTML = "";
+  for (const it of items) {
+    const b = document.createElement("button");
+    b.className = "activity-item " + it.cls;
+    b.type = "button";
+    b.title = it.what ? `${it.name} — ${it.what}` : it.name;
+    b.innerHTML = '<span class="ai-dot"></span><span class="ai-name"></span>' +
+                  '<span class="ai-what"></span>';
+    b.querySelector(".ai-name").textContent = it.name;
+    b.querySelector(".ai-what").textContent = it.what || "";
+    b.addEventListener("click", it.open);
+    box.appendChild(b);
+  }
 }

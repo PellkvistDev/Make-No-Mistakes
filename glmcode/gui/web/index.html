@@ -64,6 +64,21 @@
   </div>
 </header>
 
+<!-- Live activity rail.
+     The chat is a centred 860px column, so on any reasonable window there is a
+     wide empty margin on each side. What was missing was not somewhere to put
+     more buttons -- it was an ambient view of what is RUNNING. A dispatched
+     worker was invisible unless you opened the sub-agent panel or happened to
+     have the voice dock up, which is the wrong way round for the thing you
+     most want to glance at.
+
+     Peripheral by design: state, not actions. Every item here is reachable
+     from the sub-agent panel too, because the rail is the first thing to go
+     when the window narrows and nothing may live only in it. -->
+<aside id="activity-rail" class="activity-rail" aria-label="Running now" hidden>
+  <div id="activity-items" class="activity-items"></div>
+</aside>
+
 <!-- Chat history sidebar -->
 <nav id="sidebar" class="glass-strong" aria-label="Chat history">
   <button id="new-chat-btn" class="new-chat-btn">
@@ -182,11 +197,27 @@
     <button id="attach-btn" class="icon-btn" aria-label="Attach files" title="Attach files">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
     </button>
-    <button id="mic-btn" class="icon-btn" aria-label="Dictate" title="Dictate — click to record, click again to transcribe into the box">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/></svg>
+    <!-- Dictation and conversation are DIFFERENT things, and they used to be
+         the same picture 500px apart: this one typed for you, the one in the
+         titlebar opened a conversation. This is the one that types -- the
+         glyph carries a pen for that reason. -->
+    <button id="mic-btn" class="icon-btn" aria-label="Dictate into the box" title="Dictate — click to record, click again to transcribe into the box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-11.7 5.2"/><path d="M14 21l7-7 2 2-7 7-3 1 1-3z"/></svg>
     </button>
     <textarea id="input" rows="1" placeholder="Ask anything…  (type @ to add a file)"
               aria-label="Message"></textarea>
+    <!-- Starting a conversation is an action, and every other message action
+         lives here rather than in the titlebar, which is where this one was:
+         a 20px glyph the width of the window away from the hands. The same
+         button ends the session. -->
+    <button id="talk-btn" class="talk-btn" aria-label="Talk to it" aria-pressed="false"
+            title="Talk to it — a hands-free voice conversation">
+      <svg class="talk-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+        <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>
+      </svg>
+      <span class="talk-label">Talk</span>
+    </button>
     <button id="send-btn" class="send-btn" aria-label="Send message" title="Send (Enter)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
     </button>
