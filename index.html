@@ -1,0 +1,498 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <!-- No theme-color: it tints the home-indicator strip a solid dark colour,
+       which reads as a bar at the very bottom. Letting it default keeps that
+       area transparent so the wallpaper/content shows there. -->
+  <!-- Installed (standalone) on iOS: make the status bar transparent so the
+       wallpaper flows under the Dynamic Island instead of leaving a dark bar.
+       The top bar's own glass (with safe-area padding) sits behind the clock. -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <!--
+    SECURITY: this Content-Security-Policy is the app's outer wall.
+      default-src 'none'      — nothing loads unless explicitly allowed below.
+      script-src 'self'       — only our own bundled JS; no CDNs, no inline <script>.
+      connect-src             — network is pinned to exactly the model API + GitHub.
+                                A key-stealer would have nowhere to send anything.
+      No 'unsafe-inline' for scripts, no 'unsafe-eval'.
+    Keep connect-src in lockstep with the hosts the app actually talks to.
+    The wss: entry is the speech-to-speech socket and is NOT covered by the
+    https: one -- connect-src matches on scheme, so a WebSocket to a host
+    already allowed over https is still blocked, and the failure arrives as
+    a bare console error with no request in the network tab.
+  -->
+  <meta http-equiv="Content-Security-Policy" content="
+    default-src 'none';
+    script-src 'self';
+    style-src 'self' 'unsafe-inline';
+    img-src 'self' data:;
+    font-src 'self';
+    manifest-src 'self';
+    connect-src https://api.github.com https://api.z.ai https://open.bigmodel.cn
+                https://generativelanguage.googleapis.com
+                wss://generativelanguage.googleapis.com;
+    base-uri 'none';
+    form-action 'none';
+    frame-ancestors 'none';
+  " />
+  <meta name="referrer" content="no-referrer" />
+  <!-- Which build this is. The deploy workflow rewrites the content with the
+       commit it published, so "is my phone running the fix or a cached copy?"
+       is a question you can answer by looking, instead of by guessing. A day
+       was lost to that guess. -->
+  <meta name="mnm-build" content="2bc3926" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <!-- The same icon the desktop app uses, so one app does not look like two.
+       PNG and not SVG, deliberately: iOS ignores an SVG apple-touch-icon
+       entirely and falls back to a screenshot of the page, which is why the
+       home-screen icon never matched.
+       Full-bleed squares, also deliberately: iOS and Android mask the icon
+       into their own shape, so a pre-rounded one gets rounded twice and shows
+       the app's dark corners through the gap. -->
+  <link rel="icon" type="image/png" sizes="192x192" href="./icon-192.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="./icon-180.png" />
+  <link rel="stylesheet" href="style.css" />
+  <title>Make No Mistakes</title>
+</head>
+<body>
+  <div id="bg-layer" aria-hidden="true"></div>
+  <div id="app">
+
+    <!-- ===================== SETUP (first run) ===================== -->
+    <section id="screen-setup" class="screen" hidden>
+      <div class="pane">
+        <h1 class="brand">Make&nbsp;No&nbsp;Mistakes</h1>
+        <p class="sub">Set up your phone workspace. Your keys are encrypted on this device with a PIN and never sent anywhere but the API you pick and GitHub.</p>
+
+        <!-- Scanning happens HERE, inside the app, on purpose. Following a
+             QR link opens the browser instead, and on iOS a home-screen app
+             has its own storage — so anything paired in the browser never
+             reaches the installed app. -->
+        <button id="btn-scan-setup" class="primary scan-cta" type="button">
+          <span aria-hidden="true">⌁</span> Scan the code on my computer
+        </button>
+        <p class="hint scan-or">or fill it in yourself</p>
+
+        <!-- Which API, first: it decides the endpoint, the model names and
+             where the key comes from. This screen used to ask for a "z.ai /
+             model API key" and offer a base-URL menu with two z.ai entries in
+             it, so a phone set up by hand could not reach anything else --
+             including the one API that can do voice. -->
+        <div class="field">
+          <span>Which API</span>
+          <div id="setup-presets" class="api-presets"></div>
+          <small class="hint" id="setup-preset-note"></small>
+        </div>
+
+        <label class="field">
+          <span>Model API key</span>
+          <input id="in-model-key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="paste your model key" />
+          <small class="hint">Get one at <a id="setup-key-link" href="#" target="_blank" rel="noopener noreferrer">the provider's console</a>.</small>
+        </label>
+        <label class="field">
+          <span>Model</span>
+          <select id="in-model-pick"></select>
+          <input id="in-model" type="text" autocomplete="off" spellcheck="false" placeholder="model id" hidden />
+        </label>
+        <label class="field" id="setup-url-field" hidden>
+          <span>Model API base URL</span>
+          <input id="in-base-url" type="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://…/v1" />
+        </label>
+
+        <label class="field">
+          <span>GitHub fine-grained token</span>
+          <input id="in-gh-token" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="github_pat_… (Contents: read/write)" />
+          <small class="hint">Use a <b>fine-grained</b> token scoped to just your repos, <b>Contents: Read&nbsp;and&nbsp;write</b> only. Least privilege — if this phone were lost, that's all it could touch.</small>
+        </label>
+
+        <div class="pin-block">
+          <label class="field">
+            <span>Choose a PIN (min 4)</span>
+            <input id="in-pin" type="password" inputmode="numeric" autocomplete="off" placeholder="unlock PIN" />
+          </label>
+          <label class="field">
+            <span>Confirm PIN</span>
+            <input id="in-pin2" type="password" inputmode="numeric" autocomplete="off" placeholder="repeat PIN" />
+          </label>
+        </div>
+        <p class="hint">This PIN encrypts your keys (AES-GCM, PBKDF2 210k). We never store the PIN — if you forget it you'll re-enter your keys.</p>
+
+        <div class="field">
+          <span>Background</span>
+          <div id="setup-bg" class="bg-picker"></div>
+        </div>
+
+        <button id="btn-save-setup" class="primary">Encrypt &amp; continue</button>
+        <p id="setup-error" class="error" role="alert"></p>
+      </div>
+    </section>
+
+    <!-- ===================== UNLOCK ===================== -->
+    <section id="screen-unlock" class="screen" hidden>
+      <div class="pane center">
+        <h1 class="brand">Locked</h1>
+        <p class="sub">Enter your PIN to decrypt your workspace.</p>
+        <label class="field">
+          <input id="in-unlock-pin" type="password" inputmode="numeric" autocomplete="off" placeholder="PIN" autofocus />
+        </label>
+        <button id="btn-unlock" class="primary">Unlock</button>
+        <p id="unlock-error" class="error" role="alert"></p>
+        <button id="btn-reset" class="link danger">Forgot PIN — reset workspace</button>
+      </div>
+    </section>
+
+    <!-- ===================== REPO PICKER ===================== -->
+    <!-- Reached either as the very first screen after unlock (sync off — there's
+         nothing else to show), or via "＋ New chat" from the chat list (sync on
+         — picking a repo here always starts a FRESH chat; existing chats are
+         resumed from the list, never by re-picking a repo). -->
+    <section id="screen-repo" class="screen" hidden>
+      <header class="bar">
+        <button id="btn-repo-back" class="icon-btn" title="Your chats" hidden>‹</button>
+        <span class="bar-title">Choose a repository</span>
+        <button id="btn-repo-settings" class="icon-btn" title="Settings">⚙</button>
+        <button id="btn-repo-lock" class="icon-btn" title="Lock">🔒</button>
+      </header>
+      <div class="pane scroll">
+        <p class="sub" id="repo-whoami"></p>
+
+        <div class="new-repo">
+          <h3>Start a fresh repo</h3>
+          <div class="row">
+            <input id="in-new-repo" type="text" placeholder="new-repo-name" spellcheck="false" />
+            <label class="chk"><input id="in-new-private" type="checkbox" checked /> private</label>
+          </div>
+          <button id="btn-create-repo" class="ghost">Create &amp; open</button>
+        </div>
+
+        <div class="repo-list-head">
+          <span class="section-label">Or open an existing one</span>
+          <div class="row">
+            <input id="in-repo-filter" type="text" placeholder="filter repos…" spellcheck="false" />
+            <button id="btn-repo-refresh" class="ghost">Refresh</button>
+          </div>
+        </div>
+        <ul id="repo-list" class="repo-list"></ul>
+        <p id="repo-error" class="error" role="alert"></p>
+      </div>
+    </section>
+
+    <!-- ===================== YOUR CHATS (synced hub) ===================== -->
+    <!-- The top-level screen once sync is on: every chat you have, from every
+         repo, on every device — the phone mirrors the desktop's sidebar. No
+         "pick a repo first": that's only for starting something new. -->
+    <section id="screen-chats" class="screen" hidden>
+      <header class="bar">
+        <span class="bar-title">Your chats</span>
+        <button id="btn-chats-new" class="icon-btn" title="New chat">＋</button>
+        <button id="btn-chats-settings" class="icon-btn" title="Settings">⚙</button>
+        <button id="btn-chats-lock" class="icon-btn" title="Lock">🔒</button>
+      </header>
+      <div class="pane scroll">
+        <p class="sub">Encrypted and synced across your devices. Chats in a GitHub repo can be
+          picked up here; ones marked <b>on your computer</b> are a project this phone
+          can't reach, so they're synced to read, not to continue.</p>
+        <ul id="chats-list" class="repo-list"></ul>
+        <p id="chats-error" class="error" role="alert"></p>
+      </div>
+    </section>
+
+    <!-- ===================== CHAT ===================== -->
+    <section id="screen-chat" class="screen" hidden>
+      <header class="bar">
+        <button id="btn-back-repo" class="icon-btn" title="Back">‹</button>
+        <span class="bar-title" id="chat-repo-name">repo</span>
+        <button id="btn-chat-settings" class="icon-btn" title="Settings">⚙</button>
+        <button id="btn-chat-lock" class="icon-btn" title="Lock">🔒</button>
+      </header>
+
+      <div id="messages" class="messages"></div>
+      <button id="btn-to-bottom" class="to-bottom" type="button" title="Jump to latest" hidden>↓</button>
+
+      <div id="composer-dock">
+        <!-- Settling the accessory-bar gap on the device instead of by
+             screenshot. iOS reports nothing about that bar, so the allowance
+             under it has been guessed twice and shipped twice; this is the same
+             number, adjustable, and shown at the one moment it can be judged --
+             while the keyboard is up and the bar is actually drawn. Off unless
+             switched on in Settings. -->
+        <div id="kb-calibrate" class="kb-calibrate" hidden>
+          <button id="kb-cal-down" type="button" title="Move the composer down">−</button>
+          <span id="kb-cal-val" class="mono">44px</span>
+          <button id="kb-cal-up" type="button" title="Move the composer up">+</button>
+          <button id="kb-cal-done" type="button" class="kb-cal-done">Done</button>
+        </div>
+        <div id="attach-chips" class="attach-chips" hidden></div>
+        <div id="ctx-foot" class="ctx-foot">
+          <button id="btn-ctx" class="ctx-usage" type="button" title="Context usage">
+            <svg class="token-donut" viewBox="0 0 36 36" aria-hidden="true">
+              <path class="donut-bg" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+              <path class="donut-segment" id="token-segment" stroke-dasharray="0, 100" d="M18 2.0845 a 15.9155 15.9155 0 0 1 0 31.831 a 15.9155 15.9155 0 0 1 0 -31.831" />
+            </svg>
+            <span id="token-text">0%</span>
+          </button>
+          <button id="btn-compact" class="ctx-compact" type="button" title="Summarise older history now">Compact</button>
+        </div>
+        <form id="composer" class="composer">
+          <button id="btn-attach" class="attach-btn" type="button" title="Attach repo files">＋</button>
+          <!-- A textarea, deliberately. iOS draws its form accessory bar (the
+               prev/next chevrons and Done) above the keyboard for form controls,
+               and this was swapped for a contenteditable div to escape it. On
+               the device the bar was still drawn: the diagnostics recorded
+               visual h 449 and --kb 344 both before and after, unchanged, and
+               the chevrons appeared greyed out — iOS knows there is nothing to
+               navigate to and draws the bar regardless. There is no web API for
+               this; every published "fix" is either an inputmode hack that does
+               not apply to contenteditable, or native code overriding
+               inputAccessoryView on the web view, which a PWA cannot reach.
+               So: keep the real form control, which is better at dictation,
+               VoiceOver, undo and autocorrect, and leave the 44px spent. -->
+          <textarea id="in-prompt" rows="1" placeholder="Message the agent…" autocomplete="off"></textarea>
+          <button id="btn-voice" class="attach-btn voice-btn" type="button"
+                  title="Talk to it" aria-label="Talk to it" hidden>🎙</button>
+          <button id="btn-send" class="send" type="submit" title="Send">▲</button>
+          <button id="btn-stop" class="send stop" type="button" title="Stop" hidden>■</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- ===================== VOICE ===================== -->
+    <!-- Foreground only, and it says so. iOS gives web content no background
+         execution, so a live session ends when the app does -- exactly like a
+         turn does today. See CLAUDE.md; there is no web API for this. -->
+    <div id="voice-backdrop" class="voice-backdrop" hidden>
+      <div class="voice-sheet">
+        <div id="voice-orb" class="voice-orb"></div>
+        <div id="voice-status" class="voice-status">Connecting…</div>
+        <div id="voice-caption" class="voice-caption"></div>
+        <div class="voice-actions">
+          <button id="voice-mute" class="btn" type="button" aria-pressed="false">Mute</button>
+          <button id="voice-end" class="btn btn-danger" type="button">End</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== PAIRING SCANNER ===================== -->
+    <div id="scan-backdrop" class="scan-backdrop" hidden>
+      <video id="scan-video" playsinline muted autoplay></video>
+      <div class="scan-frame" aria-hidden="true"></div>
+      <div class="scan-bar">
+        <p id="scan-status">Point at the QR code on your computer.</p>
+        <button id="scan-cancel" class="ghost" type="button">Cancel</button>
+      </div>
+    </div>
+
+    <!-- ===================== WRITE CONFIRM DIALOG ===================== -->
+    <div id="confirm-backdrop" class="backdrop" hidden>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+        <h3 id="confirm-title">Commit change?</h3>
+        <p id="confirm-path" class="mono"></p>
+        <pre id="confirm-preview" class="preview"></pre>
+        <div class="dialog-actions">
+          <button id="btn-confirm-no" class="ghost">Cancel</button>
+          <button id="btn-confirm-yes" class="primary">Commit</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== FILE PICKER (attach) ===================== -->
+    <div id="filepick-backdrop" class="backdrop" hidden>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="filepick-title">
+        <h3 id="filepick-title">Attach files</h3>
+        <button id="filepick-upload" class="ghost" type="button" style="width:100%">📷 Upload from phone</button>
+        <input id="filepick-input" type="file" multiple hidden
+          accept="image/*,text/*,.md,.js,.ts,.jsx,.tsx,.json,.py,.css,.html,.yml,.yaml,.go,.rs,.java,.c,.cpp,.h,.sh,.txt,.csv" />
+        <div class="section-label" style="margin:14px 0 6px">Or from this repo</div>
+        <input id="filepick-search" class="setting-input" placeholder="Search files…" spellcheck="false" autocapitalize="off" autocomplete="off" />
+        <div id="filepick-list" class="filepick-list"></div>
+        <div class="dialog-actions">
+          <button id="filepick-done" class="primary">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SETTINGS SHEET ===================== -->
+    <div id="settings-backdrop" class="backdrop" hidden>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+        <h3 id="settings-title">Settings</h3>
+        <div class="settings-scroll">
+          <div class="setting-block">
+            <label class="setting-label" for="set-autolock">Auto-lock</label>
+            <select id="set-autolock" class="setting-input">
+              <option value="0">Never</option>
+              <option value="1">After 1 minute</option>
+              <option value="5">After 5 minutes</option>
+              <option value="15">After 15 minutes</option>
+              <option value="60">After 1 hour</option>
+            </select>
+            <span class="setting-hint">Locks and asks for your PIN after this much inactivity. Leaving to the Home Screen no longer locks instantly, and your conversation is saved.</span>
+          </div>
+
+          <div class="setting-block toggle-row">
+            <div><label class="setting-label" for="set-keepsignedin">Keep me signed in</label>
+              <span class="setting-hint">Skip the PIN on this device. Convenient, but anyone who can unlock your phone can open the app. Your keys stay encrypted at rest.</span></div>
+            <input id="set-keepsignedin" type="checkbox" class="toggle" />
+          </div>
+
+          <!-- Filled from the APIs paired over from the desktop. Hidden until
+               there is more than one, so a phone with a single API is not shown
+               a menu of one. -->
+          <div class="setting-block" id="set-provider-block" hidden>
+            <label class="setting-label" for="set-provider">API</label>
+            <select id="set-provider" class="setting-input"></select>
+            <p class="setting-hint">Scan the QR on your computer again to add
+               APIs you have set up since.</p>
+          </div>
+
+          <div class="setting-block">
+            <label class="setting-label" for="set-model-pick">Model</label>
+            <!-- A menu, matching the setup screen. This was an <input list> and
+                 a datalist, which on iOS is a plain text box: the model names
+                 are the one thing here nobody can be expected to spell from
+                 memory, and a typo does not fail until the first message, as an
+                 error about the model not existing.
+
+                 The text box survives for an API typed in by hand, where there
+                 is no list to choose from -- exactly the same split as setup. -->
+            <select id="set-model-pick" class="setting-input"></select>
+            <input id="set-model" class="setting-input" spellcheck="false" autocapitalize="off" placeholder="glm-4.7-flash" hidden />
+            <span class="setting-hint" id="set-model-hint">Which model answers. Scan the QR on your computer again if one is missing.</span>
+          </div>
+
+          <div class="setting-block">
+            <label class="setting-label">Thinking</label>
+            <div class="seg" id="set-thinking" role="radiogroup" aria-label="Thinking effort">
+              <button type="button" data-v="low" role="radio">Low</button>
+              <button type="button" data-v="medium" role="radio" class="on">Medium</button>
+              <button type="button" data-v="high" role="radio">High</button>
+              <button type="button" data-v="max" role="radio">Max</button>
+            </div>
+            <span class="setting-hint">Higher = more careful, slower answers. Max also re-reviews its own changes.</span>
+          </div>
+
+          <div class="setting-block toggle-row">
+            <div><label class="setting-label" for="set-plan">Plan mode</label>
+              <span class="setting-hint">Propose a numbered plan and wait for your approval before editing anything.</span></div>
+            <input id="set-plan" type="checkbox" class="toggle" />
+          </div>
+
+          <div class="setting-block toggle-row">
+            <div><label class="setting-label" for="set-subagents">Sub-agents</label>
+              <span class="setting-hint">Let the agent delegate self-contained chunks to focused sub-agents (they run one after another).</span></div>
+            <input id="set-subagents" type="checkbox" class="toggle" checked />
+          </div>
+
+          <div class="setting-block toggle-row">
+            <div><label class="setting-label" for="set-confirm">Confirm every commit</label>
+              <span class="setting-hint">Ask before the agent writes each file. Off = it commits automatically.</span></div>
+            <input id="set-confirm" type="checkbox" class="toggle" checked />
+          </div>
+
+          <div class="setting-block toggle-row">
+            <div><label class="setting-label" for="set-haptics">Haptics</label>
+              <span class="setting-hint">A short tap when a reply lands, a commit goes through, or something is copied.</span></div>
+            <input id="set-haptics" type="checkbox" class="toggle" checked />
+          </div>
+
+          <div class="setting-block toggle-row">
+            <div><label class="setting-label" for="set-push">Tell me when my desktop finishes</label>
+              <span class="setting-hint" id="set-push-hint">Your computer picks up turns this phone was
+                suspended through. Turn this on and it can say so, instead of you finding out by
+                opening the app. Needs chat sync, and the app installed to your home screen.</span></div>
+            <input id="set-push" type="checkbox" class="toggle" />
+          </div>
+
+          <div class="setting-block toggle-row">
+            <div><label class="setting-label" for="set-sync">Sync chats across devices</label>
+              <span class="setting-hint">Every chat, from every repo, in one encrypted private GitHub
+                repository — protected by a sync passphrase, so you can pick up any of them on your
+                phone, computer, or any device. GitHub only ever sees ciphertext.</span></div>
+            <input id="set-sync" type="checkbox" class="toggle" />
+          </div>
+          <div class="setting-block">
+            <!-- The other half of pairing. Scanning used to be reachable only
+                 from the first-run screen, so an API added on the computer
+                 after setup had no way to reach this phone at all -- which is
+                 the one thing pairing exists to do. -->
+            <button id="btn-scan-again" class="ghost" type="button" style="width:100%">
+              Scan a code from your computer
+            </button>
+            <p class="setting-hint">Sends over any APIs and keys you have added
+               since — merged with what is here, never replacing it.</p>
+          </div>
+          <div class="setting-block" id="set-sync-pass-row" hidden>
+            <button id="btn-change-syncpass" class="ghost" type="button" style="width:100%">Show recovery code</button>
+            <input id="set-syncpass-code" class="setting-input mono" readonly hidden />
+            <p class="setting-hint" id="set-syncpass-hint" hidden>Type this on another computer to let it
+               read the same chats. Without it, chats already uploaded can't be read anywhere else.</p>
+          </div>
+
+          <!-- Which build is running, and what this phone reports about its
+               own screen. Everything about the keyboard and the safe areas is
+               invisible to a desktop browser, so without this the only way to
+               diagnose it is to guess and ship again. -->
+          <div class="setting-block">
+            <label class="setting-label">This build</label>
+            <div id="set-diag" class="diag mono"></div>
+            <button id="btn-copy-diag" class="ghost" type="button" style="width:100%">Copy diagnostics</button>
+          </div>
+
+          <!-- The gap under the composer, settled on the device. iOS reports
+               nothing about its accessory bar, so this cannot be measured from
+               the page and has twice been guessed and shipped. -->
+          <div class="setting-block row">
+            <div><label class="setting-label" for="set-kb-cal">Adjust composer height</label>
+              <span class="hint">Puts − and + on the composer while the keyboard
+                is up, to set the gap left for iOS's row of chevrons. Only that
+                moment shows whether it is right.</span></div>
+            <input id="set-kb-cal" type="checkbox" class="toggle" />
+          </div>
+
+          <div class="setting-block">
+            <label class="setting-label">Background</label>
+            <div id="settings-bg" class="bg-picker"></div>
+          </div>
+        </div>
+        <div class="dialog-actions">
+          <button id="btn-settings-lock" class="ghost">Lock</button>
+          <button id="btn-settings-done" class="primary">Done</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== SYNC PASSPHRASE SHEET ===================== -->
+    <div id="syncpass-backdrop" class="backdrop" hidden>
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="syncpass-title">
+        <h3 id="syncpass-title">Recovery code</h3>
+        <!-- One field, and it is a code being COPIED, not a secret being
+             invented. It used to ask for a passphrase twice, with a minimum
+             length -- on a phone keyboard, for the one string that has to
+             match another device exactly. Nothing generates a key here when a
+             store already exists: that key is decided, and a fresh one would
+             fork the history into two halves that can never read each other. -->
+        <p class="hint">Shared chats are already set up on your computer. Open its settings →
+          <b>Your phone</b> → <b>Show recovery code</b>, and type it in here. Pairing by QR sends
+          it across automatically, so this is only needed if you skipped that.</p>
+        <label class="field">
+          <span>Recovery code</span>
+          <input id="in-syncpass" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX" />
+        </label>
+        <p id="syncpass-error" class="error" role="alert"></p>
+        <div class="dialog-actions">
+          <button id="btn-syncpass-cancel" class="ghost">Cancel</button>
+          <button id="btn-syncpass-save" class="primary">Use this code</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+  </div>
+
+  <script src="agent-core.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
