@@ -47,6 +47,16 @@ def _worker(desktop, wid="wk1", name="dark-mode", status="running", voice=False)
     desktop.page.wait_for_timeout(200)
 
 
+def _voice_on(desktop):
+    """A live session, without a backend to grant a microphone."""
+    desktop.page.evaluate("""() => {
+      voice.active = true;
+      document.getElementById('voice-dock').hidden = false;
+      renderActivityRail();
+    }""")
+    desktop.page.wait_for_timeout(150)
+
+
 # --------------------------------------------------------------------- #
 # starting and ending a conversation
 
@@ -212,12 +222,7 @@ def test_a_live_voice_session_keeps_the_rail_up_without_a_row(desktop):
     always visible while a session is up, so a row saying "Voice" would be a
     label for something already on screen. It still has to hold the rail open."""
     _app(desktop)
-    desktop.page.evaluate("""() => {
-      voice.active = true;
-      document.getElementById('voice-dock').hidden = false;
-      renderActivityRail();
-    }""")
-    desktop.page.wait_for_timeout(150)
+    _voice_on(desktop)
     assert desktop.page.is_visible("#activity-rail")
     assert desktop.page.is_visible("#voice-orb")
     assert desktop.page.query_selector(".activity-item") is None
@@ -255,6 +260,55 @@ def test_it_goes_away_when_the_sidebar_leaves_no_room(desktop):
     desktop.page.evaluate("() => document.body.classList.add('sidebar-open')")
     _worker(desktop)
     assert desktop.page.is_hidden("#activity-rail")
+
+
+def test_the_voice_controls_survive_when_the_rail_does_not(desktop):
+    """The one thing in here that is NOT reachable somewhere else.
+
+    Every item is a shortcut to the sub-agent panel, so losing the rail to a
+    narrow window costs nothing. Mute, the mode and push-to-talk are not: the
+    full-screen overlay that used to carry them is gone, and these are the only
+    copies. The collapse rules hid them along with everything else -- and the
+    default window is 1280 wide with the sidebar open, inside both thresholds,
+    so this was not a narrow-window edge case. It was every window: start a
+    conversation and there is no way to stop the microphone.
+    """
+    _app(desktop, width=1000)
+    _voice_on(desktop)
+    assert desktop.page.is_visible("#voice-orb")
+    assert desktop.page.is_visible("#voice-mute")
+    assert desktop.page.is_visible("#voice-mode")
+
+
+def test_it_is_the_voice_controls_alone_down_there(desktop):
+    """Exempting the rail wholesale would put the item rows back over the text,
+    which is what the thresholds exist to prevent."""
+    _app(desktop, width=1000)
+    _worker(desktop)
+    _voice_on(desktop)
+    assert desktop.page.is_visible("#voice-orb")
+    assert desktop.page.is_hidden("#activity-items")
+
+
+def test_it_clears_the_composer_when_it_drops_out_of_the_margin(desktop):
+    """It stops being a margin column and becomes a dock at the bottom-left, so
+    the thing it must not land on is the composer."""
+    _app(desktop, width=1000)
+    _voice_on(desktop)
+    box = desktop.page.evaluate(
+        "() => document.getElementById('voice-dock').getBoundingClientRect().bottom")
+    top = desktop.page.evaluate(
+        "() => document.getElementById('composer-wrap').getBoundingClientRect().top")
+    assert box <= top, (box, top)
+
+
+def test_the_narrow_dock_clears_the_sidebar_too(desktop):
+    _app(desktop, width=1200)
+    desktop.page.evaluate("() => document.body.classList.add('sidebar-open')")
+    _voice_on(desktop)
+    left = desktop.page.evaluate(
+        "() => document.getElementById('voice-dock').getBoundingClientRect().left")
+    assert left >= 268, left
 
 
 def test_everything_in_it_is_reachable_without_it(desktop):

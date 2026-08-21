@@ -208,13 +208,28 @@ def test_two_workers_finishing_together_speak_one_at_a_time(desktop):
     assert "one" in said[0]
 
 
-# ------------------------------------------------- 4. the transcript ------
+# ---------------------------------------- 4. the record of the turn -------
+#
+# These used to be read off #voice-caption, the scrolling transcript inside the
+# full-screen overlay. The dock replaced it with four controls, so there is no
+# element left to read -- and pointing them at #chat instead was wrong for a
+# reason worth writing down: a spoken turn reaches the chat from the PYTHON
+# side (_persist_voice_turn emits voice_chat_turn), so in a harness whose
+# backend is a stub the chat is never written to and the assertion could only
+# ever be empty.
+#
+# What this end actually decides is what gets HANDED OVER: liveVoice.heard and
+# .said are accumulated across streamed fragments and passed to
+# live_voice_turn on turnComplete, and that call is the entire input to the
+# record. Asserting on it pins the same properties the caption did -- both
+# halves kept, turns not overwriting each other, fragments joined rather than
+# repeated -- against the thing that determines them.
 
-def _transcript(p):
+
+def _handed_over(p):
     return p.evaluate(
-        """() => [...document.querySelectorAll('#chat .turn')].map(t => ({
-             you: (t.querySelector('.bubble-user') || {}).textContent || '',
-             it: (t.querySelector('.bubble-assistant') || {}).textContent || '' }))""")
+        """() => window.__calls.filter(c => c.name === 'live_voice_turn')
+                               .map(c => ({ you: c.args[0], it: c.args[1] }))""")
 
 
 def test_both_halves_of_a_spoken_turn_are_written_down(desktop):
@@ -228,14 +243,14 @@ def test_both_halves_of_a_spoken_turn_are_written_down(desktop):
     }""")
     p.wait_for_timeout(250)
 
-    assert _transcript(p) == [{"you": "add a dark mode", "it": "Starting on that now."}]
+    assert _handed_over(p) == [{"you": "add a dark mode", "it": "Starting on that now."}]
     assert desktop.errors == []
 
 
-def test_the_transcript_accumulates_instead_of_being_replaced(desktop):
-    """It used to assign textContent on the whole caption element, so each
-    turn wiped every turn before it -- and wiped the local engine's blocks too,
-    which is what made the desktop look like it had no transcript at all."""
+def test_each_turn_is_its_own_record_rather_than_the_running_total(desktop):
+    """The accumulators are per turn. Failing to clear them would hand the
+    second turn the first one's text as well, so the conversation would read
+    back with every line repeated under the one after it."""
     p = _open(desktop)
     for heard, said in (("first question", "first answer"),
                         ("second question", "second answer")):
@@ -246,15 +261,15 @@ def test_the_transcript_accumulates_instead_of_being_replaced(desktop):
         }""", {"heard": heard, "said": said})
         p.wait_for_timeout(150)
 
-    rows = _transcript(p)
+    rows = _handed_over(p)
     assert len(rows) == 2, f"expected both turns, got {rows}"
-    assert rows[0]["you"] == "first question"
-    assert rows[1]["it"] == "second answer"
+    assert rows[0] == {"you": "first question", "it": "first answer"}
+    assert rows[1] == {"you": "second question", "it": "second answer"}
 
 
-def test_streamed_partials_update_one_block_rather_than_adding_many(desktop):
-    """Transcriptions arrive in fragments; a block per fragment would be a
-    column of single words."""
+def test_streamed_partials_are_joined_into_one_turn(desktop):
+    """Transcriptions arrive in fragments. One record per fragment would be a
+    conversation of single words."""
     p = _open(desktop)
     p.evaluate("""() => {
       window.__serverSays({ serverContent: { inputTranscription: { text: 'add ' } } });
@@ -262,8 +277,12 @@ def test_streamed_partials_update_one_block_rather_than_adding_many(desktop):
       window.__serverSays({ serverContent: { inputTranscription: { text: 'mode' } } });
     }""")
     p.wait_for_timeout(200)
+    # Nothing is handed over mid-turn: the turn is not over.
+    assert _handed_over(p) == []
 
-    rows = _transcript(p)
+    p.evaluate("() => window.__serverSays({ serverContent: { turnComplete: true } })")
+    p.wait_for_timeout(200)
+    rows = _handed_over(p)
     assert len(rows) == 1
     assert rows[0]["you"] == "add dark mode"
 

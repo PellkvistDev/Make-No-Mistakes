@@ -2365,10 +2365,33 @@ body.sidebar-open .activity-rail {
   width: max(24px, calc((100vw - var(--sidebar-w)) / 2 - 430px));
 }
 
-/* It is the first thing to go when there is no room for it, which is why
-   nothing may live only here: every item is reachable from the sub-agent
-   panel as well. Below these widths the margin has collapsed to its 24px
-   minimum and a rail would be sitting on top of the text -- the second
-   threshold is the first plus the sidebar it has to share the window with. */
-@media (max-width: 1100px) { .activity-rail { display: none; } }
-@media (max-width: 1368px) { body.sidebar-open .activity-rail { display: none; } }
+/* The ITEMS are the first thing to go when there is no room for them, which
+   is why nothing may live only there: every one is reachable from the
+   sub-agent panel as well. Below these widths the margin has collapsed to its
+   24px minimum and a rail would be sitting on top of the text -- the second
+   threshold is the first plus the sidebar it has to share the window with.
+
+   The voice CONTROLS are exempt, and that is not a refinement. Mute, the mode
+   and push-to-talk exist in exactly one place now that the full-screen
+   overlay is gone, so a rule that hides the rail hides the only way to mute a
+   live microphone -- and the default window is 1280 wide with the sidebar
+   open, which is inside both thresholds. It was not a narrow-window edge
+   case; it was the ordinary one. */
+@media (max-width: 1100px) { body:not(.voice-on) .activity-rail { display: none; } }
+@media (max-width: 1368px) {
+  body.sidebar-open:not(.voice-on) .activity-rail { display: none; }
+}
+
+/* No margin to sit in, so it stops being a margin column: a compact dock at
+   the bottom-left, above the composer, carrying the four controls alone. */
+@media (max-width: 1368px) {
+  body.voice-on .activity-rail {
+    left: 0; top: auto; bottom: 108px; width: auto;
+    align-items: flex-end; justify-content: flex-start;
+    padding: 0 12px;
+  }
+  body.voice-on.sidebar-open .activity-rail {
+    left: var(--sidebar-w); width: auto;
+  }
+  body.voice-on .activity-items { display: none; }
+}

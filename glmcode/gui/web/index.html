@@ -88,7 +88,9 @@
 <div id="voice-dock" class="voice-dock" hidden>
   <div class="voice-card glass-strong" role="region" aria-label="Voice conversation">
     <div class="voice-dock-row">
-      <div id="voice-orb" class="voice-orb" aria-hidden="true" title=""><span class="voice-orb-core"></span></div>
+      <!-- The orb carries the status text now (setVoiceStatus), so it is no
+                 longer decoration to be hidden from a screen reader. -->
+            <div id="voice-orb" class="voice-orb" role="img" title=""><span class="voice-orb-core"></span></div>
       <button id="voice-mute" class="icon-btn" aria-label="Mute microphone" aria-pressed="false" title="Mute — pause listening without ending the session">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>

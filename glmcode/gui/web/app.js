@@ -5887,7 +5887,7 @@ const voice = {
   voiceFrames: 0, voicedMs: 0, silenceMs: 0, recMs: 0, peak: 0,
   noiseFloor: 0.01, sens: 1.0, announceQ: [], workers: {}, sendTries: 0,
   perm: null, permQ: [], muted: false, pttKey: "Space", endpointMs: 750,
-  waveRaf: 0, lastReply: [], replyChunks: [],
+  lastReply: [], replyChunks: [],
   gated: false, gateOpen: true,  // wake-gated turns: each request needs the wake word
   thinkTimer: 0, acking: false, ackAudio: null,
 };
@@ -5914,7 +5914,17 @@ const startThresh = () => Math.max(V_ABS_MIN, voice.noiseFloor * V_START_MULT) /
 const stopThresh = () => Math.max(V_ABS_MIN * 0.7, voice.noiseFloor * V_STOP_MULT) / voice.sens;
 const bargeThresh = () => Math.max(V_ABS_MIN * 2, voice.noiseFloor * V_BARGE_MULT) / voice.sens;
 
-function setVoiceStatus(text) { const el = $("voice-status"); if (el) el.textContent = text; }
+/* There is no status LINE any more -- the dock is four controls and nothing
+ * else -- but the sentences it carried are still the only thing that
+ * distinguishes "listening", "thinking" and "muted" from each other, and the
+ * orb is one animated dot for all three. So the text moves onto the orb as
+ * its tooltip rather than being deleted with the element: twenty-six calls
+ * writing into a stub is the same bug as the caption, and dropping the words
+ * as well would lose the only place the app says what it is doing. */
+function setVoiceStatus(text) {
+  const orb = $("voice-orb");
+  if (orb) { orb.title = text; orb.setAttribute("aria-label", text); }
+}
 function setVoiceOrb(state) {
   const orb = $("voice-orb");
   if (orb) orb.className = "voice-orb voice-orb-" + state;
@@ -5975,7 +5985,6 @@ async function startVoice(viaWake = false) {
   voice.data = new Uint8Array(voice.analyser.fftSize);
   src.connect(voice.analyser);
   onTtsIdle = onVoiceTtsIdle;
-  startWaveform();
   // The live engine takes over from here: the model does its own endpointing
   // and its own barge-in, so none of the machinery below -- the noise-floor
   // calibration, the energy VAD, the recorder -- has anything to decide.
@@ -6025,7 +6034,6 @@ function stopVoice() {
   stopThinkCue();
   stopAck();
   voice.speaking = voice.thinking = false;
-  if (voice.waveRaf) { cancelAnimationFrame(voice.waveRaf); voice.waveRaf = 0; }
   if (voice.timer) { clearInterval(voice.timer); voice.timer = 0; }
   try { if (voice.rec && voice.recording) voice.rec.stop(); } catch (e) { /* ignore */ }
   voice.recording = false;
@@ -6642,36 +6650,6 @@ function startThinkCue() {
 }
 function stopThinkCue() { if (voice.thinkTimer) { clearInterval(voice.thinkTimer); voice.thinkTimer = 0; } }
 
-// -- live waveform ---------------------------------------------------------- //
-function startWaveform() {
-  const canvas = $("voice-wave");
-  if (!canvas || !voice.analyser) return;
-  const ctx2d = canvas.getContext("2d");
-  const buf = new Uint8Array(voice.analyser.fftSize);
-  const draw = () => {
-    if (!voice.active) return;
-    voice.waveRaf = requestAnimationFrame(draw);
-    const w = canvas.width, h = canvas.height;
-    ctx2d.clearRect(0, 0, w, h);
-    voice.analyser.getByteTimeDomainData(buf);
-    const accent = getComputedStyle(document.documentElement)
-      .getPropertyValue("--accent").trim() || "#7aa0ff";
-    ctx2d.lineWidth = 2;
-    ctx2d.strokeStyle = voice.muted ? "rgba(140,140,150,0.5)"
-      : (voice.speaking ? "#34c759" : accent);
-    ctx2d.beginPath();
-    const step = w / buf.length;
-    for (let i = 0; i < buf.length; i++) {
-      const v = voice.muted ? 0 : (buf[i] - 128) / 128;
-      const y = h / 2 + v * (h / 2) * 0.9;
-      const x = i * step;
-      i ? ctx2d.lineTo(x, y) : ctx2d.moveTo(x, y);
-    }
-    ctx2d.stroke();
-  };
-  draw();
-}
-
 // -- mute: pause listening without ending the session ---------------------- //
 function toggleMute() {
   voice.muted = !voice.muted;
@@ -7279,6 +7257,11 @@ function renderActivityRail() {
   // lives in here now, so an active session keeps it up on its own -- and
   // `voice` is one of the items, so that falls out rather than being a case.
   rail.hidden = items.length === 0 && !voice.active;
+  // The rail collapses out of the margin when the window is too narrow for
+  // one, and the voice controls must survive that: they are the only mute
+  // button there is. The class is what lets the CSS tell "a rail of items"
+  // from "the only way to stop the microphone".
+  document.body.classList.toggle("voice-on", !!voice.active);
   box.innerHTML = "";
   for (const it of items) {
     const b = document.createElement("button");
