@@ -53,7 +53,7 @@ def _open_voice(desktop, loud=False, ptt_first=False):
     script, gain = _mic(loud)
     p.evaluate(script, gain)
     if ptt_first:
-        p.evaluate("() => document.getElementById('voice-ptt-toggle').click()")
+        p.evaluate("() => document.getElementById('voice-mode').click()")
     p.evaluate("() => document.getElementById('voice-chip').click()")
     # Long enough for the noise-floor calibration to finish and the VAD to have
     # opened a recording on the loud stream.
@@ -62,7 +62,7 @@ def _open_voice(desktop, loud=False, ptt_first=False):
 
 
 def _switch_to_ptt(desktop):
-    desktop.page.evaluate("() => document.getElementById('voice-ptt-toggle').click()")
+    desktop.page.evaluate("() => document.getElementById('voice-mode').click()")
     desktop.page.wait_for_timeout(300)
 
 
@@ -119,7 +119,7 @@ def test_the_button_does_not_come_back_looking_held(desktop):
     p.mouse.down()
     p.wait_for_timeout(200)
     # Switch to hands-free without releasing.
-    p.evaluate("() => document.getElementById('voice-ptt-toggle').click()")
+    p.evaluate("() => document.getElementById('voice-mode').click()")
     p.mouse.up()
     p.wait_for_timeout(200)
     _switch_to_ptt(desktop)
@@ -140,5 +140,7 @@ def test_the_screen_says_which_mode_it_is_in(desktop):
     _open_voice(desktop, loud=False)
     p = desktop.page
     _switch_to_ptt(desktop)
-    assert "hold" in p.text_content("#voice-status").lower()
-    assert p.text_content("#voice-ptt-toggle") == "Push-to-talk"
+    # The mode button names the mode now -- there is no status line, and there
+    # are no longer two toggles that could disagree about which mode it is in.
+    assert p.text_content("#voice-mode").strip() == "push-to-talk"
+    assert "hold" in p.text_content("#voice-ptt-btn").lower()

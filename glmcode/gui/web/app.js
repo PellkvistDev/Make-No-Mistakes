@@ -5887,7 +5887,7 @@ const voice = {
   voiceFrames: 0, voicedMs: 0, silenceMs: 0, recMs: 0, peak: 0,
   noiseFloor: 0.01, sens: 1.0, announceQ: [], workers: {}, sendTries: 0,
   perm: null, permQ: [], muted: false, pttKey: "Space", endpointMs: 750,
-  waveRaf: 0, lastReply: [], replyChunks: [], curTurnEl: null, replyEl: null,
+  waveRaf: 0, lastReply: [], replyChunks: [],
   gated: false, gateOpen: true,  // wake-gated turns: each request needs the wake word
   thinkTimer: 0, acking: false, ackAudio: null,
 };
@@ -5947,8 +5947,6 @@ async function startVoice(viaWake = false) {
   voice.muted = false;
   voice.lastReply = [];
   voice.replyChunks = [];
-  voice.curTurnEl = null;
-  voice.replyEl = null;
   $("voice-perm").hidden = true;
   $("voice-mute").setAttribute("aria-pressed", "false");
   $("voice-mute").classList.remove("active");
@@ -6182,7 +6180,7 @@ async function finishUtterance() {
   // asked YOU a yes/no, so it's listening for the answer without a wake word.
   if (voice.perm) {
     const ans = classifyPermission(text);
-    if (ans) { addVoiceTurn(text, false); resolvePerm(ans); return; }
+    if (ans) { resolvePerm(ans); return; }
     toast("Say “yes”, “no”, or “always” — or tap a button.", "info", 3500);
     setVoiceStatus("Needs your OK — say “yes” or “no”");
     return;
@@ -6207,7 +6205,6 @@ async function finishUtterance() {
 // Send one request to the delegator, then -- in wake-gated mode -- soft-mute
 // again until the wake word is heard.
 function submitVoiceRequest(text) {
-  addVoiceTurn(text, false);
   voice.sendTries = 0;
   sendVoiceTurn(text);
   if (voice.gated) {
@@ -6216,52 +6213,6 @@ function submitVoiceRequest(text) {
   }
 }
 
-// -- the latest exchange, in the dock ------------------------------------- //
-//
-// This was a scrolling transcript, and it stopped being one when spoken turns
-// started reaching the real chat (voice_chat_turn): a log here was the same
-// conversation shown twice, and it was most of why the panel had to be the
-// size of the screen.
-//
-// It is not gone entirely, because the chat cannot always show it yet. A
-// spoken turn is only written into the chat when the coding agent's turn lock
-// is free; while a turn is running it queues, so for that stretch this is the
-// only place the exchange is visible. Keeping the newest one covers that
-// without reprinting the history.
-const VOICE_KEEP_TURNS = 2;
-function addVoiceTurn(text, isReply) {
-  const cap = $("voice-caption");
-  if (!isReply) {
-    const block = document.createElement("div");
-    block.className = "voice-turn";
-    const you = document.createElement("div");
-    you.className = "voice-you";
-    you.textContent = text;
-    block.appendChild(you);
-    cap.appendChild(block);
-    voice.curTurnEl = block;
-    voice.replyEl = null;
-  }
-  while (cap.children.length > VOICE_KEEP_TURNS) cap.removeChild(cap.firstChild);
-  cap.scrollTop = cap.scrollHeight;
-}
-// Returns the live <.voice-it> element for the reply being spoken, creating a
-// block for it (announcements have no preceding user turn).
-function voiceReplyEl() {
-  if (voice.replyEl) return voice.replyEl;
-  let block = voice.curTurnEl;
-  if (!block || block.querySelector(".voice-it")) {
-    block = document.createElement("div");
-    block.className = "voice-turn";
-    $("voice-caption").appendChild(block);
-    voice.curTurnEl = block;
-  }
-  const it = document.createElement("div");
-  it.className = "voice-it";
-  block.appendChild(it);
-  voice.replyEl = it;
-  return it;
-}
 function classifyReplay(text) {
   const t = " " + text.toLowerCase().replace(/[^a-z\s]/g, " ") + " ";
   return /\b(say that again|repeat that|repeat|come again|what did you say|again please)\b/.test(t);
@@ -6431,13 +6382,14 @@ function handleVoiceEvent(ev) {
   switch (ev.type) {
     case "stream_start":
       voice._replyBuf = "";
-      voice.replyEl = null;
       voice.replyChunks = [];
       voice.turnComplete = false;  // a reply is now being generated + spoken
       break;
     case "content": {
+      // Buffered for replayLastReply and for the chat, not for the dock: the
+      // dock has no transcript, and the exchange lands in the chat through
+      // voice_chat_turn.
       voice._replyBuf = (voice._replyBuf || "") + (ev.text || "");
-      voiceReplyEl().textContent = voice._replyBuf;
       break;
     }
     case "play_audio":
@@ -6960,7 +6912,7 @@ else window.addEventListener("pywebviewready", bootSafely);
 const liveVoice = {
   ws: null, ctx: null, node: null, stream: null,
   playAt: 0, sources: [], handle: "", closing: false, reconnects: 0,
-  established: false, said: "", heard: "", userEl: null, pendingTurn: 0,
+  established: false, said: "", heard: "", pendingTurn: 0,
 };
 
 const LIVE_MAX_RECONNECTS = 5;
@@ -7073,14 +7025,12 @@ function liveOnMessage(payload) {
   if (sc.interrupted) liveStopPlayback();
   if (sc.inputTranscription && sc.inputTranscription.text) {
     liveVoice.heard += sc.inputTranscription.text;
-    liveCaptionUser(liveVoice.heard);
   }
   if (sc.outputTranscription && sc.outputTranscription.text) {
+    // Accumulated for the record that goes to the CHAT (the desktop passes
+    // this transcript to _persist_voice_turn), not for the dock -- the dock
+    // has no transcript any more.
     liveVoice.said += sc.outputTranscription.text;
-    // Into the same reply element the local engine streams into, so the
-    // overlay reads as one conversation rather than resetting to a single
-    // line whenever the live engine says anything.
-    voiceReplyEl().textContent = liveVoice.said;
   }
   // One event can carry several parts at once -- audio and a transcript
   // together -- so every part is looked at rather than the first one.
@@ -7101,42 +7051,19 @@ function liveOnMessage(payload) {
       // and the delegator's own history stay true.
       try { api().live_voice_turn(heard, said); } catch (e) { /* ignore */ }
     }
-    liveEndCaptionTurn();
     // The model is free now: whatever it was answering is finished.
     liveVoice.pendingTurn = 0;
     processAnnounceQueue();
   }
 }
 
-/* The live engine's half of the on-screen transcript.
- *
- * The local engine has built a scrolling log of .voice-you / .voice-it blocks
- * in #voice-caption all along. The live engine wrote over the whole element
- * with a single line of plain text, which is why the desktop appeared to have
- * no transcript in live mode while the phone did -- and why switching engines
- * mid-session wiped what had been said.
- *
- * Partial transcriptions stream in, so the user's block is created once per
- * turn and then updated in place rather than appended to.
+/* Both engines transcribe both directions, and both halves reach the CHAT:
+ * the desktop hands liveVoice.heard/.said to _persist_voice_turn, which writes
+ * the exchange into the conversation. The dock shows none of it -- it holds
+ * the orb, mute, the mode and push-to-talk, and nothing else -- so the two
+ * functions that used to paint a caption from these are gone rather than
+ * kept as no-ops.
  */
-function liveCaptionUser(text) {
-  if (!liveVoice.userEl) {
-    addVoiceTurn(text, false);
-    const block = voice.curTurnEl;
-    liveVoice.userEl = block ? block.querySelector(".voice-you") : null;
-  } else {
-    liveVoice.userEl.textContent = text;
-  }
-  const cap = $("voice-caption");
-  if (cap) cap.scrollTop = cap.scrollHeight;
-}
-
-// One exchange is over: the next transcription starts a new block.
-function liveEndCaptionTurn() {
-  liveVoice.userEl = null;
-  voice.replyEl = null;
-  voice.curTurnEl = null;
-}
 
 async function liveReconnect() {
   if (liveVoice.closing || !voice.active) return;
@@ -7211,7 +7138,6 @@ async function startLiveVoice() {
   liveVoice.established = false;
   liveVoice.handle = "";
   liveVoice.said = liveVoice.heard = "";
-  liveVoice.userEl = null;
   liveVoice.pendingTurn = 0;
   if (!(await liveOpenSocket())) return false;
   const Ctx = window.AudioContext || window.webkitAudioContext;

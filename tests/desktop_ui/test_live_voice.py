@@ -64,7 +64,7 @@ def _open(desktop, ptt=False):
                     url: 'wss://example.invalid/live',
                     setup: { setup: { model: 'm' } } })""")
     if ptt:
-        p.evaluate("() => document.getElementById('voice-ptt-toggle').click()")
+        p.evaluate("() => document.getElementById('voice-mode').click()")
     p.evaluate("() => document.getElementById('voice-chip').click()")
     p.wait_for_timeout(700)
     p.evaluate("() => window.__serverSays({ setupComplete: {} })")
@@ -212,9 +212,9 @@ def test_two_workers_finishing_together_speak_one_at_a_time(desktop):
 
 def _transcript(p):
     return p.evaluate(
-        """() => [...document.querySelectorAll('#voice-caption .voice-turn')].map(b => ({
-             you: (b.querySelector('.voice-you') || {}).textContent || '',
-             it: (b.querySelector('.voice-it') || {}).textContent || '' }))""")
+        """() => [...document.querySelectorAll('#chat .turn')].map(t => ({
+             you: (t.querySelector('.bubble-user') || {}).textContent || '',
+             it: (t.querySelector('.bubble-assistant') || {}).textContent || '' }))""")
 
 
 def test_both_halves_of_a_spoken_turn_are_written_down(desktop):
