@@ -1142,3 +1142,144 @@ def test_the_branch_schemas_match_the_implementations():
     have = _node(_branchy('out(names.map((n) => typeof t[n]));'
                           .replace("names", '["new_branch", "open_pull_request"]')))
     assert have == ["function", "function"]
+
+
+# --------------------------------------------------------------------- #
+# check_ci
+#
+# The phone can branch, edit, commit and open a pull request. "Did the tests
+# pass" was the one question in that loop it still had to send you somewhere
+# else for -- and it is the most phone-shaped question of the lot: you push,
+# you walk away, and you want to know ten minutes later without going back to
+# a desk.
+
+def _ci(runs, extra='out(await t.check_ci({}));', branch="fix-login"):
+    import json as _json
+    return """
+      const gh = fakeGh({});
+      gh.branch = %s;
+      gh.branchSha = async () => "abcdef1234567890";
+      gh.__runs = %s;
+      gh.__asked = [];
+      gh.checkRuns = async (ref) => { gh.__asked.push(ref); return { check_runs: gh.__runs }; };
+      const t = C.makeTools(gh, {});
+      %s
+    """ % (_json.dumps(branch), _json.dumps(runs), extra)
+
+
+def _run(name, status="completed", conclusion="success", **kw):
+    r = {"name": name, "status": status, "conclusion": conclusion,
+         "html_url": "https://github.com/o/r/runs/1"}
+    r.update(kw)
+    return r
+
+
+@needs_node
+def test_all_green_says_so():
+    r = _node(_ci([_run("tests (ubuntu)"), _run("tests (windows)")]))
+    assert "2 passed, 0 failed, 0 still running" in r
+    assert "Everything green" in r
+
+
+@needs_node
+def test_a_failure_is_named_with_its_summary_and_a_link():
+    r = _node(_ci([
+        _run("tests (windows)", conclusion="failure",
+             output={"title": "1 failed", "summary": "test_grep_stops_once_it_has_enough"}),
+        _run("tests (ubuntu)"),
+    ]))
+    assert "FAILED  tests (windows)" in r
+    assert "1 failed" in r
+    assert "test_grep_stops_once_it_has_enough" in r
+    assert "https://github.com/o/r/runs/1" in r
+
+
+@needs_node
+def test_a_run_still_going_is_not_reported_as_a_pass():
+    r = _node(_ci([_run("browser-ui", status="in_progress", conclusion=None),
+                   _run("tests (ubuntu)")]))
+    assert "1 passed, 0 failed, 1 still running" in r
+    assert "running browser-ui" in r
+    assert "Everything green" not in r
+    assert "ask again once the rest finish" in r
+
+
+@needs_node
+def test_skipped_and_neutral_are_not_failures():
+    """A skipped job is not a broken build, and calling it one would make the
+    tool cry wolf on every repository that has a conditional check."""
+    r = _node(_ci([_run("a", conclusion="skipped"), _run("b", conclusion="neutral")]))
+    assert "2 passed, 0 failed" in r
+
+
+@needs_node
+def test_a_cancelled_or_timed_out_run_is_a_failure_and_says_which():
+    r = _node(_ci([_run("slow", conclusion="timed_out")]))
+    assert "FAILED  slow (timed_out)" in r
+
+
+@needs_node
+def test_nothing_reported_covers_both_reasons():
+    """"Not started yet" and "this repo has no CI" look identical from here,
+    and saying only the first sends someone to wait for a run that is never
+    coming."""
+    r = _node(_ci([]))
+    assert "No checks have reported" in r
+    assert "may not have started" in r
+    assert "none configured" in r
+
+
+@needs_node
+def test_it_asks_about_this_branchs_latest_commit():
+    r = _node(_ci([_run("a")], extra="await t.check_ci({}); out(gh.__asked);"))
+    assert r == ["abcdef1234567890"]
+
+
+@needs_node
+def test_another_ref_can_be_named():
+    r = _node(_ci([_run("a")], extra='await t.check_ci({ ref: "main" }); out(gh.__asked);'))
+    assert r == ["main"]
+
+
+@needs_node
+def test_a_huge_summary_is_trimmed():
+    """A check's summary is written for a web page and can run to thousands of
+    lines. Unbounded it would be a whole phone turn's context spent on one
+    failure."""
+    r = _node(_ci([_run("big", conclusion="failure",
+                        output={"summary": "\n".join("line %d" % i for i in range(2000))})]))
+    assert "truncated" in r
+    assert len(r) < 4000, len(r)
+
+
+@needs_node
+def test_a_refused_request_is_reported_not_raised():
+    r = _node("""
+      const gh = fakeGh({});
+      gh.branch = "b";
+      gh.branchSha = async () => "sha";
+      gh.checkRuns = async () => { throw new Error("GitHub 403: rate limited"); };
+      const t = C.makeTools(gh, {});
+      out(await t.check_ci({}));
+    """)
+    assert "Couldn't read the checks" in r
+    assert "rate limited" in r
+
+
+@needs_node
+def test_check_ci_needs_no_host_wiring():
+    """Unlike the branch tools. A question this ordinary should not depend on
+    how the app was assembled."""
+    r = _node("""
+      const t = C.makeTools(fakeGh({}), {});
+      out(typeof t.check_ci);
+    """)
+    assert r == "function"
+
+
+@needs_node
+def test_the_prompt_says_check_ci_is_the_only_way_to_know():
+    """The phone cannot run tests. A model that does not know this tool exists
+    answers "I can't tell from here", which is now false."""
+    p = _node("out(C.SYSTEM_PROMPT);")
+    assert "check_ci" in p

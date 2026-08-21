@@ -437,6 +437,12 @@
         return gh("POST", `/repos/${owner}/${repo}/git/refs`,
                   { ref: "refs/heads/" + name, sha: fromSha });
       },
+      // What CI said about a commit. `check-runs` rather than the older
+      // `statuses` endpoint: Actions reports through checks, and a repository
+      // using both would otherwise show half its answer.
+      async checkRuns(ref) {
+        return gh("GET", `/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}/check-runs`);
+      },
       async openPr(title, body, base, head, draft) {
         return gh("POST", `/repos/${owner}/${repo}/pulls`,
                   { title, body, base, head, draft: !!draft });
@@ -1547,6 +1553,15 @@
       return out.concat(body.map((l) => (l ? "      " + l : ""))).join("\n");
     }
 
+    // Indent a block and cap it. A check's summary is written for a web page
+    // and can run to thousands of lines; unbounded it would be the whole of a
+    // phone turn's context spent on one failure.
+    function indentBlock(text, spaces, cap) {
+      const pad = " ".repeat(spaces);
+      const cut = text.length > cap ? text.slice(0, cap) + "\n... [truncated]" : text;
+      return cut.split("\n").map((l) => (l.trim() ? pad + l.trim() : "")).join("\n");
+    }
+
     const WHY_CLOSING =
       "\nThese are reasons, not a changelog. A commit saying something was "
       + "TRIED and reverted is telling you not to do it again — check that "
@@ -1656,6 +1671,61 @@
           out.push("\n... [remaining files not shown]");
           break;
         }
+      }
+      return out.join("\n");
+    };
+
+    // --- did it pass? ------------------------------------------------------
+    //
+    // The phone can now branch, edit, commit and open a pull request. The
+    // question that follows all of that -- "did the tests pass" -- was the one
+    // thing it still had to be answered somewhere else, and it is the most
+    // phone-shaped question in the whole loop: you push, you walk away, and
+    // you want to know ten minutes later without going back to a desk.
+    //
+    // Read-only and free of any host wiring, so unlike new_branch it is always
+    // offered.
+    api.check_ci = async (a) => {
+      const ref = String((a && a.ref) || "").trim() || gh.branch;
+      let sha = ref;
+      if (ref === gh.branch) {
+        try { sha = (await gh.branchSha()) || ref; } catch (e) { /* use the name */ }
+      }
+      let res;
+      try { res = await gh.checkRuns(sha); }
+      catch (e) { return `Couldn't read the checks: ${(e && e.message) || e}`; }
+      const runs = (res && res.check_runs) || [];
+      if (!runs.length) {
+        // Two different facts with one appearance, and saying only the first
+        // sends someone to wait for a run that is never coming.
+        return `No checks have reported for ${String(sha).slice(0, 8)} yet. They may not `
+             + "have started, or this repository has none configured.";
+      }
+      const running = runs.filter((r) => r.status !== "completed");
+      const failed = runs.filter((r) => r.status === "completed"
+        && !["success", "neutral", "skipped"].includes(r.conclusion));
+      const passed = runs.filter((r) => r.status === "completed"
+        && ["success", "neutral", "skipped"].includes(r.conclusion));
+
+      const out = [`Checks on ${gh.branch} (${String(sha).slice(0, 8)}): `
+        + `${passed.length} passed, ${failed.length} failed, ${running.length} still running.`];
+      for (const r of failed) {
+        out.push(`\nFAILED  ${r.name}${r.conclusion && r.conclusion !== "failure"
+          ? ` (${r.conclusion})` : ""}`);
+        // The check's own summary when it has one. Not the log: a job log is a
+        // redirect to blob storage that a page cannot read cross-origin, and
+        // promising one would be a tool that fails on the case it exists for.
+        const o = r.output || {};
+        if (o.title) out.push(`        ${o.title}`);
+        if (o.summary) out.push(indentBlock(String(o.summary), 8, 1200));
+        if (r.html_url) out.push(`        ${r.html_url}`);
+      }
+      for (const r of running) out.push(`\nrunning ${r.name}`);
+      for (const r of passed) out.push(`\npassed  ${r.name}`);
+      if (!failed.length && !running.length) {
+        out.push("\nEverything green.");
+      } else if (!failed.length) {
+        out.push("\nNothing has failed yet — ask again once the rest finish.");
       }
       return out.join("\n");
     };
@@ -1819,6 +1889,14 @@
         max_commits: { type: "integer",
                        description: "How many commits to report, newest first (default 5, max 20)" } },
       ["path"]),
+    // Always offered, unlike the branch tools: it needs no host wiring, and a
+    // question this ordinary should not depend on how the app was assembled.
+    tool("check_ci",
+      "Did CI pass? Reports every check on this branch's latest commit — what passed, what is " +
+      "still running, and for anything that failed, its summary and a link. Use it after opening " +
+      "a pull request, or whenever the user asks whether the build or the tests are green. You " +
+      "cannot run tests on this device, so this is the only way to find out.",
+      { ref: str("A branch or commit to check (default: this chat's branch)") }),
     tool("review_changes",
       "Show everything this chat has changed so far, as a diff against where it started. Use it " +
       "to check your own work before saying a task is done, or when you are not sure what state " +
@@ -1966,7 +2044,8 @@
     "is the repository's default branch and the task is anything more than a one-line fix, call " +
     "new_branch FIRST and say that you did — otherwise the work lands on the default branch " +
     "unreviewed, and anything wired to that branch runs. When the task is done, " +
-    "open_pull_request turns it into something the user can review and merge.\n\n" +
+    "open_pull_request turns it into something the user can review and merge, and check_ci " +
+    "says whether it passed — the only way to find that out from here.\n\n" +
     // Naming the trigger, because a tool the model never thinks to call is not a
     // feature. The phone is also where it matters most: a turn here is cut off by
     // the screen locking or the app being backgrounded, and a list written down is

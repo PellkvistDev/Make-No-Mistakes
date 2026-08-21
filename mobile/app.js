@@ -2768,7 +2768,7 @@
   // and "what was already tried and reverted" is exactly a planning question --
   // the one a plan that repeats a mistake was missing.
   const READ_TOOL_NAMES = ["list_dir", "glob", "read_file", "grep", "search_code",
-                           "why"];
+                           "why", "check_ci"];
   // view_image is read-only, and looking at a mockup is exactly a planning job,
   // so plan mode gets it too (session.readTools already wires the implementation).
   const READ_SCHEMAS = AC.TOOL_SCHEMAS.filter((s) => READ_TOOL_NAMES.includes(s.function.name))

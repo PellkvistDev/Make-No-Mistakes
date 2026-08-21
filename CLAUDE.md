@@ -1114,6 +1114,18 @@ The system prompt states the rule the tools exist for — *every edit is
 committed immediately, so branch first* — because a tool the model never
 thinks to call is not a feature.
 
+`check_ci` closes the loop those two opened. The phone cannot run anything, so
+"did the tests pass" was the one question in *branch → edit → commit → pull
+request* that still had to be answered somewhere else — and it is the most
+phone-shaped question of the lot: you push, you walk away, and you want to know
+ten minutes later without going back to a desk. It reads `check-runs` rather
+than the older `statuses` endpoint (Actions reports through checks, and a repo
+using both would otherwise show half its answer), treats `skipped` and
+`neutral` as passes so it does not cry wolf on every conditional job, and
+reports a check's own `output.summary` **but never a log**: a job log is a
+redirect to blob storage that a page cannot read cross-origin, so promising one
+would be a tool that fails on the case it exists for.
+
 ## What the phone cannot borrow from the desktop, and why
 
 Three tools stayed behind, and the reasons are different in each case. They are
