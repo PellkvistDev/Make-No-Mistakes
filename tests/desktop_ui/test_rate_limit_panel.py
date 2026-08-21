@@ -46,46 +46,147 @@ def _open_general(desktop, **replies):
 
 
 # --------------------------------------------------------------------- #
-# under the fallback list
+# the fallback chain
+#
+# It was a textarea you typed model names into, one per line. Everything wrong
+# with that was the same thing: the app already knew every model you had, and
+# it was asking you to retype them from memory. A typo is silent, and the chain
+# only matters when the preferred model is refusing -- so a name that does not
+# exist is discovered at the worst possible moment, as a second failure on top
+# of the first.
 
-def test_it_lists_what_was_refused_today(desktop):
-    _open_general(desktop)
-    said = desktop.page.text_content("#fallback-limits")
-    assert "flash-3.6" in said and "11" in said
-    assert "flash-3.5" in said and "2" in said
+def _open_general_with_models(desktop, fallbacks=(), **replies):
+    settings = dict(DEFAULT_SETTINGS)
+    settings["model_fallbacks"] = list(fallbacks)
+    replies.setdefault("providers", PROVIDERS)
+    desktop.boot(boot={"settings": settings}, **replies)
+    desktop.page.evaluate("() => populateModelPicker()")
+    desktop.page.wait_for_timeout(250)
+    desktop.page.evaluate("() => document.getElementById('settings-btn').click()")
+    desktop.page.wait_for_timeout(200)
+    desktop.page.click('.settings-tab-btn[data-tab="general"]')
+    desktop.page.wait_for_timeout(300)
+    return desktop
 
 
-def test_the_model_being_skipped_right_now_says_so(desktop):
-    """The answer to "why did it switch models on me". A count alone is
-    history; `cooling` is the reason the current turn went elsewhere."""
-    _open_general(desktop)
-    said = desktop.page.text_content("#fallback-limits")
-    assert "resting" in said
+def _rows(desktop):
+    return desktop.page.eval_on_selector_all(
+        "#fallback-chain .fallback-row",
+        "els => els.map(e => ({"
+        " n: e.querySelector('.fallback-num').textContent,"
+        " name: e.querySelector('.fallback-name').textContent,"
+        " facts: e.querySelector('.fallback-facts').textContent,"
+        " unknown: e.classList.contains('fallback-unknown') }))")
 
 
-def test_a_clean_model_is_not_listed(desktop):
-    _open_general(desktop)
-    assert "flash-lite" not in desktop.page.text_content("#fallback-limits")
+def _offered(desktop):
+    return desktop.page.eval_on_selector_all(
+        "#fallback-add option", "els => els.map(e => e.value).filter(Boolean)")
 
 
-def test_nothing_refused_says_so_rather_than_showing_a_blank(desktop):
+def test_the_chain_is_a_list_of_real_models_in_order(desktop):
+    _open_general_with_models(desktop, ["flash-3.5", "flash-lite"])
+    rows = _rows(desktop)
+    assert [r["name"] for r in rows] == ["flash-3.5", "flash-lite"]
+    assert [r["n"] for r in rows] == ["1", "2"]
+
+
+def test_it_shows_what_the_chain_starts_from(desktop):
+    """"Fall back to" never said what it was falling back FROM, and the answer
+    is per-chat."""
+    _open_general_with_models(desktop, ["flash-3.5"])
+    head = desktop.page.text_content("#fallback-chain .fallback-head")
+    assert "flash-3.6" in head
+    assert "this chat's model" in head
+
+
+def test_the_numbers_that_decide_the_order_are_on_the_rows(desktop):
+    """They used to be in a different panel. The allowance is this app's count
+    against a table it ships; the refusals are what the provider itself said,
+    and the second is what tells you the first is wrong."""
+    _open_general_with_models(desktop, ["flash-3.5", "flash-lite"])
+    facts = {r["name"]: r["facts"] for r in _rows(desktop)}
+    assert "2× limited" in facts["flash-3.5"]        # refused, no known allowance
+    assert "1/50 today" in facts["flash-lite"]       # allowance, never refused
+
+
+def test_a_resting_model_says_so_in_the_chain(desktop):
+    _open_general_with_models(desktop, ["flash-3.6"])
+    assert "resting now" in _rows(desktop)[0]["facts"]
+
+
+def test_only_models_this_api_serves_are_offered(desktop):
+    """A fallback is a different model on the SAME client, so anything else
+    cannot work at all -- offering it would be offering a dead entry."""
+    _open_general_with_models(desktop)
+    assert set(_offered(desktop)) == {"flash-3.5", "flash-lite"}
+
+
+def test_the_chats_own_model_is_not_offered_as_its_own_fallback(desktop):
+    _open_general_with_models(desktop)
+    assert "flash-3.6" not in _offered(desktop)
+
+
+def test_a_model_already_in_the_chain_is_not_offered_twice(desktop):
+    _open_general_with_models(desktop, ["flash-3.5"])
+    assert _offered(desktop) == ["flash-lite"]
+
+
+def test_adding_one_saves_it_in_order(desktop):
+    _open_general_with_models(desktop, ["flash-3.5"])
+    desktop.page.select_option("#fallback-add", "flash-lite")
+    desktop.page.wait_for_timeout(250)
+    saved = [c for c in desktop.calls("set_setting") if c["args"][0] == "model_fallbacks"]
+    assert saved[-1]["args"][1] == ["flash-3.5", "flash-lite"]
+
+
+def test_removing_one_saves_the_rest(desktop):
+    _open_general_with_models(desktop, ["flash-3.5", "flash-lite"])
+    desktop.page.locator('#fallback-chain .fallback-row [data-a="del"]').nth(0).click()
+    desktop.page.wait_for_timeout(250)
+    saved = [c for c in desktop.calls("set_setting") if c["args"][0] == "model_fallbacks"]
+    assert saved[-1]["args"][1] == ["flash-lite"]
+
+
+def test_the_order_can_be_changed(desktop):
+    """The order IS the setting -- strongest first -- so it has to be editable
+    without retyping the list."""
+    _open_general_with_models(desktop, ["flash-3.5", "flash-lite"])
+    desktop.page.locator('#fallback-chain .fallback-row [data-a="up"]').nth(1).click()
+    desktop.page.wait_for_timeout(250)
+    saved = [c for c in desktop.calls("set_setting") if c["args"][0] == "model_fallbacks"]
+    assert saved[-1]["args"][1] == ["flash-lite", "flash-3.5"]
+
+
+def test_the_ends_of_the_chain_cannot_be_moved_off_it(desktop):
+    _open_general_with_models(desktop, ["flash-3.5", "flash-lite"])
+    disabled = desktop.page.eval_on_selector_all(
+        "#fallback-chain .fallback-row button",
+        "els => els.filter(e => e.disabled).map(e => e.dataset.a)")
+    assert sorted(disabled) == ["down", "up"]
+
+
+def test_a_name_this_api_does_not_serve_is_called_out(desktop):
+    """The whole reason a typo is no longer silent. A dead entry used to be
+    discovered only when the preferred model was already refusing."""
+    _open_general_with_models(desktop, ["gemini-tpyo"])
+    row = _rows(desktop)[0]
+    assert row["unknown"] is True
+    assert "not served by Google" in row["facts"]
+    assert "skipped" in row["facts"]
+
+
+def test_an_empty_chain_says_what_that_means(desktop):
     """An absent list and a list of nothing read identically, and only one of
-    them means the chain is not being exercised."""
-    clean = {"providers": [{"name": "Google", "base_url": "u", "models": ["m"],
-                            "all_models": ["m"], "preset": "", "env_var": "",
-                            "local": False, "multimodal": False, "tier": "free",
-                            "key_url": "",
-                            "quota": {"m": {"used": 3, "rpd": 20, "rpm": 5,
-                                            "limited": 0, "limited_at": 0,
-                                            "cooling": False}}}],
-             "chat_provider": "Google", "chat_model": "m", "chat_tier": "free"}
-    _open_general(desktop, providers=clean)
-    assert "Nothing has been rate-limited today" in \
-        desktop.page.text_content("#fallback-limits")
+    them means "a rate limit just stops me"."""
+    _open_general_with_models(desktop)
+    assert "A rate limit just means waiting it out" in \
+        desktop.page.text_content("#fallback-chain")
+    assert _rows(desktop) == []
 
 
 def test_a_backend_that_refuses_leaves_the_panel_standing(desktop):
-    _open_general(desktop, providers={"__throw": "no bridge"})
+    _open_general_with_models(desktop, providers={"__throw": "no bridge"})
     assert desktop.errors == []
 
 

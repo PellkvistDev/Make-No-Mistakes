@@ -712,6 +712,25 @@ What keeps the cost bounded:
   anywhere explains why. Once per switch, not per request: news the first time,
   noise after that.
 
+**The chain is a list you order, not a list you type.** It was a textarea, one
+model name per line, and everything wrong with that was the same thing: the app
+already knows every model you have configured and it was asking you to retype
+them from memory.
+
+- **A typo is silent, and silent at the worst moment.** The chain only matters
+  when the preferred model is refusing, so a name that does not exist is
+  discovered as a second failure on top of the first. A name the chat's API does
+  not serve is now marked on its own row as one that will be skipped.
+- **A fallback is a different model on the SAME client** -- same base URL, same
+  key -- so a model another provider serves cannot work at all. The picker
+  offers only what the chat's own API serves, which makes that unrepresentable
+  rather than merely documented.
+- **The numbers that decide the ORDER go on the rows.** What is left of today's
+  allowance, and how many times the provider has actually refused, were in a
+  different panel from the list they exist to justify.
+- **The head row shows what the chain falls back FROM.** "Fall back to" never
+  said, and the answer is per-chat.
+
 Not done, and deliberately: no per-model context-limit check. Model context
 windows differ, and a fallback with a smaller one can fail on a long chat — but
 inventing a table of limits would be a guess that goes stale, and the failure

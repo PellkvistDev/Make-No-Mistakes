@@ -2233,4 +2233,37 @@ body.sidebar-open #sidebar { transform: translateX(0); }
   box-shadow: 0 0 0 2px rgba(12, 16, 28, 0.75);
   pointer-events: none;
 }
+/* The rate-limit fallback chain. Built on .provider-row so it reads as the
+   same kind of thing as the API list -- an editable list of what you have,
+   not a form field. */
+.fallback-row, .fallback-head { gap: 10px; }
+.fallback-head { border-style: dashed; opacity: 0.9; }
+.fallback-num {
+  flex: none; width: 18px; text-align: center; font-size: 11px;
+  color: var(--text-faint); font-variant-numeric: tabular-nums;
+}
+.fallback-name { flex: none; font-weight: 550; }
+/* The numbers that decide the ORDER, on the row where the ordering happens.
+   They used to be in a different panel entirely. */
+.fallback-facts {
+  flex: 1; min-width: 0; text-align: right; font-size: 11px;
+  color: var(--text-faint); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A name this API does not serve cannot be used. Marked rather than silently
+   kept: the chain only matters when the preferred model is refusing, so a
+   dead entry is discovered at the worst possible moment. */
+.fallback-unknown { border-color: rgba(232, 179, 57, 0.35); }
+.fallback-unknown .fallback-facts { color: #e8b339; }
+.fallback-empty { padding: 6px 2px; }
+.fallback-add-row { margin: 7px 0 2px; }
+.fallback-add-row select { width: 100%; }
+.btn-mini {
+  flex: none; min-width: 24px; height: 24px; padding: 0 6px;
+  border-radius: 6px; border: 1px solid var(--stroke-soft);
+  background: none; color: var(--text-dim); cursor: pointer;
+  font-family: var(--font); font-size: 12px; line-height: 1;
+}
+.btn-mini:hover:not(:disabled) { background: var(--glass-hi); color: var(--text); }
+.btn-mini:disabled { opacity: 0.3; cursor: default; }
 .model-limited.cooling { color: #ff6b6b; border-color: rgba(255, 107, 107, 0.45); }
