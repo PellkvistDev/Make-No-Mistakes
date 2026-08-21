@@ -3021,6 +3021,11 @@ async function populateModelPicker(data) {
   refreshModelFoot(res);
   renderModelChip(res);
   buildModelMenu(res);
+  // The fallback chain is drawn from exactly this data -- the models each API
+  // serves, and what today has cost them. Rendered here rather than fetching
+  // providers a second time, and so it cannot show a chain for one provider
+  // while the chip above the composer shows another.
+  renderFallbackChain();
 }
 
 /* ---- top-of-chat model selector: one flat list of every model ---------- */
@@ -3657,8 +3662,6 @@ function syncSettingsUI() {
   // Not while it's being typed into -- rewriting the field under the cursor
   // is how a half-typed endpoint turns into a saved wrong one.
   $("opt-browser-mine").setAttribute("aria-checked", settings.browser_own !== "off");
-  if (document.activeElement !== $("opt-fallbacks"))
-    $("opt-fallbacks").value = (settings.model_fallbacks || []).join("\n");
   if (document.activeElement !== $("opt-browser-connect"))
     $("opt-browser-connect").value = settings.browser_connect_url || "";
   $("opt-browser-connect").classList.toggle("attached-on", !!settings.browser_connect_url);
@@ -3821,7 +3824,6 @@ async function openSettings() {
   populateBackups();
   populateModelPicker();
   populateBrowserModelSelect();
-  populateRateLimits();
   populateMcp();
   populateCommands();
   renderPathRules();
@@ -3860,40 +3862,143 @@ async function populateBrowserModelSelect() {
   sel.value = [...sel.options].some((o) => o.value === cur) ? cur : JSON.stringify(["", ""]);
 }
 
-/* Today's 429s, under the fallback list they exist to justify.
+/* The fallback chain, as an ordered list of real models.
  *
- * Everywhere else in this app a model's usage is drawn as a fraction of
- * free_limits() -- a table in this repository. That table is a best effort and
- * goes stale silently, so the number people were being asked to tune their
- * fallback chain by was, in the bad case, a confident fiction. What the
- * provider REFUSED is not: it is the only first-hand measurement here.
+ * This was a textarea you typed model names into, one per line. Everything
+ * wrong with that is the same thing: the app already knows every model you
+ * have configured, and it was asking you to retype them from memory.
  *
- * Says "nothing today" rather than rendering an empty line -- an absent list
- * and a list of nothing read identically, and only one of them means the
- * chain is not being exercised. */
-async function populateRateLimits() {
-  const el = $("fallback-limits");
-  if (!el) return;
-  let res;
-  try { res = await api().providers(); } catch (e) { return; }
-  const rows = [];
-  for (const p of (res.providers || [])) {
-    for (const [model, q] of Object.entries(p.quota || {})) {
-      if (q && q.limited) rows.push({ model, prov: p.name, q });
-    }
-  }
-  if (!rows.length) {
-    el.textContent = "Nothing has been rate-limited today.";
-    return;
-  }
-  rows.sort((a, b) => b.q.limited - a.q.limited);
-  el.textContent = rows.map((r) =>
-    `${r.model} — ${r.q.limited}×`
-    + (r.q.cooling ? " (resting now)" : "")
-    + (r.q.limited_at ? `, last ${timeAgo(r.q.limited_at * 1000)}` : "")
-  ).join(" · ");
+ *   - A typo is silent. The chain only matters when the preferred model is
+ *     refusing, so a name that does not exist is discovered at the worst
+ *     possible moment, as a second failure on top of the first.
+ *   - The chain switches the model on the SAME client, so a model another API
+ *     serves cannot work at all -- and nothing said so, or stopped you.
+ *   - The numbers that decide the ORDER (what is left of today's allowance,
+ *     what has actually been refused) were in a different panel.
+ *
+ * So it is a list you order, built from the models the chat's own API serves,
+ * with those numbers on the rows where the decision is made.
+ */
+
+// Which provider row the chat is currently on -- the chain lives or dies by
+// this, because a fallback is a different model on the SAME endpoint.
+function chatProviderRow(res) {
+  return (res.providers || []).find((p) => p.name === res.chat_provider) || null;
 }
 
+function fallbackList() {
+  return (settings.model_fallbacks || []).filter(Boolean);
+}
+
+async function saveFallbacks(list) {
+  const res = await api().set_setting("model_fallbacks", list);
+  if (res && res.error) { toast(res.error, "error", 4000); return false; }
+  settings.model_fallbacks = list;
+  renderFallbackChain();
+  return true;
+}
+
+/* One row's worth of "why would I put this here". The allowance is this app's
+ * count against a table it ships; the refusals are what the provider itself
+ * said. Both, because the second is the one that tells you the first is
+ * wrong. */
+function fallbackFacts(q) {
+  const bits = [];
+  if (q && q.rpd) bits.push(`${q.used || 0}/${q.rpd} today`);
+  if (q && q.limited) bits.push(`${q.limited}× limited${q.cooling ? ", resting now" : ""}`);
+  return bits.join(" · ");
+}
+
+function fallbackRow(model, i, chain, prov) {
+  const q = (prov && prov.quota && prov.quota[model]) || null;
+  const known = prov && (prov.all_models || prov.models || []).includes(model);
+  const row = document.createElement("div");
+  row.className = "provider-row fallback-row" + (known ? "" : " fallback-unknown");
+  row.innerHTML =
+    '<span class="fallback-num"></span>' +
+    '<span class="fallback-name"></span>' +
+    '<span class="fallback-facts"></span>' +
+    '<span class="row-actions">' +
+    '<button class="btn-mini" data-a="up" aria-label="Move up" title="Move up">↑</button>' +
+    '<button class="btn-mini" data-a="down" aria-label="Move down" title="Move down">↓</button>' +
+    '<button class="btn-mini" data-a="del" aria-label="Remove" title="Remove">✕</button>' +
+    "</span>";
+  row.querySelector(".fallback-num").textContent = String(i + 1);
+  row.querySelector(".fallback-name").textContent = model;
+  // A name the chat's API does not serve cannot be used, and saying so on the
+  // row is the whole reason a typo is no longer silent.
+  row.querySelector(".fallback-facts").textContent = known
+    ? fallbackFacts(q)
+    : `not served by ${(prov && prov.name) || "this API"} — it will be skipped`;
+  row.querySelector('[data-a="up"]').disabled = i === 0;
+  row.querySelector('[data-a="down"]').disabled = i === chain.length - 1;
+  row.addEventListener("click", async (e) => {
+    const act = e.target.closest("button")?.dataset.a;
+    if (!act) return;
+    const next = chain.slice();
+    if (act === "del") next.splice(i, 1);
+    if (act === "up" && i > 0) next.splice(i - 1, 0, next.splice(i, 1)[0]);
+    if (act === "down" && i < next.length - 1) next.splice(i + 1, 0, next.splice(i, 1)[0]);
+    await saveFallbacks(next);
+  });
+  return row;
+}
+
+function renderFallbackChain() {
+  const box = $("fallback-chain");
+  const add = $("fallback-add");
+  if (!box || !add) return;
+  const res = providersCache || {};
+  const prov = chatProviderRow(res);
+  const chain = fallbackList();
+  box.innerHTML = "";
+
+  // Where the chain starts, shown rather than assumed. "Fall back to" never
+  // said what it was falling back FROM, and the answer is per-chat.
+  if (res.chat_model) {
+    const head = document.createElement("div");
+    head.className = "provider-row fallback-head";
+    head.innerHTML = '<span class="fallback-num">★</span>' +
+      '<span class="fallback-name"></span><span class="fallback-facts"></span>';
+    head.querySelector(".fallback-name").textContent = res.chat_model;
+    head.querySelector(".fallback-facts").textContent =
+      "this chat's model" + (prov ? ` · ${prov.name}` : "");
+    box.appendChild(head);
+  }
+  if (!chain.length) {
+    const none = document.createElement("div");
+    none.className = "row-sub fallback-empty";
+    none.textContent = "No fallbacks. A rate limit just means waiting it out.";
+    box.appendChild(none);
+  }
+  chain.forEach((m, i) => box.appendChild(fallbackRow(m, i, chain, prov)));
+
+  // Only what this API serves, and only what is not already in the chain.
+  // Offering anything else would be offering something that cannot work.
+  add.innerHTML = '<option value="">Add a fallback model…</option>';
+  const offered = ((prov && (prov.all_models || prov.models)) || [])
+    .filter((m) => m !== res.chat_model && !chain.includes(m));
+  for (const m of offered) {
+    const o = document.createElement("option");
+    o.value = m;
+    const facts = fallbackFacts((prov.quota || {})[m]);
+    o.textContent = facts ? `${m} — ${facts}` : m;
+    add.appendChild(o);
+  }
+  add.disabled = !offered.length;
+  if (!offered.length) {
+    add.innerHTML = `<option value="">${
+      prov ? "Every model this API serves is already in the chain"
+           : "Open a chat to choose fallbacks for its API"}</option>`;
+  }
+}
+
+$("fallback-add").addEventListener("change", async (e) => {
+  const model = e.target.value;
+  e.target.value = "";
+  if (!model) return;
+  await saveFallbacks(fallbackList().concat([model]));
+});
 $("opt-browser-model").addEventListener("change", async (e) => {
   let prov = "", model = "";
   try { [prov, model] = JSON.parse(e.target.value); } catch (err) { /* same as chat */ }
@@ -4477,13 +4582,7 @@ $("gh-foot-sync").addEventListener("click", async () => {
 
 // Saved on blur, not per keystroke: a half-typed model id is a model that
 // does not exist, and storing it would put a guaranteed failure in the chain.
-$("opt-fallbacks").addEventListener("change", async () => {
-  const lines = $("opt-fallbacks").value.split("\n").map((s) => s.trim()).filter(Boolean);
-  const res = await api().set_setting("model_fallbacks", lines);
-  if (res && res.error) return toast(res.error, "error", 5000);
-  settings = res;
-  $("opt-fallbacks").value = (settings.model_fallbacks || []).join("\n");
-});
+
 
 // -- update ------------------------------------------------------------ //
 // Two steps, never one. A button that pulls and restarts on a single click

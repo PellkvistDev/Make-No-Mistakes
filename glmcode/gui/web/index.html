@@ -486,19 +486,17 @@
         <button id="opt-reduce-fx" class="switch" role="switch" aria-checked="false"><span></span></button></div>
 
       <h3 style="margin-top:22px">When the model is rate-limited</h3>
-      <div class="row"><div class="row-text"><label for="opt-fallbacks">Fall back to</label>
-        <span class="row-sub">Models to try, in order, when this chat&rsquo;s model is out of
-          quota — same API and key, only the model changes. One per line, strongest first.
-          It goes back to your usual model as soon as the limit clears, and tells you in the
-          chat whenever a different one answered. Leave empty to just wait out the limit.</span></div>
-        <textarea id="opt-fallbacks" class="text-input" rows="3" spellcheck="false"
-                  placeholder="gemini-2.5-flash&#10;gemini-2.5-flash-lite"></textarea></div>
-      <div class="row"><div class="row-text"><label>Refused today</label>
-        <span class="row-sub">The 429s this app actually received, per model. This is the
-          number to tune the list above by — the allowance shown in the model menu is
-          measured against a table in this app, and a provider can enforce something
-          else entirely.</span>
-        <span id="fallback-limits" class="row-sub"></span></div></div>
+      <span class="row-sub" style="display:block;margin:-2px 0 9px">
+        Your usual model is always tried first. When it&rsquo;s out of quota these are tried in
+        order — the same API and key, only the model changes, so the chain can only hold models
+        that API actually serves. It goes back to your usual model as soon as the limit clears,
+        and says so in the chat whenever a different one answered.</span>
+      <div id="fallback-chain" class="provider-list"></div>
+      <div class="fallback-add-row">
+        <select id="fallback-add" class="voice-select">
+          <option value="">Add a fallback model…</option>
+        </select>
+      </div>
 
       <h3 style="margin-top:22px">Update</h3>
       <div class="row"><div class="row-text"><label>App version</label>

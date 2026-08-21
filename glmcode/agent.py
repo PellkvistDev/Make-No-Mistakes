@@ -2539,11 +2539,37 @@ class Agent:
         return (ZaiClient(self.client.api_key, self.client.base_url),
                 self.model_override)
 
+    def _say_browser_model(self, model_override) -> None:
+        """Name the model that is about to drive the browser, once per chat.
+
+        Driving a page is the hardest thing a small model does here -- the
+        Browser Agent's own prompt says so -- and with no dedicated browser
+        model configured it silently inherits the chat's, which on a free tier
+        is a small flash model. "The browser agent is completely incapable" is
+        the expected outcome of that, and the app said nothing at all: no way
+        to tell a bad model from a broken feature, and the setting that fixes
+        it is one nobody had a reason to look for.
+
+        Once per chat, not per run: news the first time, noise after that.
+        """
+        if getattr(self, "_said_browser_model", False):
+            return
+        self._said_browser_model = True
+        if model_override:
+            self.events.info(f"Browser Agent: using {model_override}.")
+            return
+        using = self.model_override or self.cfg.model
+        self.events.info(
+            f"Browser Agent: using this chat's model ({using}). Driving a page "
+            "is the hardest thing a small model does here -- if it flails, set "
+            "a stronger one in Settings -> Browser -> Browser model.")
+
     def _run_browser_subagent(self, goal: str, session, aid: str) -> str:
         """A sub-agent whose ONLY tools are the browser_* actions and whose
         system prompt is the Browser Agent prompt. Shares the given
         BrowserSession so it drives the chat's live browser."""
         client, model_override = self._browser_client_and_model()
+        self._say_browser_model(model_override)
         sink = _CaptureEvents(forward=self._emit_subagent_stream, aid=aid)
         sub = Agent(self.cfg, client, events=sink, allow_subagents=False,
                     workdir=self.workdir)
