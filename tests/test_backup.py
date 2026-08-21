@@ -132,3 +132,96 @@ def test_run_suppresses_console_window(project, monkeypatch):
     repo = backup.BackupRepo("sess-5", project)
     repo.snapshot("msg")
     assert seen_kwargs.get("creationflags") == 0x08000000
+
+
+# --------------------------------------------------------------------- #
+# revert_paths_to: undoing ONE background worker
+#
+# revert_to() below is the whole-tree instrument, and for undoing one worker it
+# is the wrong one: `reset --hard` throws away everything done since that
+# worker started -- another worker's work, and the user's own edits -- and
+# `clean -fd` additionally deletes untracked files that were never part of any
+# diff. Neither is what "revert this worker" means.
+
+def test_it_restores_only_the_paths_it_is_given(project):
+    repo = backup.BackupRepo("sess-paths", project)
+    (project / "auth.py").write_text("original auth")
+    (project / "other.py").write_text("original other")
+    base = repo.snapshot("before the worker")
+
+    (project / "auth.py").write_text("worker's edit")
+    (project / "other.py").write_text("someone else's edit")
+
+    done = repo.revert_paths_to(base, ["auth.py"])
+
+    assert done == ["auth.py"]
+    assert (project / "auth.py").read_text() == "original auth"
+    assert (project / "other.py").read_text() == "someone else's edit"
+
+
+def test_a_file_the_worker_created_is_removed(project):
+    """Undoing the creation of a file is deleting it -- there is no earlier
+    version to put back."""
+    repo = backup.BackupRepo("sess-new", project)
+    base = repo.snapshot("before")
+    (project / "new.py").write_text("brand new")
+
+    assert repo.revert_paths_to(base, ["new.py"]) == ["new.py"]
+    assert not (project / "new.py").exists()
+
+
+def test_a_file_the_worker_deleted_comes_back(project):
+    repo = backup.BackupRepo("sess-del", project)
+    (project / "gone.py").write_text("still here")
+    base = repo.snapshot("before")
+    (project / "gone.py").unlink()
+
+    repo.revert_paths_to(base, ["gone.py"])
+    assert (project / "gone.py").read_text() == "still here"
+
+
+def test_untracked_files_it_was_not_asked_about_survive(project):
+    """The reason this exists rather than reset --hard: `clean -fd` deletes
+    every untracked file in the project, including ones no diff ever mentioned
+    -- build output, scratch notes, a half-written file the user is editing."""
+    repo = backup.BackupRepo("sess-clean", project)
+    (project / "auth.py").write_text("original")
+    base = repo.snapshot("before")
+    (project / "auth.py").write_text("changed")
+    (project / "scratch.txt").write_text("the user's own untracked note")
+
+    repo.revert_paths_to(base, ["auth.py"])
+    assert (project / "scratch.txt").read_text() == "the user's own untracked note"
+
+
+def test_the_projects_real_git_is_never_touched(project):
+    """The same rule the whole-tree revert follows."""
+    repo = backup.BackupRepo("sess-git", project)
+    base = repo.snapshot("before")
+    (project / "a.txt").write_text("x")
+    repo.revert_paths_to(base, ["a.txt", ".git/config"])
+    assert (project / ".git" / "config").read_text() == "THE USER'S REAL GIT CONFIG"
+
+
+def test_a_path_escaping_the_project_is_skipped(project, tmp_path):
+    """These paths come from a diff this class produced -- but a check that
+    only holds because of where the caller got its input is not a check."""
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not yours")
+    repo = backup.BackupRepo("sess-escape", project)
+    base = repo.snapshot("before")
+
+    assert repo.revert_paths_to(base, ["../outside.txt"]) == []
+    assert outside.read_text() == "not yours"
+
+
+def test_reverting_nothing_is_not_an_error(project):
+    repo = backup.BackupRepo("sess-empty", project)
+    base = repo.snapshot("before")
+    assert repo.revert_paths_to(base, []) == []
+
+
+def test_it_refuses_before_any_snapshot_exists(project):
+    repo = backup.BackupRepo("sess-none", project)
+    with pytest.raises(RuntimeError):
+        repo.revert_paths_to("deadbeef", ["a.txt"])
