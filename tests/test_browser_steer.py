@@ -197,3 +197,45 @@ def test_it_is_said_once_per_chat_not_once_per_run(monkeypatch, events):
         agent._say_browser_model(None)
     said = [t for _lvl, t in events.notices]
     assert len([t for t in said if "Browser Agent" in t]) == 1
+
+
+# --------------------------------------------------------------------- #
+# The wrapping and the unwrapping have to stay in step
+#
+# Found by the suite, not by inspection: moving the framing AFTER the user's
+# words broke sessions.to_display, which stripped only the FRONT of the
+# template. Every steer note in a replayed chat would have carried the whole
+# instruction block hanging off the end of it.
+
+def test_a_steer_note_renders_as_just_what_the_user_typed():
+    from glmcode.sessions import to_display
+    msgs = [
+        {"role": "user", "content": "refactor auth"},
+        {"role": "assistant", "content": "on it"},
+        {"role": "user", "content": STEER_NUDGE_TEMPLATE.format(
+            text="also check the tests folder")},
+        {"role": "assistant", "content": "will do"},
+    ]
+    steered = [it["text"] for it in to_display(msgs) if it["kind"] == "steered"]
+    assert steered == ["also check the tests folder"]
+
+
+def test_the_unwrapping_is_derived_from_the_template():
+    """Not written out a second time. The prefix always was; the suffix is
+    what the reordering caught out, so both halves come from one split now and
+    neither can drift from the framing again."""
+    from glmcode import sessions
+    prefix, _, suffix = STEER_NUDGE_TEMPLATE.partition("{text}")
+    assert sessions._STEER_PREFIX == prefix
+    assert sessions._STEER_SUFFIX == suffix
+
+
+def test_no_framing_survives_into_the_rendered_note():
+    """Whichever side it sits on. A future template could put framing back in
+    front, or on both sides, and this still holds."""
+    from glmcode.sessions import to_display
+    msgs = [{"role": "user", "content": STEER_NUDGE_TEMPLATE.format(text="use search")}]
+    note = [it["text"] for it in to_display(msgs) if it["kind"] == "steered"][0]
+    assert note == "use search"
+    for word in ("Keep going", "Steering tip", "["):
+        assert word not in note

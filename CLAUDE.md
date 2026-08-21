@@ -1357,6 +1357,15 @@ Two things about the replacement:
   ending on the user's text invites a reply to the text instead of a
   continuation of the work.
 
+Moving the framing to the back broke something a long way from `prompts.py`,
+and the SUITE caught it rather than inspection: `sessions.to_display` unwraps a
+steer message to render it as the "You steered" note, and it stripped only the
+FRONT of the template. Every steer note in a replayed chat would have carried
+the whole instruction block hanging off the end. Both halves now come from one
+`partition("{text}")`, so the unwrapping cannot drift from the wrapping again
+whichever side the framing sits on. The prefix was already derived rather than
+written out twice — the suffix is what the reordering caught out.
+
 ## A small model driving a page is a bad model, not a broken feature
 
 "The browser agent is completely incapable — it just clicks and screenshots

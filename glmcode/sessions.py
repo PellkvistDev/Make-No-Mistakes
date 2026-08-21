@@ -27,9 +27,16 @@ _INTERNAL_NUDGES = {CONTINUE_NUDGE, STEP_LIMIT_NUDGE, VERIFY_NUDGE,
 _INTERNAL_NUDGE_PREFIXES = (VERIFY_NUDGE, REFINE_NUDGE, FRESH_REVIEW_HEADER,
                             WORKER_REPORT_PREFIX,
                             "[Automatic test run -- not from the user]")
-# STEER_NUDGE_TEMPLATE-wrapped messages ARE from the user -- shown as the
-# same "You steered" note the live view used, not as a framed wall of text.
-_STEER_PREFIX = STEER_NUDGE_TEMPLATE.split("{text}")[0]
+# STEER_NUDGE_TEMPLATE-wrapped messages ARE from the user -- shown as the same
+# "You steered" note the live view used, not as a framed wall of text.
+#
+# BOTH halves, derived from the template rather than written out here. The
+# template used to be all prefix, so stripping the front was enough; when the
+# framing moved AFTER the user's words -- so the model reads "keep going" last
+# -- the front-only strip left the whole instruction block hanging off every
+# steer note in the rendered chat. Splitting on {text} means the unwrapping
+# cannot drift from the wrapping again, whichever side the framing sits on.
+_STEER_PREFIX, _, _STEER_SUFFIX = STEER_NUDGE_TEMPLATE.partition("{text}")
 # Same for plan-mode wrapping: replay shows the user's own words + a badge.
 _PLAN_PREFIX = PLAN_MODE_PREAMBLE.split("{text}")[0]
 
@@ -205,8 +212,10 @@ def to_display(messages: list) -> list[dict]:
                 # verify and review nudges); not real user messages, don't render.
                 continue
             if text.startswith(_STEER_PREFIX):
-                items.append({"kind": "steered",
-                              "text": text[len(_STEER_PREFIX):].strip()})
+                body = text[len(_STEER_PREFIX):]
+                if _STEER_SUFFIX and body.endswith(_STEER_SUFFIX):
+                    body = body[:-len(_STEER_SUFFIX)]
+                items.append({"kind": "steered", "text": body.strip()})
                 continue
             plan = False
             if text.startswith(_PLAN_PREFIX):

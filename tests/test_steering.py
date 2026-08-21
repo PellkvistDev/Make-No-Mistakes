@@ -27,7 +27,11 @@ def test_steer_injected_after_tool_round_with_framing(scripted_agent, events):
     # Wrapped as an in-task tip, not a bare instruction (the bare version
     # made the model treat it as a brand-new task and blow past scope).
     assert content == STEER_NUDGE_TEMPLATE.format(text="also check the tests folder")
-    assert "NOT a new task" in content
+    assert "not a new task" in content.lower()
+    # ...and not as a reason to stop: steering a running Browser Agent used to
+    # make it write its report, because every clause of the old framing was a
+    # prohibition and nothing told the model to keep acting.
+    assert "NOT a signal to stop and report" in content
     # The UI event carries ONLY the raw text, no framing boilerplate.
     assert events.steered_texts == ["also check the tests folder"]
 
