@@ -2078,51 +2078,45 @@ body.sidebar-open #sidebar { transform: translateX(0); }
 
 /* ---- the voice dock ---------------------------------------------------- *
  *
- * A card in the corner, not a screen over the app. The old one was
- * `position: fixed; inset: 0` with a scrim and aria-modal, so starting a voice
- * conversation hid the chat, Settings, and the sub-agent panel -- including
- * the panel showing the worker it had just dispatched for you. Talking to it
- * is something you do WHILE looking at things, and the shape now says so.
+ * Always this size, and it lives at the TOP OF THE LEFT RAIL -- above the work
+ * it dispatched. Four things in it and no more: the orb, mute, the listening
+ * mode, and push-to-talk when that is the mode.
  *
- * Below --z-sheet so Settings still opens over it, above the chat so it stays
- * reachable. pointer-events are on the CARD, not the dock, so the empty space
- * around it never eats a click meant for the app underneath. */
-.voice-dock {
-  /* ABOVE the composer, not over it. At bottom:18px the card sat on top of
-     the right end of the composer -- Send, and now Talk -- so the buttons were
-     visible and unclickable while a voice session was up. #chat reserves 128px
-     for the composer; the dock clears it. */
-  position: fixed; right: 18px; bottom: 140px; z-index: 40;
-  width: min(340px, calc(100vw - 36px));
-  pointer-events: none;
-}
+ * Everything that used to be here went somewhere better rather than away: the
+ * transcript is the chat, the workers are the rail underneath, and ending the
+ * session is the Talk button at the composer. What is left is the handful of
+ * things you reach for WHILE talking -- which is why there is no collapsed
+ * state any more, and no fixed position of its own. This IS the small state,
+ * and the rail places it. */
 .voice-card {
   pointer-events: auto;
-  border-radius: 18px; padding: 12px 13px;
-  display: flex; flex-direction: column; gap: 10px;
+  border-radius: 14px; padding: 8px;
+  display: flex; flex-direction: column; gap: 7px;
   box-shadow: var(--shadow);
   animation: voiceDockIn 0.22s var(--ease-out);
 }
 @keyframes voiceDockIn {
-  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  from { opacity: 0; transform: translateY(-6px) scale(0.98); }
 }
-.voice-head { display: flex; align-items: center; gap: 10px; }
-.voice-head-text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.voice-head-actions { display: flex; align-items: center; gap: 2px; flex: none; }
-.voice-head-actions .icon-btn { width: 26px; height: 26px; }
+.voice-dock[hidden] { display: none; }
+/* NOT .voice-row: that name is already taken by the voice picker in Settings
+   (`<div class="row voice-row">`), and a bare `.voice-row { gap: 7px }` here
+   would quietly restyle that row too. */
+.voice-dock-row { display: flex; align-items: center; gap: 7px; }
+.voice-dock-row .icon-btn { width: 26px; height: 26px; flex: none; }
 
-/* Small enough to live in a corner. It was 132px in the middle of a
-   full-screen panel; here it is a status light with a pulse. */
+/* A status light with a pulse, not a centrepiece. It was 132px in the middle
+   of a full-screen panel. */
 .voice-orb {
-  --amp: 0; flex: none; width: 34px; height: 34px; border-radius: 50%;
+  --amp: 0; flex: none; width: 28px; height: 28px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   background: radial-gradient(circle at 50% 45%, var(--glass-hi), transparent 70%);
   transition: transform 0.12s ease;
 }
 .voice-orb-core {
-  width: 22px; height: 22px; border-radius: 50%;
+  width: 18px; height: 18px; border-radius: 50%;
   background: linear-gradient(160deg, var(--accent), var(--accent-soft));
-  box-shadow: 0 0 calc(6px + var(--amp) * 16px) rgba(120, 160, 255, 0.55);
+  box-shadow: 0 0 calc(5px + var(--amp) * 14px) rgba(120, 160, 255, 0.55);
   transform: scale(calc(1 + var(--amp) * 0.35));
   transition: transform 0.08s ease, box-shadow 0.12s ease;
 }
@@ -2139,72 +2133,25 @@ body.sidebar-open #sidebar { transform: translateX(0); }
   opacity: 0.55; animation: none; box-shadow: none;
 }
 @keyframes voice-breathe { 50% { transform: scale(1.06); } }
-@keyframes voice-pulse { 50% { box-shadow: 0 0 22px rgba(52, 199, 89, 0.7); } }
+@keyframes voice-pulse { 50% { box-shadow: 0 0 18px rgba(52, 199, 89, 0.7); } }
 @keyframes voice-spin { to { transform: rotate(360deg); } }
 
-.voice-wave { width: 100%; height: 20px; opacity: 0.75; }
-.voice-status { font-size: 12px; font-weight: 550; color: var(--text-dim); }
-
-.voice-body { display: flex; flex-direction: column; gap: 10px; }
-
-/* The LATEST exchange, not a log -- the chat holds the conversation now. It
-   is still here because a spoken turn only reaches the chat once the coding
-   agent's turn lock is free, so while a turn is running this is the only
-   place it is visible. */
-.voice-caption {
-  font-size: 13px; line-height: 1.45; max-height: 26vh; overflow-y: auto;
-  display: flex; flex-direction: column; gap: 8px;
+/* One button, three modes, named. Two toggles could express the same mode two
+   ways and neither of them said what the third one was. */
+.voice-mode-btn {
+  flex: 1; min-width: 0; height: 26px; padding: 0 9px;
+  border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--stroke-soft); background: none;
+  color: var(--text-dim); font-family: var(--font); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
-.voice-caption:empty { display: none; }
-.voice-turn { display: flex; flex-direction: column; gap: 2px; }
-.voice-you { color: var(--text-faint); font-style: italic; }
-.voice-you::before { content: "“"; }
-.voice-you::after { content: "”"; }
-.voice-it { color: var(--text); }
+.voice-mode-btn:hover { color: var(--text); background: var(--glass-hi); }
+.voice-mode-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.voice-mode-btn[data-mode="wake word"] { color: var(--accent); border-color: var(--accent); }
+.voice-mode-btn[data-mode="push-to-talk"] { color: #ffcf7a; border-color: rgba(210,150,40,.45); }
 
-.voice-workers { display: flex; flex-wrap: wrap; gap: 5px; }
-.voice-workers:empty { display: none; }
-/* Clickable, and it has to look it. A worker dispatched by voice used to be a
-   dead pill on a screen that covered the only panel able to show its work --
-   so the answer to "what is it doing?" was to end the conversation. */
-.voice-worker {
-  font-size: 11.5px; padding: 3px 9px; border-radius: 999px;
-  background: var(--glass-hi); border: 1px solid transparent;
-  display: inline-flex; align-items: center; gap: 5px;
-  cursor: pointer; font-family: var(--font); color: inherit;
-  max-width: 100%; text-align: left;
-}
-.voice-worker:hover { border-color: var(--stroke); background: rgba(255,255,255,0.09); }
-.voice-worker:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.voice-worker .vw-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.voice-worker .vw-icon { font-size: 9px; flex: none; }
-.voice-worker.vw-run .vw-icon { color: var(--accent); animation: voice-blink 1.1s ease-in-out infinite; }
-.voice-worker.vw-done .vw-icon { color: #34c759; }
-.voice-worker.vw-stop .vw-icon { color: var(--text-faint); }
-.voice-worker.vw-err .vw-icon { color: #ff453a; }
-
-.voice-foot { display: flex; flex-direction: column; gap: 8px; }
-.voice-ptt-btn { width: 100%; user-select: none; }
-.voice-chips { display: flex; flex-wrap: wrap; gap: 5px; }
-.voice-chips .chip-btn { font-size: 11px; padding: 3px 9px; }
-#voice-gate-toggle.on { color: var(--accent); background: var(--glass-hi); border-color: var(--accent); }
-
-/* The sub-agent inspector opens over the right half, which is exactly where
-   the dock lives -- and clicking a worker pill is what opens it, so the two
-   would collide on the one interaction that matters most. The dock steps
-   aside instead of being buried: you clicked through to watch the worker, and
-   you are still talking to it. body.browser-full takes the whole width, so
-   there the dock goes to the left edge. */
-body.subagent-open .voice-dock { right: calc(50% + 18px); }
-body.browser-full .voice-dock { right: auto; left: 18px; }
-
-/* Collapsed: just the orb and the way out. For when you want it listening and
-   entirely out of the way -- the state the old full-screen panel could not
-   have at all. */
-.voice-dock.collapsed { width: auto; }
-.voice-dock.collapsed .voice-body,
-.voice-dock.collapsed .voice-head-text { display: none; }
-.voice-dock.collapsed .voice-card { padding: 8px; flex-direction: row; }
+.voice-ptt-btn { width: 100%; user-select: none; font-size: 12px; padding: 6px 10px; }
 
 .voice-perm {
   width: 100%; border-radius: 14px; padding: 14px;
@@ -2223,7 +2170,7 @@ body.browser-full .voice-dock { right: auto; left: 18px; }
 .voice-ptt-btn.held { background: #34c759; }
 
 @media (prefers-reduced-motion: reduce) {
-  .voice-orb-core, .voice-worker .vw-icon { animation: none !important; }
+  .voice-orb-core, .activity-item .ai-dot { animation: none !important; }
 }
 
 [hidden] { display: none !important; }
@@ -2362,6 +2309,14 @@ body.browser-full .voice-dock { right: auto; left: 18px; }
  * way round for the thing you most want to glance at.
  *
  * Left margin, vertically centred, narrow. State, not actions. */
+/* The rail is a column: the voice dock at the top, the work it dispatched
+   under it. "Above the tasks on the left" is a layout relationship, so it is
+   expressed as one rather than as two elements that happen to line up. */
+.rail-stack {
+  pointer-events: auto;
+  display: flex; flex-direction: column; gap: 8px;
+  width: 100%; max-width: 190px; max-height: 100%;
+}
 .activity-rail {
   position: fixed; left: 0; top: 52px; bottom: 128px;
   width: max(24px, calc(50% - 430px));
@@ -2376,10 +2331,8 @@ body.browser-full .voice-dock { right: auto; left: 18px; }
 }
 .activity-rail[hidden] { display: none; }
 .activity-items {
-  pointer-events: auto;
   display: flex; flex-direction: column; gap: 6px;
-  max-height: 100%; overflow-y: auto;
-  width: 100%; max-width: 190px;
+  min-height: 0; overflow-y: auto; width: 100%;
 }
 .activity-item {
   display: flex; align-items: center; gap: 7px; width: 100%;
@@ -2412,10 +2365,33 @@ body.sidebar-open .activity-rail {
   width: max(24px, calc((100vw - var(--sidebar-w)) / 2 - 430px));
 }
 
-/* It is the first thing to go when there is no room for it, which is why
-   nothing may live only here: every item is reachable from the sub-agent
-   panel as well. Below these widths the margin has collapsed to its 24px
-   minimum and a rail would be sitting on top of the text -- the second
-   threshold is the first plus the sidebar it has to share the window with. */
-@media (max-width: 1100px) { .activity-rail { display: none; } }
-@media (max-width: 1368px) { body.sidebar-open .activity-rail { display: none; } }
+/* The ITEMS are the first thing to go when there is no room for them, which
+   is why nothing may live only there: every one is reachable from the
+   sub-agent panel as well. Below these widths the margin has collapsed to its
+   24px minimum and a rail would be sitting on top of the text -- the second
+   threshold is the first plus the sidebar it has to share the window with.
+
+   The voice CONTROLS are exempt, and that is not a refinement. Mute, the mode
+   and push-to-talk exist in exactly one place now that the full-screen
+   overlay is gone, so a rule that hides the rail hides the only way to mute a
+   live microphone -- and the default window is 1280 wide with the sidebar
+   open, which is inside both thresholds. It was not a narrow-window edge
+   case; it was the ordinary one. */
+@media (max-width: 1100px) { body:not(.voice-on) .activity-rail { display: none; } }
+@media (max-width: 1368px) {
+  body.sidebar-open:not(.voice-on) .activity-rail { display: none; }
+}
+
+/* No margin to sit in, so it stops being a margin column: a compact dock at
+   the bottom-left, above the composer, carrying the four controls alone. */
+@media (max-width: 1368px) {
+  body.voice-on .activity-rail {
+    left: 0; top: auto; bottom: 108px; width: auto;
+    align-items: flex-end; justify-content: flex-start;
+    padding: 0 12px;
+  }
+  body.voice-on.sidebar-open .activity-rail {
+    left: var(--sidebar-w); width: auto;
+  }
+  body.voice-on .activity-items { display: none; }
+}
