@@ -932,3 +932,213 @@ def test_why_asks_github_for_the_path_it_was_given():
       out(asked);
     """))
     assert r == ["a.py"]          # the leading ./ is normalised away
+
+
+# --------------------------------------------------------------------- #
+# branches, and finishing the work
+#
+# Every write from the phone is a commit, and every one of them landed on
+# whichever branch the chat was opened on -- the repository's DEFAULT branch,
+# because that is the only one the phone can open. So work done here went
+# straight to main, unreviewed, and on a repo whose Pages site or CI is wired
+# to main it deployed on the way past.
+#
+# That is not a preference about workflow. It is the phone being unable to do
+# the ordinary safe thing.
+
+def _branchy(extra, branch="main", **kw):
+    import json as _json
+    return """
+      const gh = fakeGh(%s);
+      gh.branch = %s;
+      gh.__default = %s;
+      gh.__refs = [];
+      gh.__prs = %s;
+      gh.__opened = [];
+      gh.__head = %s;
+      gh.branchSha = async () => gh.__head;
+      gh.defaultBranch = async () => gh.__default;
+      gh.createBranch = async (name, sha) => {
+        if (gh.__refs.includes(name)) { const e = new Error("GitHub 422: Reference already exists"); throw e; }
+        gh.__refs.push(name); return { ref: "refs/heads/" + name, object: { sha } };
+      };
+      gh.prsForBranch = async (h) => gh.__prs;
+      gh.openPr = async (title, body, base, head, draft) => {
+        gh.__opened.push({ title, body, base, head, draft });
+        return { number: 42, html_url: "https://github.com/o/r/pull/42" };
+      };
+      const switched = [];
+      const t = C.makeTools(gh, { switchBranch: async (n) => { switched.push(n); gh.branch = n; } });
+      %s
+    """ % (_json.dumps(kw.get("files", {"a.txt": "x"})), _json.dumps(branch),
+           _json.dumps(kw.get("default", "main")), _json.dumps(kw.get("prs", [])),
+           _json.dumps(kw.get("head", "headsha")), extra)
+
+
+@needs_node
+def test_the_branch_tools_are_absent_unless_the_host_can_switch():
+    """The same rule spawn follows. agent-core cannot reach the session that
+    owns the GitHub client, and a tool that silently did nothing would be worse
+    than one that is absent."""
+    r = _node("""
+      const t = C.makeTools(fakeGh({}), {});
+      out([typeof t.new_branch, typeof t.open_pull_request]);
+    """)
+    assert r == ["undefined", "undefined"]
+
+
+@needs_node
+def test_new_branch_creates_it_and_moves_the_chat_onto_it():
+    r = _node(_branchy("""
+      const msg = await t.new_branch({ name: "fix-login" });
+      out({ msg, refs: gh.__refs, switched, now: gh.branch });
+    """))
+    assert r["refs"] == ["fix-login"]
+    assert r["switched"] == ["fix-login"]
+    assert "fix-login" in r["msg"] and "main" in r["msg"]
+
+
+@needs_node
+def test_new_branch_branches_from_where_the_chat_is():
+    r = _node(_branchy("""
+      const from = [];
+      gh.createBranch = async (n, sha) => { from.push(sha); gh.__refs.push(n); return {}; };
+      await t.new_branch({ name: "b" });
+      out(from);
+    """, head="deadbeef"))
+    assert r == ["deadbeef"]
+
+
+@needs_node
+def test_a_name_that_is_taken_is_refused_rather_than_joined():
+    """Carrying on onto someone else's branch is not what "start a branch"
+    meant, and the commits would be real."""
+    r = _node(_branchy("""
+      gh.__refs.push("taken");
+      const msg = await t.new_branch({ name: "taken" });
+      out({ msg, switched });
+    """))
+    assert "already exists" in r["msg"]
+    assert r["switched"] == []
+
+
+@needs_node
+def test_a_name_github_rejects_for_another_reason_says_which():
+    """422 covers both "already exists" and "that is not a valid ref name".
+    Telling someone their name is taken when it is actually malformed sends
+    them off to invent a second name that fails the same way."""
+    r = _node(_branchy("""
+      gh.createBranch = async () => { throw new Error("GitHub 422: Reference name is not valid"); };
+      out(await t.new_branch({ name: "b" }));
+    """))
+    assert "already exists" not in r
+    assert "not valid" in r
+
+
+@needs_node
+def test_a_branch_name_is_made_usable():
+    r = _node(_branchy("""
+      await t.new_branch({ name: "  fix the login redirect  " });
+      out(gh.__refs);
+    """))
+    assert r == ["fix-the-login-redirect"]
+
+
+@needs_node
+def test_new_branch_needs_a_name():
+    r = _node(_branchy("""
+      out({ msg: await t.new_branch({ name: "   " }), refs: gh.__refs });
+    """))
+    assert r["msg"].startswith("ERROR:")
+    assert r["refs"] == []
+
+
+@needs_node
+def test_an_empty_repository_has_nothing_to_branch_from():
+    r = _node(_branchy("""
+      out(await t.new_branch({ name: "b" }));
+    """, head=None))
+    assert "nothing to branch from" in r
+
+
+@needs_node
+def test_opening_a_pull_request_returns_the_link():
+    r = _node(_branchy("""
+      const msg = await t.open_pull_request({ title: "Fix the login redirect", body: "why" });
+      out({ msg, opened: gh.__opened });
+    """, branch="fix-login"))
+    assert "pull/42" in r["msg"] and "#42" in r["msg"]
+    assert r["opened"][0]["base"] == "main"
+    assert r["opened"][0]["head"] == "fix-login"
+
+
+@needs_node
+def test_a_pull_request_is_a_draft_unless_told_otherwise():
+    """Work done on a phone is work nobody has looked at on a screen bigger
+    than a hand, and a draft is the one state that says so without stopping
+    anything."""
+    r = _node(_branchy("""
+      await t.open_pull_request({ title: "a" });
+      await t.open_pull_request({ title: "b", draft: false });
+      out(gh.__opened.map((p) => p.draft));
+    """, branch="fix-login"))
+    assert r == [True, False]
+
+
+@needs_node
+def test_a_pull_request_from_the_default_branch_is_refused_with_what_to_do():
+    r = _node(_branchy("""
+      const msg = await t.open_pull_request({ title: "a" });
+      out({ msg, opened: gh.__opened });
+    """, branch="main"))
+    assert "new_branch first" in r["msg"]
+    assert r["opened"] == []
+
+
+@needs_node
+def test_an_existing_pull_request_is_named_rather_than_duplicated():
+    """GitHub's own error says only "a pull request already exists", without
+    saying where. Asking first means the answer is a link."""
+    r = _node(_branchy("""
+      out(await t.open_pull_request({ title: "a" }));
+    """, branch="fix-login", prs=[{"html_url": "https://github.com/o/r/pull/7"}]))
+    assert "pull/7" in r
+    assert "already has an open pull request" in r
+
+
+@needs_node
+def test_a_branch_with_nothing_on_it_is_said_plainly():
+    r = _node(_branchy("""
+      gh.openPr = async () => { throw new Error("GitHub 422: No commits between main and fix-login"); };
+      out(await t.open_pull_request({ title: "a" }));
+    """, branch="fix-login"))
+    assert "nothing to open a pull request for" in r
+
+
+@needs_node
+def test_the_default_branch_is_asked_for_not_assumed():
+    """Plenty of repositories are not on "main", and a PR opened against a
+    branch that does not exist fails with a message about the base, which
+    reads as the tool being broken."""
+    r = _node(_branchy("""
+      await t.open_pull_request({ title: "a" });
+      out(gh.__opened[0].base);
+    """, branch="work", default="trunk"))
+    assert r == "trunk"
+
+
+@needs_node
+def test_the_prompt_says_edits_are_committed_and_where():
+    p = _node("out(C.SYSTEM_PROMPT);")
+    assert "new_branch" in p
+    assert "open_pull_request" in p
+    assert "COMMITTED IMMEDIATELY" in p
+
+
+@needs_node
+def test_the_branch_schemas_match_the_implementations():
+    names = [f["function"]["name"] for f in _node("out(C.BRANCH_SCHEMAS);")]
+    assert names == ["new_branch", "open_pull_request"]
+    have = _node(_branchy('out(names.map((n) => typeof t[n]));'
+                          .replace("names", '["new_branch", "open_pull_request"]')))
+    assert have == ["function", "function"]

@@ -391,6 +391,10 @@
     }
     return {
       raw: gh,
+      // Which branch this client is bound to. It is fixed for the life of the
+      // client -- switching means building a new one, because the file cache
+      // that hangs off it holds another branch's contents.
+      branch,
       async tree() {
         const t = await gh("GET", `/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`);
         return (t.tree || []).filter((e) => e.type === "blob")
@@ -417,6 +421,32 @@
       },
       async deleteFile(path, message, sha) {
         return gh("DELETE", `/repos/${owner}/${repo}/contents/${path}`, { message, sha, branch });
+      },
+      // The repo's own default branch, which is what a pull request goes
+      // BACK to. Not assumed to be "main": plenty of repositories are not,
+      // and a PR opened against a branch that does not exist fails with a
+      // message about the base, which reads as the tool being broken.
+      async defaultBranch() {
+        const r = await gh("GET", `/repos/${owner}/${repo}`);
+        return r.default_branch || "main";
+      },
+      // Branch off wherever `from` points. GitHub answers 422 if the name is
+      // already taken, which is the right failure -- reusing someone else's
+      // branch is not what "start a branch" meant.
+      async createBranch(name, fromSha) {
+        return gh("POST", `/repos/${owner}/${repo}/git/refs`,
+                  { ref: "refs/heads/" + name, sha: fromSha });
+      },
+      async openPr(title, body, base, head, draft) {
+        return gh("POST", `/repos/${owner}/${repo}/pulls`,
+                  { title, body, base, head, draft: !!draft });
+      },
+      // Open pull requests whose head is this branch. Asked before opening
+      // one, because GitHub's own error for a duplicate says only "a pull
+      // request already exists" without saying where it is.
+      async prsForBranch(head) {
+        return gh("GET", `/repos/${owner}/${repo}/pulls`
+          + `?state=open&head=${encodeURIComponent(owner + ":" + head)}`);
       },
       // Does the current branch exist? Returns its commit SHA or null.
       async branchSha() {
@@ -1630,6 +1660,92 @@
       return out.join("\n");
     };
 
+    // --- branches, and finishing the work ---------------------------------- //
+    //
+    // Every write from the phone is a commit, and until now every one of them
+    // landed on whichever branch the chat was opened on -- which is the
+    // repository's DEFAULT branch, because that is the only one the phone can
+    // open. So work done here went straight to main, unreviewed, and on a repo
+    // whose Pages site or CI is wired to main it deployed on the way past.
+    //
+    // That is not a preference about workflow. It is the phone being unable to
+    // do the ordinary safe thing, and it is most of why "do it on the computer"
+    // was still the answer for anything real.
+    //
+    // Both tools are gated on the host wiring them (opts.switchBranch), the
+    // same way spawn is: agent-core cannot reach the session that owns the
+    // GitHub client, and a tool that silently did nothing would be worse than
+    // one that is absent.
+    if (opts.switchBranch) {
+      api.new_branch = async (a) => {
+        // GitHub accepts more than this, but a ref with a space in it is a
+        // branch nobody can type at a shell afterwards.
+        const name = String((a && a.name) || "").trim()
+          .replace(/\s+/g, "-").replace(/[^A-Za-z0-9._\/-]/g, "").replace(/^[-.\/]+/, "");
+        if (!name) return "ERROR: a branch needs a name.";
+        if (name === gh.branch) return `Already on ${name}.`;
+        let from;
+        try { from = await gh.branchSha(); }
+        catch (e) { return `Couldn't read ${gh.branch}: ${(e && e.message) || e}`; }
+        if (!from) return `${gh.branch} has no commits yet, so there is nothing to branch from.`;
+        try { await gh.createBranch(name, from); }
+        catch (e) {
+          const m = (e && e.message) || String(e);
+          // Matched on what GitHub SAID, not on the status. 422 covers both
+          // "already exists" and "that is not a valid ref name", and telling
+          // someone their name is taken when it is actually malformed sends
+          // them off to invent a second name that fails the same way.
+          // Carrying on onto an existing branch is not an option either: the
+          // commits would be real, and they would be someone else's.
+          if (/already exists/i.test(m)) {
+            return `A branch called ${name} already exists. Pick another name.`;
+          }
+          return `Couldn't create ${name}: ${m}`;
+        }
+        const was = gh.branch;
+        await opts.switchBranch(name);
+        return `Now on ${name}, branched from ${was}. Everything committed from `
+             + `here lands there instead of ${was}.`;
+      };
+
+      api.open_pull_request = async (a) => {
+        const head = gh.branch;
+        let base;
+        try { base = await gh.defaultBranch(); }
+        catch (e) { return `Couldn't read the repository: ${(e && e.message) || e}`; }
+        if (head === base) {
+          return `This chat is on ${base}, which is what a pull request would merge INTO — `
+               + "there is nothing to open. Use new_branch first, then make the changes there.";
+        }
+        // GitHub's own error for a duplicate says only "a pull request already
+        // exists", without saying where. Asking first means the answer is a
+        // link the user can actually open.
+        try {
+          const open = await gh.prsForBranch(head);
+          if (Array.isArray(open) && open.length) {
+            return `${head} already has an open pull request: ${open[0].html_url}. `
+                 + "New commits on this branch show up there automatically.";
+          }
+        } catch (e) { /* not being able to check is not a reason to refuse */ }
+        const title = String((a && a.title) || "").trim() || head;
+        try {
+          // Draft unless told otherwise. Work done on a phone is work nobody
+          // has looked at on a screen bigger than a hand, and a draft is the
+          // one state that says so without stopping anything.
+          const pr = await gh.openPr(title, String((a && a.body) || ""), base, head,
+                                     !(a && a.draft === false));
+          return `Opened #${pr.number}: ${pr.html_url}`;
+        } catch (e) {
+          const m = (e && e.message) || String(e);
+          if (/No commits between/.test(m)) {
+            return `${head} has no commits that ${base} does not, so there is nothing to open a `
+                 + "pull request for yet.";
+          }
+          return `Couldn't open the pull request: ${m}`;
+        }
+      };
+    }
+
     // Delegation: only exposed when the host wires a spawner (main agent only,
     // so sub-agents can't spawn further sub-agents).
     if (opts.spawn) {
@@ -1715,6 +1831,27 @@
   function str(d) { return { type: "string", description: d }; }
   function bool(d) { return { type: "boolean", description: d }; }
 
+
+  // Offered only when the host can actually switch the client's branch, the
+  // same rule as SPAWN_SCHEMA: a schema whose implementation is absent is a
+  // tool the model calls and is told does not exist, mid-task, on the device
+  // with the least room to recover.
+  const BRANCH_SCHEMAS = [
+    tool("new_branch",
+      "Start a new branch and move this chat onto it. Every edit you make is committed the moment " +
+      "you make it, so on the repository's default branch that means committing straight to it — " +
+      "do this FIRST for anything beyond a one-line fix, and say that you did. Branches from " +
+      "wherever the chat is now.",
+      { name: str("Branch name, e.g. fix-login-redirect") }, ["name"]),
+    tool("open_pull_request",
+      "Open a pull request from this chat's branch back to the repository's default branch, so the " +
+      "work can be reviewed and merged. Use it when the task is done. Returns the link. Opens as a " +
+      "draft unless you say otherwise.",
+      { title: str("Pull request title"),
+        body: str("What changed and why — the reasoning, not a list of files"),
+        draft: bool("Open as a draft (default true)") },
+      ["title"]),
+  ];
 
   const SPAWN_SCHEMA = tool("spawn_agent",
     "Delegate one self-contained sub-task to a fresh sub-agent that works on its own and reports back " +
@@ -1821,6 +1958,15 @@
     "when it next syncs, or via CI. So: make correct, complete, minimal edits; read before you edit; " +
     "prefer search_code/grep to find things; and in your final reply note anything that still needs to " +
     "be run or verified on a real machine. Be concise.\n\n" +
+    // The phone commits as it edits, so "which branch" is not a workflow
+    // preference here -- it is where the work lands, decided before the first
+    // write rather than after the last one. On a repo whose Pages site or CI
+    // is wired to the default branch, going straight there also deploys.
+    "EVERY EDIT YOU MAKE IS COMMITTED IMMEDIATELY, to whichever branch this chat is on. If that " +
+    "is the repository's default branch and the task is anything more than a one-line fix, call " +
+    "new_branch FIRST and say that you did — otherwise the work lands on the default branch " +
+    "unreviewed, and anything wired to that branch runs. When the task is done, " +
+    "open_pull_request turns it into something the user can review and merge.\n\n" +
     // Naming the trigger, because a tool the model never thinks to call is not a
     // feature. The phone is also where it matters most: a turn here is cut off by
     // the screen locking or the app being backgrounded, and a list written down is
@@ -2115,6 +2261,7 @@
     encryptVault, decryptVault, deriveKey, PBKDF2_ITERS,
     aesEncrypt, aesDecrypt, exportRawKey, importRawKey,
     makeGitHub, makeModel, makeTools, runAgent, TOOL_SCHEMAS, SPAWN_SCHEMA, VIEW_IMAGE_SCHEMA,
+    BRANCH_SCHEMAS,
     NEEDS_DESKTOP_SCHEMA, pendingNote, PENDING_MARKER,
     openPairToken, normalizePairCode, pairTokenFrom, PAIR_TOKEN_MIN,
     SYSTEM_PROMPT, SUBAGENT_PROMPT,

@@ -1082,6 +1082,110 @@ only the shell, so a stopped `npm run dev` would leave the actual server
 holding the port — invisibly, since the app believes it stopped it. That is
 the same reach `taskkill /T` gives on Windows.
 
+## The phone commits as it edits, so the branch is decided first
+
+There is no filesystem on the phone. `write_file` and `edit_file` are commits,
+made the moment the model calls them, to whichever branch the chat is bound to
+— and that was always the repository's **default** branch, because opening a
+repo is the only way the phone gets one and it opens the default. So work done
+from a phone went straight to `main`, unreviewed, and on this repo it deployed
+on the way past.
+
+`new_branch` and `open_pull_request` close that. Four things about them are
+load-bearing:
+
+- **Switching branches rebuilds the tools, it does not re-point them.**
+  `makeTools` keeps a `path -> {text, sha}` cache, and a cache carried across a
+  branch switch is the worst available kind of wrong: reads *succeed* and hand
+  back the other branch's text. `bindBranch` builds a new `makeGitHub` client
+  and a new tool set from it, which is what drops the cache.
+- **It is not `connectRepo`.** Connecting a repo resets the chat — messages,
+  transcript, the queue of work parked for the desktop. None of that belongs to
+  the branch, so the two were split rather than one calling the other with a
+  flag.
+- **The switch is persisted immediately**, not at the end of the turn. The
+  branch is where every subsequent commit goes; a relaunch that came back on
+  the old one would carry on writing to it.
+- **Sub-agents get neither tool.** One of them moving the chat onto another
+  branch underneath the agent that dispatched it is not something that
+  conversation could recover from.
+
+The system prompt states the rule the tools exist for — *every edit is
+committed immediately, so branch first* — because a tool the model never
+thinks to call is not a feature.
+
+## What the phone cannot borrow from the desktop, and why
+
+Three tools stayed behind, and the reasons are different in each case. They are
+written down so the question is not reopened by inspection of the tool lists.
+
+- **`web_search` and `fetch_url` are blocked by CORS, not by the CSP.** The
+  desktop scrapes DuckDuckGo HTML; a page cannot read a response from a host
+  that sends no `Access-Control-Allow-Origin`, and no `connect-src` entry
+  changes that. Reaching them needs a proxy, which is a server, which this
+  project does not have.
+- **`why` reads the FILE's history, not the line's.** `git log -L a,b:file` has
+  no API equivalent — GitHub filters commits by path and no finer. The phone's
+  `why` says so in its own output, naming the line it could not narrow to,
+  because implying a precision it does not have would hand back a confident
+  wrong reason.
+- **`remember` writes somewhere else.** The desktop's memory lives outside the
+  repo (`~/.makenomistakes/memory.md`); everything the phone can write is a
+  commit. So its notes go into the project's own agent file, which the desktop
+  already reads into its system prompt. **Which** file matters:
+  `prompts._project_memory` returns the FIRST of `GLM.md` / `AGENTS.md` /
+  `CLAUDE.md` that exists, so creating `GLM.md` in a repo that has a `CLAUDE.md`
+  would silently shadow it and the project's real instructions would stop being
+  read. It appends to whichever is already there, and only invents a name when
+  there is none.
+
+Two things that ARE shared and must stay shared: argument names, and the
+trigger sentences in tool descriptions. A chat syncs between the devices and
+carries the other one's calls in its own history — so a model reading its past
+`todo_write(content=...)` against a schema saying `task` will use whichever it
+read last, and an argument the phone silently ignores is a read it believes it
+did and did not.
+
+## Reading the repo from the phone is a network round trip per file
+
+`grep` and `search_code` scan every file, and each one is its own HTTPS
+request. In series that is the difference between a search and a stall: this
+repository is 225 scannable files, and at ~150ms each that is over half a
+minute before the model sees anything.
+
+They are read in ordered **chunks** now (`scanFiles`, eight at a time). The
+same *number* of requests either way — nothing is spent faster against the
+GitHub rate limit — but a chunk is not a race, and the difference is two things
+that are easy not to notice:
+
+- **Results stay in tree order.** Output that reorders itself between two runs
+  of the same search is output nobody can compare.
+- **The early stop stops.** `grep` quits at 100 hits; with everything in flight
+  it would quit after whatever had already been scheduled, which on a large
+  repo is all of it.
+
+`read_file` had the matching problem in the other direction: it took the first
+12,000 characters of the joined file and said nothing. The model concluded the
+symbol was absent — a wrong answer rather than a missing one — and the cut
+landed mid-line, so `edit_file` was handed `old_string` values that never
+existed. It cuts on a line boundary now, says how many lines are left, and
+names the offset to continue from.
+
+## A write to an existing path needs the sha, and the sha comes back from the write
+
+`makeTools` cached a file's text after a write with `sha: undefined`, and
+GitHub refuses to overwrite a path it is not told which blob is being replaced.
+So the FIRST edit of a file worked and every one after it went out with no sha
+and came back 422 — on the device where every write is a commit and editing the
+same file twice is the normal shape of a task.
+
+The new sha is in the response to the previous write. A cache entry that
+somehow has none re-reads the file rather than sending nothing.
+
+The fake GitHub in `tests/test_phone_tools.py` enforces that rule. That is the
+only reason a test can see this at all — a fake that accepted any PUT would
+have passed throughout.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by
