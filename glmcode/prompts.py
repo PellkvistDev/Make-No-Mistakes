@@ -746,13 +746,30 @@ WRAP_UP_NUDGE = (
 )
 
 
+# Reported: steering a running Browser Agent made it stop and write its report.
+#
+# The transport is not what does that -- the message is appended and the loop
+# carries straight on. It is this framing. Every clause used to be a
+# prohibition ("NOT a new task", "do not restart", "do not treat this as", "do
+# not expand scope"), and a wall of don'ts arriving mid-task, with nothing
+# telling the model to keep ACTING, reads as "something is wrong, stop". For
+# the Browser Agent that is especially sharp: its one instruction for finishing
+# is "reply with NO tool calls", so "stop" and "report" are the same move.
+#
+# So it now leads with what to DO, says outright that this is not a reason to
+# finish, and keeps a single short caution about scope instead of four.
+#
+# The user's words come FIRST and the framing last, which is the same lesson as
+# "a request ends on the turn, not on a note about it": the last thing read is
+# the thing answered. Ending on "keep going" is the whole point of the change.
 STEER_NUDGE_TEMPLATE = (
-    "[Steering tip from the user, sent while you were already working -- this is "
-    "NOT a new task and does not replace or override what you're doing. Keep "
-    "working on the SAME task, with the SAME scope, and just factor this tip in "
-    "along the way. Do not restart, do not treat this as a new set of "
-    "instructions, do not expand scope to cover unrelated things it mentions "
-    "unless they're clearly part of the task already in progress.]\n\n{text}"
+    "[Steering tip from the user, sent while you were already working.]\n\n"
+    "{text}\n\n"
+    "[Keep going on the same task, with the same scope, using tools as before "
+    "-- fold this in as you go. It is a correction to your approach, not a new "
+    "task and NOT a signal to stop and report: only finish when the original "
+    "task is actually done or genuinely blocked. Don't restart, and don't take "
+    "on unrelated things it happens to mention.]"
 )
 
 

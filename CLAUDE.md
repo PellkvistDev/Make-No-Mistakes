@@ -1326,6 +1326,61 @@ that **no** `chrome.windows.update` call in the extension carries a `state`,
 not just the one in `capture()`: every one of them is reachable from an ordinary
 agent action.
 
+## Steering is a correction, and it must not read as "stop"
+
+Reported: steering a running Browser Agent made it stop and write its report.
+
+**The transport is not what does that**, and `tests/test_browser_steer.py` pins
+that so the next person suspecting the plumbing can stop looking there.
+`steer_subagent` queues the message, `_inject_steer_messages` appends it after
+the tool results, and the loop carries straight on to the next model call.
+`wrap_up_requested` is the only thing on that path that ends a turn early, and
+steering never touches it.
+
+What did it is the FRAMING. Every clause of the old `STEER_NUDGE_TEMPLATE` was
+a prohibition — *"NOT a new task", "do not restart", "do not treat this as",
+"do not expand scope"* — and a wall of don'ts arriving mid-task, with nothing
+telling the model to keep **acting**, reads as "something is wrong, stop". For
+the Browser Agent that is especially sharp: its one instruction for finishing
+is *"reply with NO tool calls"*, so stopping and reporting are the same move.
+
+Two things about the replacement:
+
+- **It leads with what to do** and says outright that a steer is not a reason
+  to finish, keeping one short scope caution instead of four prohibitions. The
+  caution still has to be there — an unframed message mid-turn reads as a
+  brand-new top-level instruction with equal weight to the original task, which
+  is why the framing was added in the first place.
+- **The user's words come first and the instruction last.** Same lesson as *a
+  request ends on the turn, not on a note about it*: the last thing read is the
+  thing answered. Ending on "keep going" is the whole point of the reordering;
+  ending on the user's text invites a reply to the text instead of a
+  continuation of the work.
+
+## A small model driving a page is a bad model, not a broken feature
+
+"The browser agent is completely incapable — it just clicks and screenshots
+random stuff" is the expected outcome of a small model driving a page. The
+Browser Agent's own prompt says driving one is the hardest thing a small model
+does here, and `_browser_client_and_model` silently inherits the chat's model
+when no dedicated browser model is configured — which on a free tier is a small
+flash model.
+
+The app said nothing at all. So there was no way to tell a weak model from a
+broken feature, and the setting that fixes it (Settings → Browser → Browser
+model) is one nobody had a reason to go looking for.
+
+`_say_browser_model` names the model that is about to drive, **once per chat**
+— news the first time, noise after that, the same rule the rate-limit fallback
+notice follows. A configured model is named without the advice: there is
+nothing to fix, so nagging would be wrong.
+
+Worth knowing when this comes up again: the mechanical causes were checked and
+are not it. `browser_click` returns a fresh snapshot, an empty snapshot says so
+explicitly rather than coming back blank, the element cap is 200, and the step
+limit is 200. If the snapshots ARE arriving full and it still flails, that is
+the model. If they come back empty, that is a different bug.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by
