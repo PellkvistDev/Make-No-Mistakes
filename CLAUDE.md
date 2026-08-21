@@ -1446,6 +1446,53 @@ only place the exchange is visible, so it keeps the newest turns and nothing
 older. `tests/desktop_ui/test_voice_dock.py` asserts a spoken turn still
 reaches the chat, because that is what makes dropping the log safe.
 
+## Actions go where the hands are; state goes in the periphery
+
+Two asks — *"it should be easier to activate and deactivate"* / *"the little
+mic icon at the top isn't cutting it"*, and *"we have quite a lot of space on
+both sides of the chat"* — and they split along that line.
+
+**Talk is at the composer.** Starting a conversation is an action, and every
+other message action lives there; it was a 20px glyph in the titlebar, the
+width of the window away from the hands. The same button ends the session, so
+there is one control for one session. The titlebar chip stays (it is where the
+wake-word "armed" state has always shown) and the two are kept in step by
+`setTalkState`.
+
+It is also **labelled**, because "mic" is the same picture for *type this for
+me* and *let's talk* — and those were literally the same glyph, 500px apart:
+`#mic-btn` dictates into the box, `#voice-chip` opened a conversation.
+Dictation's icon carries a pen now.
+
+**The margin shows what is running.** Not more buttons — an ambient view of
+work in flight, which did not exist: a dispatched worker was invisible unless
+you opened the sub-agent panel or had the voice dock up. Every item is
+reachable from the sub-agent panel too, because the rail is the first thing to
+go when the window narrows and **nothing may live only in it**.
+
+Three things this turned up, none of them visible by looking:
+
+- **`worker_update` was handled only on the voice route.** The coding agent has
+  the same worker tools and its events arrive on the ordinary sid, where
+  nothing was listening — so a worker dispatched by TYPING rendered nowhere in
+  the app at all. One store (`liveWorkers`), written by both routes, read by
+  the dock and the rail.
+- **`#chat` is fixed across the FULL width** — its margin is padding, not a gap
+  — so at the same z-index it covered the rail and swallowed every click. The
+  rail looked perfectly fine and did nothing.
+- **The voice dock was covering the composer.** At `bottom: 18px` the card sat
+  on top of Send. `#chat` reserves 128px for the composer and the dock now
+  clears it.
+
+**The sidebar starts OPEN**, and the first version of the rail hid itself
+whenever it was — so the rail was invisible in the app's normal state. The chat
+shifts right rather than shrinking, so the margin is still there and the rail
+moves with it; it only disappears when the window genuinely has no room
+(1100px, or 1368px with the sidebar).
+
+`body.no-session` disables the whole composer, Talk included. That is correct
+and not a special case: a spoken turn has nothing to attach to without a chat.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by
