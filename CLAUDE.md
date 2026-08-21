@@ -1114,17 +1114,48 @@ The system prompt states the rule the tools exist for — *every edit is
 committed immediately, so branch first* — because a tool the model never
 thinks to call is not a feature.
 
-`check_ci` closes the loop those two opened. The phone cannot run anything, so
-"did the tests pass" was the one question in *branch → edit → commit → pull
-request* that still had to be answered somewhere else — and it is the most
-phone-shaped question of the lot: you push, you walk away, and you want to know
-ten minutes later without going back to a desk. It reads `check-runs` rather
-than the older `statuses` endpoint (Actions reports through checks, and a repo
-using both would otherwise show half its answer), treats `skipped` and
-`neutral` as passes so it does not cry wolf on every conditional job, and
-reports a check's own `output.summary` **but never a log**: a job log is a
-redirect to blob storage that a page cannot read cross-origin, so promising one
-would be a tool that fails on the case it exists for.
+## "Did CI pass" is a different question from "do the tests pass"
+
+Both devices can now ask it, for different reasons and by separate routes.
+
+On the phone it closes the loop `new_branch` and `open_pull_request` opened:
+nothing runs there, so *did the tests pass* was the one step in **branch → edit
+→ commit → pull request** that still had to be answered somewhere else. It is
+also the most phone-shaped question in the app — you push, you walk away, and
+you want to know ten minutes later without going back to a desk.
+
+On the desktop the shell is not the answer either. It can run the tests
+*here*; it cannot run the ones on a **runner**, and those are what gate a
+merge. Asked "did CI pass" the agent could only say to go and look — the same
+answer it gave before it could push at all.
+
+`glmcode/tools.py:check_ci` and the `check_ci` in `mobile/agent-core.js` are
+two implementations of one shape. The rules are the part that must not drift,
+because a model that learns them on one device carries them to the other:
+
+- **`check-runs`, not the older `statuses` endpoint.** Actions reports through
+  checks, and a repository using both would otherwise show half its answer.
+- **`skipped` and `neutral` are passes.** A conditional job that did not need
+  to run is not a broken build, and calling it one makes this cry wolf on every
+  repository that has one. `tests/test_check_ci.py` pins the two lists against
+  each other.
+- **A run still going is never reported as a pass.** "1 passed, 0 failed, 1
+  still running" is the honest shape of a half-finished answer; collapsing it
+  into green is how someone merges on the strength of a job that had not
+  started.
+- **"Nothing reported" covers both reasons.** "Not started yet" and "this repo
+  has no CI configured" look identical from here, and saying only the first
+  sends someone off to wait for a run that is never coming.
+- **A check's own `output.summary`, and never a log.** A job log is served as a
+  redirect to blob storage — tens of megabytes, and unreadable cross-origin
+  from a page at all — so promising one would be a tool that fails on exactly
+  the case it exists for. The summary is capped: one is written for a web page
+  and can run to thousands of lines.
+
+The desktop adds the one thing the phone cannot know: **whether what is on the
+runner is what is on this disk.** It counts unpushed commits and says so, since
+a green answer about a commit two pushes ago is the most confidently wrong
+output this tool could produce.
 
 ## What the phone cannot borrow from the desktop, and why
 

@@ -29,6 +29,7 @@ import stat
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -578,6 +579,36 @@ def list_open_pulls(token: str, owner: str, repo: str, limit: int = 30) -> list[
             "head": (r.get("head") or {}).get("ref", ""),
             "base": (r.get("base") or {}).get("ref", ""),
             "draft": bool(r.get("draft")),
+        })
+    return out
+
+
+def check_runs(token: str, owner: str, repo: str, ref: str) -> list[dict]:
+    """What CI said about a ref (a branch name, tag, or commit sha).
+
+    `check-runs` rather than the older `statuses` endpoint: Actions reports
+    through checks, and a repository using both would otherwise show half its
+    answer.
+
+    A BRANCH NAME resolves server-side, so it answers about the tip of that
+    branch ON GITHUB -- which is the commit CI actually ran on, not whatever is
+    sitting in the local working copy. That is the right thing to report, and
+    check_ci says so when the two have drifted apart.
+    """
+    r = _api("GET",
+             f"/repos/{owner}/{repo}/commits/{urllib.parse.quote(ref, safe='')}/check-runs",
+             token)
+    rows = (r or {}).get("check_runs") if isinstance(r, dict) else None
+    out = []
+    for c in (rows or []):
+        o = c.get("output") or {}
+        out.append({
+            "name": c.get("name", ""),
+            "status": c.get("status", ""),
+            "conclusion": c.get("conclusion") or "",
+            "url": c.get("html_url", ""),
+            "title": o.get("title") or "",
+            "summary": o.get("summary") or "",
         })
     return out
 

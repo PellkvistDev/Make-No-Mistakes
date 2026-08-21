@@ -2106,6 +2106,113 @@ def why(path: str, line: int = 0, end_line: int = 0, max_commits: int = 5,
     return _truncate("\n".join(out))
 
 
+# --------------------------------------------------------------------- #
+# check_ci
+#
+# The desktop has a shell, so it can run the tests -- but not the ones that run
+# on a RUNNER, and those are the ones that gate a merge. Asked "did CI pass"
+# the agent could only say to go and look, which is the same answer it gave
+# before it could push at all.
+#
+# The phone has the same tool for the same reason (mobile/agent-core.js). The
+# two are separate implementations of one shape; the rules below -- what counts
+# as a pass, what "nothing reported" means, never promising a log -- are the
+# part that must not drift, because a model that learns them on one device
+# carries them to the other.
+
+_CI_PASSING = ("success", "neutral", "skipped")
+
+
+def check_ci(path: str = ".", ref: str = "") -> str:
+    """What CI said about this branch, on the runner rather than on this
+    machine."""
+    p = _resolve(path)
+    if not p.is_dir():
+        raise ToolErrorBase(f"Not a directory: {p}", ErrorSeverity.ERROR)
+    from . import githubsync
+
+    if not githubsync.is_git_repo(p):
+        return f"{p} is not a git checkout, so there is no CI to ask about."
+    pair = githubsync.repo_from_remote(githubsync._remote_url(p))
+    if not pair:
+        return ("This checkout has no GitHub remote on origin, so there is nothing "
+                "to ask. CI status only exists for a repository on GitHub.")
+    owner, repo = pair
+    token = githubsync.load_token()
+    if not token:
+        # Named rather than implied: without this the tool looks broken, and
+        # the fix is one field in a settings panel the model can point at.
+        return ("No GitHub token is stored, so the checks cannot be read. Add one "
+                "in Settings -> GitHub.")
+
+    branch = ref or githubsync._current_branch(p)
+    if not branch:
+        return ("This checkout is on a detached HEAD, so there is no branch to ask "
+                "about. Name a commit or branch with ref=.")
+    try:
+        runs = githubsync.check_runs(token, owner, repo, branch)
+    except githubsync.GitHubError as e:
+        return f"Couldn't read the checks: {e}"
+
+    out: list[str] = []
+    # The one thing the desktop knows that the phone does not: whether what is
+    # on the runner is what is on this disk. A green answer about a commit two
+    # pushes ago is the most confidently wrong output this tool could produce.
+    if not ref:
+        code, ahead = _git(["rev-list", "--count", "@{upstream}..HEAD"], p, timeout=10)
+        n = int(ahead.strip()) if code == 0 and ahead.strip().isdigit() else 0
+        if n:
+            out.append(f"NOTE: {n} commit{'' if n == 1 else 's'} here "
+                       f"{'has' if n == 1 else 'have'} not been pushed, so these "
+                       f"checks are about an older version of {branch}. Push first "
+                       "if you want an answer about your current work.\n")
+
+    if not runs:
+        # Two different facts with one appearance, and saying only the first
+        # sends someone off to wait for a run that is never coming.
+        out.append(f"No checks have reported for {branch} yet. They may not have "
+                   "started, or this repository has none configured.")
+        return _truncate("\n".join(out))
+
+    running = [r for r in runs if r["status"] != "completed"]
+    failed = [r for r in runs if r["status"] == "completed"
+              and r["conclusion"] not in _CI_PASSING]
+    passed = [r for r in runs if r["status"] == "completed"
+              and r["conclusion"] in _CI_PASSING]
+
+    out.append(f"Checks on {branch}: {len(passed)} passed, {len(failed)} failed, "
+               f"{len(running)} still running.")
+    for r in failed:
+        extra = f" ({r['conclusion']})" if r["conclusion"] and r["conclusion"] != "failure" else ""
+        out.append(f"\nFAILED  {r['name']}{extra}")
+        if r["title"]:
+            out.append(f"        {r['title']}")
+        if r["summary"]:
+            # The check's own summary, never a log. A job log is served as a
+            # redirect to blob storage and can be tens of megabytes; promising
+            # one would be a tool that fails on the case it exists for.
+            out.append(_indent_block(r["summary"], 8, 1200))
+        if r["url"]:
+            out.append(f"        {r['url']}")
+    for r in running:
+        out.append(f"\nrunning {r['name']}")
+    for r in passed:
+        out.append(f"\npassed  {r['name']}")
+    if not failed and not running:
+        out.append("\nEverything green.")
+    elif not failed:
+        out.append("\nNothing has failed yet -- ask again once the rest finish.")
+    return _truncate("\n".join(out))
+
+
+def _indent_block(text: str, spaces: int, cap: int) -> str:
+    """Indent and cap. A check's summary is written for a web page and can run
+    to thousands of lines; unbounded it is a whole turn's context spent on one
+    failure."""
+    pad = " " * spaces
+    cut = text if len(text) <= cap else text[:cap] + "\n... [truncated]"
+    return "\n".join(pad + ln.strip() if ln.strip() else "" for ln in cut.splitlines())
+
 def git_commit(path: str = ".", message: str = "") -> str:
     """Commit staged changes with the given message."""
     p = _resolve(path)
@@ -2663,6 +2770,21 @@ TOOL_SCHEMAS = [
         ["path"],
     ),
     _schema(
+        "check_ci",
+        "Did CI pass? Reports every check GitHub ran on this branch, on the RUNNER -- which "
+        "is a different question from running the tests here, and it is the one that gates a "
+        "merge. Says what passed, what is still running, and for anything that failed, its "
+        "summary and a link. Reach for it after pushing or opening a pull request, and "
+        "whenever the user asks whether the build is green. It warns when this checkout has "
+        "commits that were never pushed, since the checks would then be about an older "
+        "version.",
+        {
+            "path": {"type": "string", "description": "Directory in the repository (default: cwd)"},
+            "ref": {"type": "string", "description": "A branch, tag or commit to ask about (default: the current branch)"},
+        },
+        [],
+    ),
+    _schema(
         "my_tabs",
         "What the USER has open in their own browser right now: every tab, with an id, "
         "title and URL. Answer questions about their tabs with this -- it is instant and "
@@ -3182,6 +3304,7 @@ TOOL_FUNCTIONS = {
     "git_branch": git_branch,
     "git_diff": git_diff,
     "why": why,
+    "check_ci": check_ci,
     "my_tabs": my_tabs,
     "git_log": git_log,
     "git_commit": git_commit,
@@ -3208,7 +3331,12 @@ READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "find_references",
                  "search_code", "code_diagnostics", "go_to_definition",
                  "scan_secrets", "todo_write", "remember", "show_image",
                  "compact_context", "read_output", "stop_process",
-                 "list_processes", "review_changes", "why", "my_tabs"}
+                 "list_processes", "review_changes", "why", "my_tabs",
+                 # Reads a public-ish status from GitHub with a token that is
+                 # already stored and already used for push/pull. It changes
+                 # nothing anywhere, so a permission prompt would be friction
+                 # in front of a question the user just asked out loud.
+                 "check_ci"}
 # Tools that modify files (auto-approved in autoedit mode).
 FILE_WRITE_TOOLS = {"write_file", "edit_file", "replace_in_files", "git_commit"}
 # Network read tools (prompt in ask mode, auto-approved in autoedit/yolo).
