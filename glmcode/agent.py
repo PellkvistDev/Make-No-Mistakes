@@ -1835,9 +1835,58 @@ class Agent:
         with self._emit_lock:
             self.events.subagent(*args, **kwargs)
 
+    # Tools whose arguments name a file the sub-agent is about to write, and
+    # which argument holds the path. replace_in_files is deliberately absent:
+    # it takes a PATTERN, so there is no path to attribute, and guessing one
+    # would be worse than knowing this tool is not covered.
+    _WRITE_TOOL_PATH_ARG = {"write_file": "path", "edit_file": "path"}
+
     def _emit_subagent_stream(self, aid: str, kind: str, **data) -> None:
+        # Every sub-agent event funnels through here with the sub-agent's id --
+        # which for a background worker IS the worker id. That makes this the
+        # one place the app can learn which files a PARTICULAR worker wrote,
+        # rather than inferring it from a whole-tree diff that also contains
+        # everything else that happened meanwhile.
+        if kind == "tool_call":
+            self._note_worker_write(aid, data.get("name", ""), data.get("args"))
         with self._emit_lock:
             self.events.subagent_stream(aid, kind, **data)
+
+    def _note_worker_write(self, wid: str, tool: str, args) -> None:
+        """Remember that this worker asked to write a path. Never raises."""
+        key = self._WRITE_TOOL_PATH_ARG.get(tool)
+        if not key or not isinstance(args, dict):
+            return
+        rel = self._project_relative(args.get(key))
+        if not rel:
+            return
+        with self._workers_lock:
+            w = self._workers.get(wid)
+            if w is None:
+                return
+            # A record of intent, not of fact: this fires before the tool runs,
+            # so a write the permission engine denies is in here too. That is
+            # why the revert set is intersected with the baseline diff -- a
+            # file that never actually changed cannot need reverting.
+            if rel not in w["wrote"]:
+                w["wrote"].append(rel)
+
+    def _project_relative(self, path) -> str:
+        """A tool argument as a path relative to the project, or "" if it is
+        not inside it. The baseline diff speaks in repo-relative paths, so an
+        absolute argument has to be brought into the same terms before the two
+        can be compared at all."""
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        try:
+            root = Path(self.workdir).resolve()
+            p = Path(raw)
+            if not p.is_absolute():
+                p = root / p
+            return p.resolve().relative_to(root).as_posix()
+        except Exception:
+            return ""
 
     def _run_subagents(self, specs: list) -> str:
         """Run each spec as an autonomous agent on its own thread, in parallel,
@@ -1992,6 +2041,10 @@ class Agent:
             self._workers[wid] = {
                 "id": wid, "name": name, "task": task, "status": "running",
                 "result": "", "error": None, "baseline": baseline, "changes": [],
+                # Paths this worker's own write tools named. See
+                # _note_worker_write: it is what makes revert_worker mean this
+                # worker rather than everything since it started.
+                "wrote": [],
                 "kind": kind,
             }
         # One rate limiter shared by every background worker in this chat, so
@@ -2060,8 +2113,16 @@ class Agent:
                                           summary=_first_line(report), result=ann)
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
+            # Record what it had already changed BEFORE reporting the failure.
+            # This used to be skipped on the error path, so worker_changes and
+            # revert_worker both believed a crashed worker had touched nothing
+            # -- and a worker that died half way through is the one you most
+            # want to be able to undo.
+            changes = self._worker_changed_files(wid)
             with self._workers_lock:
                 w = self._workers.get(wid)
+                if w is not None:
+                    w["changes"] = changes
                 if w is not None and w["status"] != "stopped":
                     w["status"], w["error"] = "error", err
             self._emit_subagent(wid, name, "error", summary=err[:280])
@@ -2080,14 +2141,21 @@ class Agent:
         for w in workers:
             if w["id"].lower() == ident:
                 return w["id"]
-        # Then by name (prefer running), exact-ish then loose contains.
+        # Then by name. `nm in ident` is deliberately NOT here: a worker named
+        # "a" or "fix" is contained in most sentences anyone would say, so the
+        # loose direction matched whichever worker happened to be first and
+        # steered or stopped the wrong one. A spoken reference is a fragment of
+        # the name, not the other way round.
         def name_hit(w):
             nm = w["name"].lower()
-            return ident == nm or ident in nm or nm in ident
-        running = [w for w in workers if w["status"] == "running" and name_hit(w)]
+            return ident == nm or ident in nm
+        # Most recent first, so "stop the browser one" means the one just
+        # started rather than its namesake from ten minutes ago.
+        newest = list(reversed(workers))
+        running = [w for w in newest if w["status"] == "running" and name_hit(w)]
         if running:
             return running[0]["id"]
-        any_hit = [w for w in workers if name_hit(w)]
+        any_hit = [w for w in newest if name_hit(w)]
         return any_hit[0]["id"] if any_hit else None
 
     def _steer_worker_tool(self, ident: str, message: str) -> str:
@@ -2150,6 +2218,28 @@ class Agent:
             parts.append(f"and {extra} more")
         return "; ".join(parts)
 
+    def _worker_revert_set(self, wid: str) -> list[str]:
+        """The paths revert_worker would actually put back for this worker.
+
+        The intersection of two imperfect sets, and the intersection is better
+        than either:
+
+          - what the worker's own write tools NAMED (`wrote`), which is exact
+            about whose change it was but includes writes that were denied or
+            failed, since the record is made when the call is announced;
+          - what actually differs from its baseline (`changes`), which is exact
+            about what really changed but also contains every edit anyone else
+            made in the meantime -- another worker, or the user.
+
+        A file in both is one this worker asked to write and that is genuinely
+        different now. Nothing else is safe to touch on its behalf.
+        """
+        with self._workers_lock:
+            w = self._workers.get(wid, {})
+            wrote = set(w.get("wrote") or [])
+            changed = [path for _st, path in (w.get("changes") or [])]
+        return [p for p in changed if p in wrote]
+
     def _worker_changes_tool(self, ident: str) -> str:
         wid = self._resolve_worker(ident)
         if wid is None:
@@ -2157,10 +2247,34 @@ class Agent:
         with self._workers_lock:
             w = self._workers.get(wid, {})
             name, changes = w.get("name", wid), w.get("changes", [])
+            status = w.get("status")
+        if status == "running":
+            # `changes` is only filled in when the worker finishes, so an empty
+            # list here means "not known yet", not "nothing". Reporting the
+            # second is a wrong answer about work still in progress.
+            live = self._worker_changed_files(wid)
+            if not live:
+                return (f"'{name}' is still running and hasn't changed any files yet.")
+            return (f"'{name}' is still running. So far {len(live)} file(s) have "
+                    f"changed since it started: {self._describe_changes(live)}.")
         if not changes:
             return f"'{name}' didn't change any project files."
-        return (f"'{name}' changed {len(changes)} file(s): "
-                f"{self._describe_changes(changes)}.")
+        mine = set(self._worker_revert_set(wid))
+        # Said apart rather than lumped together, because only one of the two
+        # is something revert_worker can undo -- and a count that quietly
+        # included the other would promise an undo it will not perform.
+        others = [(st, path) for st, path in changes if path not in mine]
+        out = [f"'{name}' changed {len(changes)} file(s): "
+               f"{self._describe_changes(changes)}."]
+        if others and mine:
+            out.append(f"Of those, {len(mine)} were written by '{name}' itself; the "
+                       f"rest changed for other reasons while it ran, and "
+                       f"revert_worker will leave them alone.")
+        elif others:
+            out.append(f"None of those were written by '{name}' itself -- they "
+                       f"changed while it ran. It may have edited files by "
+                       f"running a command, which cannot be attributed.")
+        return " ".join(out)
 
     def _revert_worker_tool(self, ident: str) -> str:
         wid = self._resolve_worker(ident)
@@ -2169,22 +2283,53 @@ class Agent:
         with self._workers_lock:
             w = self._workers.get(wid, {})
             name, baseline, changes = w.get("name", wid), w.get("baseline"), w.get("changes", [])
+            status = w.get("status")
+        if status == "running":
+            # The phone's revert_worker has always refused this. Reverting
+            # under a worker that is still writing is a race with no good
+            # outcome: it carries on from where it was and the tree ends up
+            # half one thing and half the other.
+            return (f"'{name}' is still running -- stop it first, then revert. "
+                    f"Undoing its work while it is still writing would leave the "
+                    f"files half reverted.")
         if self.backup_repo is None or not baseline:
             return (f"I can't revert '{name}' -- backups aren't on for this chat, so "
                     f"there's no snapshot to roll back to.")
         if not changes:
             return f"'{name}' didn't change any files, so there's nothing to revert."
+        paths = self._worker_revert_set(wid)
+        if not paths:
+            # Refusing beats reverting the whole tree. Files did change while
+            # this worker ran, but none of them are ones it asked to write --
+            # so undoing "its" work would mean undoing somebody else's.
+            return (f"Nothing here is safely attributable to '{name}': files changed "
+                    f"while it ran, but none of them were written by its own edit "
+                    f"tools, so I can't tell its work from anyone else's. "
+                    f"{self._describe_changes(changes)}. Use git or review_changes "
+                    f"and undo the parts you mean.")
         try:
-            self.backup_repo.revert_to(baseline)
+            # Per path, not reset --hard. The whole-tree revert threw away
+            # everything done since this worker STARTED -- other workers, and
+            # the user's own edits -- and its `clean -fd` additionally deleted
+            # untracked files that were never in any diff. Neither is what
+            # "revert this worker" means, and the old message admitted as much
+            # only after the fact.
+            reverted = self.backup_repo.revert_paths_to(baseline, paths)
         except Exception as e:
             raise ToolError(f"Could not revert '{name}': {e}")
         with self._workers_lock:
             if wid in self._workers:
                 self._workers[wid]["status"] = "reverted"
         self._emit_subagent(wid, name, "error", summary="reverted by user")
-        return (f"Reverted the project to before '{name}' ran, undoing its changes "
-                f"({self._describe_changes(changes)}). Note: this also rolls back any "
-                f"changes other workers made after '{name}' started.")
+        left = len(changes) - len(reverted)
+        note = ""
+        if left > 0:
+            note = (f" {left} other file(s) changed while it ran and were left "
+                    f"alone -- they are not this worker's to undo.")
+        return (f"Undid the {len(reverted)} file(s) '{name}' wrote: "
+                f"{', '.join(reverted[:12])}"
+                f"{f' and {len(reverted) - 12} more' if len(reverted) > 12 else ''}."
+                f"{note}")
 
     def _worker_ask(self, wid: str, title: str, preview: str, always_label):
         """Called ON A WORKER THREAD when that worker hits a permission-gated
@@ -2243,17 +2388,31 @@ class Agent:
             workers = list(self._workers.values())
         if not workers:
             return "No background workers have been dispatched yet."
-        running = [w for w in workers if w["status"] == "running"]
-        done = [w for w in workers if w["status"] == "done"]
-        errored = [w for w in workers if w["status"] == "error"]
-        lines = [f"{len(running)} running, {len(done)} done, {len(errored)} failed.\n"]
+        # Counted from the same statuses the list below prints, so the tally
+        # cannot disagree with the rows. It used to count only running/done/
+        # error, so a chat whose only worker had been stopped opened with
+        # "0 running, 0 done, 0 failed" and then listed one.
+        tally = {}
         for w in workers:
-            if w["status"] == "running":
+            tally[w["status"]] = tally.get(w["status"], 0) + 1
+        order = [("running", "running"), ("done", "done"), ("error", "failed"),
+                 ("stopped", "stopped"), ("reverted", "reverted")]
+        head = ", ".join(f"{tally[k]} {label}" for k, label in order if tally.get(k))
+        lines = [(head or f"{len(workers)} worker(s)") + ".\n"]
+        for w in workers:
+            st = w["status"]
+            if st == "running":
                 lines.append(f"- {w['name']} ({w['id']}): still working — {w['task'][:120]}")
-            elif w["status"] == "done":
+            elif st == "done":
                 lines.append(f"- {w['name']} ({w['id']}): DONE — {_first_line(w['result'])}")
-            elif w["status"] == "stopped":
+            elif st == "stopped":
                 lines.append(f"- {w['name']} ({w['id']}): STOPPED by the user")
+            elif st == "reverted":
+                # Was in the else branch, so this printed "FAILED — None": the
+                # user undoing a worker was reported to the model as a crash
+                # with no error message.
+                lines.append(f"- {w['name']} ({w['id']}): REVERTED by the user "
+                             f"(its changes were undone)")
             else:
                 lines.append(f"- {w['name']} ({w['id']}): FAILED — {w['error']}")
         return "\n".join(lines)

@@ -1229,6 +1229,103 @@ The fake GitHub in `tests/test_phone_tools.py` enforces that rule. That is the
 only reason a test can see this at all — a fake that accepted any PUT would
 have passed throughout.
 
+## Reverting a worker has to mean that worker
+
+`revert_worker` called `BackupRepo.revert_to(baseline)`, which is
+`reset --hard` plus `clean -fd`. That is the whole work tree, so undoing one
+worker also undid **everything done since it started** — another worker's work,
+and the user's own edits — and the `clean` additionally deleted untracked files
+that were never part of any diff: build output, scratch notes, a half-written
+file. The old return string admitted the first half of this, *after* it had
+already happened.
+
+The fix needed something the app did not have: knowing which files a
+*particular* worker wrote.
+
+- **`_emit_subagent_stream` is where that is knowable.** Every sub-agent event
+  funnels through it tagged with the sub-agent's id, which for a background
+  worker IS the worker id. A `tool_call` for `write_file`/`edit_file` names a
+  path, so the worker's own writes can be recorded as they are announced.
+  `replace_in_files` is deliberately not in that map: it takes a pattern, and
+  guessing a path would be worse than knowing the tool is not covered.
+- **The revert set is the INTERSECTION of two imperfect sets.** `wrote` is
+  exact about whose change it was but records *intent* — the event fires before
+  the permission engine has had its say, so a denied write is in there.
+  `changes` (the baseline diff) is exact about what really changed but contains
+  every edit anyone else made meanwhile. A file in both is one this worker asked
+  to write and that is genuinely different now. Nothing else is safe to touch on
+  its behalf.
+- **Nothing attributable means refusing.** Files changed while it ran but none
+  are ones it wrote — most likely it edited them by running a command. Reverting
+  the tree and explaining afterwards is the behaviour this replaced.
+- **A running worker is refused.** The phone's `revert_worker` always did this;
+  the desktop did not. Reverting under a worker that is still writing leaves the
+  files half one thing and half the other.
+
+`BackupRepo.revert_paths_to` is the per-path instrument. Two things in it are
+load-bearing, and the second was found by its own test:
+
+- **`add -A -N` first**, exactly as `changed_files_since` does. Without it a
+  file *created* since the baseline is not in the index, and cannot be told
+  apart from one the shadow repo excludes entirely.
+- **A path the shadow repo does not track is never deleted.** "Not in the
+  baseline" has two causes and only one of them means "created since". The other
+  is `DEFAULT_EXCLUDES` — `.git/`, `node_modules/`, build output — and there is
+  no snapshot of those to restore from. The first version of this deleted the
+  project's real `.git/config`, which is why the check lives in `BackupRepo` and
+  is not left to the caller.
+
+## A worker that did not finish is not a worker that failed
+
+Four places described any non-`done` worker as a failure, and told the user and
+the model so.
+
+- `worker_report_note` and the spoken `announce_worker` both said "failed" for a
+  worker the user had **stopped on purpose**. Telling the coding agent a
+  cancelled job crashed invites it to diagnose and re-run exactly what was just
+  cancelled. `_WORKER_OUTCOMES` maps each status to what it actually means, and
+  an unrecognised status claims neither success nor failure.
+- `check_workers` counted only running/done/error, so a chat whose one worker
+  had been stopped opened with "0 running, 0 done, 0 failed" and then listed it.
+  The header is now built from the same statuses the rows print.
+- A `reverted` worker fell into that summary's `else` branch, whose `error` is
+  `None` — so undoing a worker printed **"FAILED — None"**.
+- **A crashed worker recorded no changes at all.** `w["changes"]` was set on the
+  success path only, so `worker_changes` and `revert_worker` both believed a
+  worker that died half way through had touched nothing — and that is the one
+  you most want to be able to undo.
+
+`worker_changes` on a *running* worker had the same shape of bug: `changes` is
+filled in at the end, so an empty list mid-flight means "not known yet", and
+reporting it as "changed nothing" is a wrong answer about work in progress. It
+reads the live diff instead and says the worker is still going.
+
+## A spoken worker name is a fragment, not a sentence
+
+`_resolve_worker` matched both directions — `ident in nm` **and `nm in ident`**.
+The second is the wrong way round: a worker named `a` or `fix` is contained in
+almost anything anyone would say, so "please stop what you are doing" resolved
+to whichever worker happened to be first, and stopped it. Only the fragment
+direction survives, and ties now go to the **most recent** worker, because "stop
+the browser one" means the one just started rather than its namesake from ten
+minutes ago.
+
+## The agent must not reshape the user's browser window
+
+`capture()` called `chrome.windows.update(id, {state: "normal"})` before every
+screenshot. `state: "normal"` is not "make this visible" — it is Chrome's
+**restore**: it un-maximizes a maximized window and drops a fullscreen one back
+to a floating rectangle. So the agent resized the browser the user lives in, on
+the way past, with no undo — once the state has been changed the previous one is
+not readable from anywhere.
+
+`focused: true` alone is what was wanted. It raises a covered window, and for a
+minimized one Chrome restores whatever it was before — precisely the value that
+would otherwise have to be guessed at. `tests/test_extension_window.py` asserts
+that **no** `chrome.windows.update` call in the extension carries a `state`,
+not just the one in `capture()`: every one of them is reachable from an ordinary
+agent action.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by

@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
 
 from glmcode.agent import Agent
 from glmcode.api import ApiError
@@ -201,6 +202,7 @@ class _FakeBackup:
     def __init__(self):
         self.snaps = 0
         self.reverted_to = None
+        self.reverted_paths = None
         self.changes = [("M", "auth.py"), ("A", "settings.js")]
 
     def snapshot(self, msg):
@@ -213,6 +215,19 @@ class _FakeBackup:
     def revert_to(self, commit):
         self.reverted_to = commit
 
+    def revert_paths_to(self, commit, paths):
+        self.reverted_to = commit
+        self.reverted_paths = list(paths)
+        return list(paths)
+
+
+def _wrote(convo, wid, *paths):
+    """Say that this worker's own write tools named these files, the way the
+    real thing learns it: through the sub-agent event funnel."""
+    for path in paths:
+        convo._emit_subagent_stream(wid, "tool_call", name="write_file",
+                                    args={"path": path})
+
 
 def test_worker_changes_and_revert(monkeypatch, events):
     convo = _convo(monkeypatch, events)
@@ -220,6 +235,7 @@ def test_worker_changes_and_revert(monkeypatch, events):
     ScriptedClient.scripts = [lambda n: FakeResult(content="edited files")]
     convo._dispatch_worker("edits", "edit some files")
     assert _wait_worker(convo, "wk1") == "done"
+    _wrote(convo, "wk1", "auth.py", "settings.js")
     # A baseline was snapshotted at dispatch, and the changes were recorded.
     with convo._workers_lock:
         assert convo._workers["wk1"]["baseline"] == "commit1"
@@ -227,10 +243,78 @@ def test_worker_changes_and_revert(monkeypatch, events):
     desc = convo._worker_changes_tool("edits")
     assert "auth.py" in desc and "settings.js" in desc
     out = convo._revert_worker_tool("wk1")
+    # Per PATH, from that worker's baseline -- not a reset of the whole tree.
     assert convo.backup_repo.reverted_to == "commit1"
-    assert "Reverted" in out
+    assert sorted(convo.backup_repo.reverted_paths) == ["auth.py", "settings.js"]
+    assert "auth.py" in out
     with convo._workers_lock:
         assert convo._workers["wk1"]["status"] == "reverted"
+
+
+def test_revert_leaves_alone_what_the_worker_did_not_write(monkeypatch, events):
+    """The whole-tree revert threw away everything done since the worker
+    STARTED -- another worker's work, and the user's own edits. "Revert this
+    worker" has to mean this worker."""
+    convo = _convo(monkeypatch, events)
+    convo.backup_repo = _FakeBackup()
+    ScriptedClient.scripts = [lambda n: FakeResult(content="done")]
+    convo._dispatch_worker("edits", "edit auth")
+    assert _wait_worker(convo, "wk1") == "done"
+    # It wrote one of the two changed files; the other changed meanwhile.
+    _wrote(convo, "wk1", "auth.py")
+
+    out = convo._revert_worker_tool("wk1")
+    assert convo.backup_repo.reverted_paths == ["auth.py"]
+    assert "settings.js" not in convo.backup_repo.reverted_paths
+    assert "left alone" in out
+
+
+def test_revert_refuses_when_nothing_is_attributable(monkeypatch, events):
+    """Files changed while it ran, but none of them are ones it asked to write.
+    Undoing "its" work would mean undoing somebody else's, so it says so
+    instead of reverting the tree and admitting it afterwards."""
+    convo = _convo(monkeypatch, events)
+    convo.backup_repo = _FakeBackup()
+    ScriptedClient.scripts = [lambda n: FakeResult(content="done")]
+    convo._dispatch_worker("edits", "run a command")
+    assert _wait_worker(convo, "wk1") == "done"
+
+    out = convo._revert_worker_tool("wk1")
+    assert convo.backup_repo.reverted_paths is None
+    assert convo.backup_repo.reverted_to is None
+    assert "can't tell its work from anyone else's" in out
+    with convo._workers_lock:
+        assert convo._workers["wk1"]["status"] == "done"      # not "reverted"
+
+
+def test_a_denied_write_is_not_reverted(monkeypatch, events):
+    """`wrote` is a record of INTENT -- it is written when the tool call is
+    announced, before the permission engine has had its say. Intersecting it
+    with what actually differs from the baseline is what keeps a refused write
+    out of the revert set."""
+    convo = _convo(monkeypatch, events)
+    convo.backup_repo = _FakeBackup()
+    convo.backup_repo.changes = [("M", "auth.py")]
+    ScriptedClient.scripts = [lambda n: FakeResult(content="done")]
+    convo._dispatch_worker("edits", "edit two files")
+    assert _wait_worker(convo, "wk1") == "done"
+    _wrote(convo, "wk1", "auth.py", "denied.py")
+
+    convo._revert_worker_tool("wk1")
+    assert convo.backup_repo.reverted_paths == ["auth.py"]
+
+
+def test_worker_changes_says_which_half_it_can_undo(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    convo.backup_repo = _FakeBackup()
+    ScriptedClient.scripts = [lambda n: FakeResult(content="done")]
+    convo._dispatch_worker("edits", "edit auth")
+    assert _wait_worker(convo, "wk1") == "done"
+    _wrote(convo, "wk1", "auth.py")
+
+    said = convo._worker_changes_tool("wk1")
+    assert "1 were written by 'edits' itself" in said
+    assert "revert_worker will leave them alone" in said
 
 
 def test_revert_worker_without_backups(monkeypatch, events):
@@ -381,3 +465,268 @@ def test_persist_voice_turn_skips_user_for_announcements():
     api._persist_voice_turn(cs, "")   # announcement: no user utterance
     assert tr.users == []             # nothing logged as user input
     assert tr.assistants == ["The build finished."]
+
+
+# --------------------------------------------------------------------- #
+# What the chain SAYS about a worker
+#
+# Four of these were wrong in the same direction: a worker that did not reach
+# "done" was described as a failure. A worker the user stopped on purpose, or
+# whose changes they undid themselves, is not a crash -- and telling the model
+# it crashed invites it to diagnose and re-run the very thing that was just
+# cancelled.
+
+def _park(convo, wid, **fields):
+    """Put a worker straight into the registry in a terminal state."""
+    row = {"id": wid, "name": fields.pop("name", wid), "task": "t", "result": "",
+           "error": None, "baseline": None, "changes": [], "wrote": [],
+           "kind": "code", "status": "done"}
+    row.update(fields)
+    with convo._workers_lock:
+        convo._workers[wid] = row
+
+
+def test_check_workers_counts_every_status(monkeypatch, events):
+    """The header used to count only running/done/error, so a chat whose one
+    worker had been stopped opened with "0 running, 0 done, 0 failed" and then
+    listed it."""
+    convo = _convo(monkeypatch, events)
+    _park(convo, "wk1", name="a", status="stopped")
+    _park(convo, "wk2", name="b", status="reverted")
+    _park(convo, "wk3", name="c", status="done", result="fine")
+    head = convo._check_workers().splitlines()[0]
+    assert "1 done" in head
+    assert "1 stopped" in head
+    assert "1 reverted" in head
+    assert "0 " not in head          # nothing padded out with empty categories
+
+
+def test_a_reverted_worker_is_not_reported_as_a_crash(monkeypatch, events):
+    """It fell into the else branch, whose error field is None -- so undoing a
+    worker printed "FAILED -- None"."""
+    convo = _convo(monkeypatch, events)
+    _park(convo, "wk1", name="a", status="reverted")
+    out = convo._check_workers()
+    assert "REVERTED" in out
+    assert "FAILED" not in out
+    assert "None" not in out
+
+
+def test_a_stopped_worker_is_not_reported_as_failed(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    _park(convo, "wk1", name="a", status="stopped")
+    out = convo._check_workers()
+    assert "STOPPED by the user" in out
+    assert "FAILED" not in out
+
+
+# --------------------------------------------------------------------- #
+# Which worker a spoken reference means
+
+def test_a_short_name_is_not_matched_inside_an_unrelated_sentence(monkeypatch, events):
+    """`nm in ident` matched a worker named "a" against almost anything anyone
+    could say, and then steered or stopped whichever was first."""
+    convo = _convo(monkeypatch, events)
+    _park(convo, "wk1", name="a", status="running")
+    _park(convo, "wk2", name="dark-mode", status="running")
+    # "a" is a substring of every one of these, and used to win all of them.
+    for said in ("please stop what you are doing",
+                 "how is the dark mode work going",
+                 "cancel that"):
+        assert convo._resolve_worker(said) is None, said
+    # The one that should still resolve, does.
+    assert convo._resolve_worker("dark-mode") == "wk2"
+
+
+def test_a_fragment_of_the_name_still_matches(monkeypatch, events):
+    """The useful direction: people say part of a name, not a sentence the
+    name happens to contain."""
+    convo = _convo(monkeypatch, events)
+    _park(convo, "wk1", name="fix-login-redirect", status="running")
+    assert convo._resolve_worker("login") == "wk1"
+    assert convo._resolve_worker("FIX-LOGIN-REDIRECT") == "wk1"
+
+
+def test_the_most_recent_match_wins(monkeypatch, events):
+    """"stop the browser one" means the one just started, not its namesake
+    from ten minutes ago."""
+    convo = _convo(monkeypatch, events)
+    _park(convo, "wk1", name="browser", status="running")
+    _park(convo, "wk2", name="browser", status="running")
+    assert convo._resolve_worker("browser") == "wk2"
+
+
+def test_a_running_worker_is_preferred_over_a_finished_one(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    _park(convo, "wk1", name="build", status="running")
+    _park(convo, "wk2", name="build", status="done")
+    assert convo._resolve_worker("build") == "wk1"
+
+
+# --------------------------------------------------------------------- #
+# A worker that dies half way through
+
+def test_a_crashed_worker_still_records_what_it_changed(monkeypatch, events):
+    """This was skipped on the error path, so worker_changes and revert_worker
+    both believed a crashed worker had touched nothing -- and a worker that
+    died half way through is the one you most want to undo."""
+    convo = _convo(monkeypatch, events)
+    convo.backup_repo = _FakeBackup()
+
+    def boom(n):
+        raise RuntimeError("the sub-agent fell over")
+    ScriptedClient.scripts = [boom]
+    convo._dispatch_worker("doomed", "try something")
+    assert _wait_worker(convo, "wk1") == "error"
+
+    with convo._workers_lock:
+        assert convo._workers["wk1"]["changes"] == [("M", "auth.py"), ("A", "settings.js")]
+    assert "auth.py" in convo._worker_changes_tool("wk1")
+
+
+def test_a_crashed_workers_own_writes_can_be_undone(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    convo.backup_repo = _FakeBackup()
+
+    def boom(n):
+        raise RuntimeError("fell over")
+    ScriptedClient.scripts = [boom]
+    convo._dispatch_worker("doomed", "try something")
+    assert _wait_worker(convo, "wk1") == "error"
+    _wrote(convo, "wk1", "auth.py")
+
+    convo._revert_worker_tool("wk1")
+    assert convo.backup_repo.reverted_paths == ["auth.py"]
+
+
+# --------------------------------------------------------------------- #
+# Attributing a write to the worker that made it
+
+def test_an_absolute_path_is_matched_against_the_diff(monkeypatch, events):
+    """write_file takes whatever the model wrote; the baseline diff speaks in
+    repo-relative paths. Without bringing the two into the same terms, nothing
+    ever intersects and every revert refuses."""
+    convo = _convo(monkeypatch, events)
+    convo.backup_repo = _FakeBackup()
+    ScriptedClient.scripts = [lambda n: FakeResult(content="done")]
+    convo._dispatch_worker("edits", "edit auth")
+    assert _wait_worker(convo, "wk1") == "done"
+    convo._emit_subagent_stream(
+        "wk1", "tool_call", name="write_file",
+        args={"path": str(Path(convo.workdir) / "auth.py")})
+
+    convo._revert_worker_tool("wk1")
+    assert convo.backup_repo.reverted_paths == ["auth.py"]
+
+
+def test_a_path_outside_the_project_is_not_attributed(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    _park(convo, "wk1", name="w", status="running")
+    convo._emit_subagent_stream("wk1", "tool_call", name="write_file",
+                                args={"path": "/etc/passwd"})
+    with convo._workers_lock:
+        assert convo._workers["wk1"]["wrote"] == []
+
+
+def test_a_read_tool_is_not_recorded_as_a_write(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    _park(convo, "wk1", name="w", status="running")
+    for tool in ("read_file", "grep", "run_command", "list_dir"):
+        convo._emit_subagent_stream("wk1", "tool_call", name=tool,
+                                    args={"path": "auth.py"})
+    with convo._workers_lock:
+        assert convo._workers["wk1"]["wrote"] == []
+
+
+def test_attribution_does_not_swallow_the_event(monkeypatch, events):
+    """The recording is a side effect on the way past. If it ever stopped the
+    forward, the sub-agent's live thread would go dark in the UI -- and the
+    only symptom would be a panel that had quietly stopped updating."""
+    convo = _convo(monkeypatch, events)
+    _park(convo, "wk1", name="w", status="running")
+    convo._emit_subagent_stream("wk1", "tool_call", name="write_file",
+                                args={"path": "auth.py"})
+    assert ("wk1", "tool_call") in [(i, k) for i, k, _d in events.streams]
+    with convo._workers_lock:
+        assert convo._workers["wk1"]["wrote"] == ["auth.py"]
+
+
+def test_an_event_for_an_unknown_worker_is_harmless(monkeypatch, events):
+    """spawn_agents sub-agents share this funnel and are not workers at all."""
+    convo = _convo(monkeypatch, events)
+    convo._emit_subagent_stream("sub7", "tool_call", name="write_file",
+                                args={"path": "auth.py"})
+
+
+# --------------------------------------------------------------------- #
+# What the coding agent is told after the fact
+
+def test_a_stopped_worker_is_not_reported_to_the_coding_agent_as_failed():
+    from glmcode.prompts import worker_report_note
+    said = worker_report_note("w", "stopped", "partial work")
+    assert "failed" not in said
+    assert "stopped by you" in said
+
+
+def test_a_reverted_worker_is_described_as_undone():
+    from glmcode.prompts import worker_report_note
+    said = worker_report_note("w", "reverted", "")
+    assert "failed" not in said
+    assert "undone" in said
+
+
+def test_a_real_failure_is_still_called_a_failure():
+    from glmcode.prompts import worker_report_note
+    assert "failed" in worker_report_note("w", "error", "traceback")
+
+
+def test_an_unknown_status_does_not_claim_success_or_failure():
+    """A status this map has never seen should not be guessed in either
+    direction -- both guesses are a statement about work nobody checked."""
+    from glmcode.prompts import worker_report_note
+    said = worker_report_note("w", "something-new", "")
+    assert "failed" not in said
+    assert "successfully" not in said
+
+
+# --------------------------------------------------------------------- #
+# A worker that is still going
+
+def test_reverting_a_running_worker_is_refused(monkeypatch, events):
+    """The phone's revert_worker has always refused this. Reverting under a
+    worker that is still writing is a race with no good outcome: it carries on
+    from where it was and the tree ends up half one thing and half the other."""
+    convo = _convo(monkeypatch, events)
+    convo.backup_repo = _FakeBackup()
+    _park(convo, "wk1", name="busy", status="running",
+          baseline="commit1", changes=[("M", "auth.py")], wrote=["auth.py"])
+
+    out = convo._revert_worker_tool("busy")
+    assert "stop it first" in out
+    assert convo.backup_repo.reverted_paths is None
+    with convo._workers_lock:
+        assert convo._workers["wk1"]["status"] == "running"
+
+
+def test_worker_changes_on_a_running_worker_does_not_claim_nothing(monkeypatch, events):
+    """`changes` is only filled in when the worker finishes, so an empty list
+    mid-flight means "not known yet". Reporting it as "changed nothing" is a
+    wrong answer about work still in progress."""
+    convo = _convo(monkeypatch, events)
+    convo.backup_repo = _FakeBackup()
+    _park(convo, "wk1", name="busy", status="running", baseline="commit1")
+
+    said = convo._worker_changes_tool("busy")
+    assert "still running" in said
+    assert "auth.py" in said          # read live, from the baseline
+
+
+def test_a_running_worker_with_nothing_yet_says_so(monkeypatch, events):
+    convo = _convo(monkeypatch, events)
+    convo.backup_repo = _FakeBackup()
+    convo.backup_repo.changes = []
+    _park(convo, "wk1", name="busy", status="running", baseline="commit1")
+
+    said = convo._worker_changes_tool("busy")
+    assert "still running" in said
+    assert "hasn't changed any files yet" in said

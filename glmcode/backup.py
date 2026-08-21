@@ -203,6 +203,66 @@ class BackupRepo:
             patch = patch[:max_chars] + f"\n... [truncated at {max_chars} chars]"
         return patch
 
+    def revert_paths_to(self, commit: str, paths: list[str]) -> list[str]:
+        """Put JUST these paths back to how they were at `commit`.
+
+        The whole-tree alternative is revert_to() below, and for undoing one
+        background worker it is the wrong instrument: `reset --hard` throws
+        away everything done since that worker started -- another worker's
+        work, and the user's own edits -- and `clean -fd` additionally deletes
+        untracked files that were never part of any diff. Neither is what
+        "revert this worker" means.
+
+        A path that did not exist at `commit` is removed, because that is what
+        undoing its creation is. Returns the paths actually touched.
+        """
+        if not available() or not self._initialized():
+            raise RuntimeError("no backups exist for this chat yet")
+        # Intent-to-add first, exactly as changed_files_since does, so a file
+        # CREATED since the baseline is in the index and _tracked() can tell it
+        # apart from one the shadow repo excludes and has never seen. This is
+        # what makes "delete it" safe for the first and impossible for the
+        # second; without it the two are indistinguishable.
+        self._run("add", "-A", "-N", check=False)
+        root = self.project_dir.resolve()
+        done = []
+        for path in paths:
+            target = (self.project_dir / path).resolve()
+            # Same guard revert_file uses. These paths come from a diff this
+            # class produced, but a check that only holds because of where the
+            # caller got its input is not a check.
+            if not str(target).startswith(str(root)):
+                continue
+            existed = self._run("cat-file", "-e", f"{commit}:{path}",
+                                check=False).returncode == 0
+            if existed:
+                self._run("checkout", commit, "--", path, check=False)
+            else:
+                # "Not in the baseline" has TWO causes, and only one of them
+                # means "this file was created since". The other is that the
+                # shadow repo never tracks it at all -- DEFAULT_EXCLUDES holds
+                # .git/, node_modules/, build output -- and deleting one of
+                # those is destroying something no snapshot can put back. The
+                # first version of this deleted the project's real .git/config,
+                # which is why the check is here and not left to the caller.
+                if not self._tracked(path):
+                    continue
+                self._run("rm", "--cached", "--ignore-unmatch", "-q", "--", path,
+                          check=False)
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    continue
+            done.append(path)
+        return done
+
+    def _tracked(self, path: str) -> bool:
+        """Does the shadow repo manage this path? Excluded paths (.git/,
+        node_modules/, build output) answer no, and nothing may delete those on
+        a snapshot's behalf -- there is no snapshot of them to restore from."""
+        out = self._run("ls-files", "--", path, check=False)
+        return out.returncode == 0 and bool(out.stdout.strip())
+
     def revert_to(self, commit: str) -> None:
         """Reset the project dir's actual files back to how they looked at
         `commit`. Does not touch the chat conversation -- only files."""

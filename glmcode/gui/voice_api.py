@@ -39,7 +39,7 @@ from ..config import (CONFIG_DIR, find_provider, default_provider,
                       provider_key as cfg_provider_key)
 from ..errors import ToolError
 from .. import live
-from ..prompts import worker_report_note
+from ..prompts import _WORKER_OUTCOMES, worker_report_note
 from ..tools import CONVERSATIONAL_SCHEMAS
 from .events import WebEvents
 from .media import _data_uri
@@ -389,7 +389,10 @@ class VoiceApi:
             return {"error": "no voice session"}
         if not cs.convo_lock.acquire(blocking=False):
             return {"error": "busy"}
-        outcome = "finished successfully" if status == "done" else "failed"
+        # The same map the written note uses. Telling someone out loud that
+        # the worker "failed" when they stopped it themselves is the spoken
+        # version of the same wrong statement.
+        outcome = _WORKER_OUTCOMES.get(status, "finished")
         result = str(result or "")[:2000]
         note = (f"[System note — not from the user] The background worker "
                 f"'{name}' just {outcome}. Its result:\n{result}\n\n"
