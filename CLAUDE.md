@@ -1505,11 +1505,69 @@ Three things this turned up, none of them visible by looking:
 **The sidebar starts OPEN**, and the first version of the rail hid itself
 whenever it was — so the rail was invisible in the app's normal state. The chat
 shifts right rather than shrinking, so the margin is still there and the rail
-moves with it; it only disappears when the window genuinely has no room
+moves with it; the ITEMS only disappear when the window genuinely has no room
 (1100px, or 1368px with the sidebar).
+
+**The voice controls are exempt from that, and the exemption is not a
+refinement.** "Nothing may live only in the rail" was true of every item and
+stopped being true the moment the dock moved in: mute, the mode and
+push-to-talk have no second home now that the full-screen overlay is gone. And
+the thresholds are 1100px, or 1368px *with the sidebar open* — the default
+window is 1280 with the sidebar open, inside both. So this was never a
+narrow-window edge case; it was every window, and the symptom was a live
+microphone with no way to stop it. `body.voice-on` spares a session, and where
+the margin has collapsed the rail stops being a margin column and becomes a
+small dock at the bottom-left above the composer, carrying the four controls
+alone. The items still go, because the reason they may go is unchanged.
 
 `body.no-session` disables the whole composer, Talk included. That is correct
 and not a special case: a spoken turn has nothing to attach to without a chat.
+
+## `$()` returns a stub, so code outlives its element in silence
+
+A missing id must never throw: that would abort the script and kill the
+`pywebviewready` listener at the bottom of it, freezing the app on launch with
+nothing on screen. So `$()` hands back an inert Proxy. The price is that
+anything still addressing a deleted element goes on *appearing* to work, and
+replacing the voice overlay with the dock deleted four of them at once.
+
+- **The waveform threw sixty times a second.** `canvas.getContext("2d")` on the
+  stub returns `undefined`, and the `requestAnimationFrame` loop raised on
+  `clearRect` for the length of a session — two hundred errors inside one
+  half-second test. The guard above it (`if (!canvas ...) return`) could not
+  help: the stub is truthy, which is the whole point of it.
+- **Dead code is deleted, not left as a no-op.** `addVoiceTurn`,
+  `voiceReplyEl`, `liveCaptionUser` and `liveEndCaptionTurn` were all painting
+  into a `#voice-caption` that no longer exists.
+- **But the WORDS may be worth more than the element.** Twenty-six
+  `setVoiceStatus` calls were writing into the same stub, and "Listening",
+  "Thinking" and "Muted" are the only place the app says which is true — the
+  orb is one animated dot for all three. The text moved onto the orb as its
+  tooltip and `aria-label` rather than going with the element, and the orb
+  stopped being `aria-hidden` because it now carries it.
+
+Worth running when markup is deleted: every `$("…")` id in `app.js` against
+every `id=` in `index.html`. The difference is exactly this class of bug, and
+nothing else reports it.
+
+## Retargeting a test must not aim it at something the harness cannot reach
+
+The live-engine transcript tests read `#voice-caption`, which the dock removed,
+and pointing them at `#chat` instead was wrong in a way that looks right: a
+spoken turn reaches the chat from the **Python** side (`_persist_voice_turn`
+emits `voice_chat_turn`), so in a harness whose backend is a Proxy stub the
+chat is never written and the assertion could only ever be empty.
+
+They assert on the hand-over instead — `liveVoice.heard` / `.said` passed to
+`live_voice_turn` on `turnComplete`, which is the entire input to the record —
+and that pins the same three properties the caption did: both halves kept, one
+turn not carrying the last one's text, and streamed fragments joined into one
+record rather than one each.
+
+The same care applies to driving the UI: `test_push_to_talk.py` clicks the mode
+button **until it reads the mode wanted**, because one button cycling three
+ways means "click once for push-to-talk" is only true from hands-free. A fixed
+click count asserts against whichever mode it happens to land in.
 
 ## Tests
 
