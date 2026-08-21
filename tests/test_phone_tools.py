@@ -19,6 +19,7 @@ import json
 import pathlib
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -34,7 +35,7 @@ needs_node = pytest.mark.skipif(
 # answers with the NEW sha. Everything the phone's write path gets wrong shows
 # up as a rejection rather than as a passing test with a wrong argument.
 PRELUDE = r"""
-const C = require(process.argv[1]);
+const C = require(process.argv[2]);
 function fakeGh(files) {
   files = Object.assign({}, files || {});
   const calls = [];
@@ -71,11 +72,21 @@ function out(o) { console.log("<<<" + JSON.stringify(o) + ">>>"); }
 
 
 def _node(body, files=None):
-    """Run a snippet with the phone's core loaded and fakeGh available."""
+    """Run a snippet with the phone's core loaded and fakeGh available.
+
+    Written to a file rather than passed with `node -e`. A couple of these
+    scripts embed a repository of a thousand files to prove that grep stops
+    early, and Windows caps a command line at ~32KB -- so the -e form failed
+    there with "the filename or extension is too long", on the one platform
+    where nothing about the test was actually different.
+    """
     script = PRELUDE + "\n(async () => {\n" + body + "\n})().catch((e) => {" \
              "console.error(e && e.stack || e); process.exit(1); });"
-    r = subprocess.run(["node", "-e", script, str(CORE_JS)],
-                       capture_output=True, text=True, encoding="utf-8", timeout=60)
+    with tempfile.TemporaryDirectory() as tmp:
+        f = pathlib.Path(tmp) / "run.js"
+        f.write_text(script, encoding="utf-8")
+        r = subprocess.run(["node", str(f), str(CORE_JS)],
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert r.returncode == 0, r.stderr
     body = r.stdout
     assert "<<<" in body, r.stdout + r.stderr
