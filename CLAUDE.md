@@ -1409,6 +1409,43 @@ explicitly rather than coming back blank, the element cap is 200, and the step
 limit is 200. If the snapshots ARE arriving full and it still flails, that is
 the model. If they come back empty, that is a different bug.
 
+## Voice is a dock in the corner, not a screen over the app
+
+Reported as three complaints, which turned out to be one shape seen from three
+sides:
+
+> *"there's no reason for that box to cover the whole screen"* — *"there's no
+> way to look manually on subagents that started in voice mode"* — *"the chat
+> is displayed in the normal chat, and also in the voice pop up"*
+
+The panel was `position: fixed; inset: 0` with a scrim and `aria-modal`, so
+starting a voice conversation took the app away. The thing it covered most
+expensively was the **sub-agent inspector** — the one panel that could show you
+the worker it had just dispatched for you, which is the whole reason you spoke
+to it. And it carried a scrolling transcript of a conversation that already
+lives in the chat, which is most of why it had to be screen-sized at all.
+
+- **`pointer-events` are on the CARD, not the dock.** The dock spans a column
+  of the window so the card can sit in the corner; if the column took clicks,
+  the corner of the app would silently stop responding.
+- **Below `--z-sheet`, above the chat.** Settings has to open over it — the
+  dock's own Settings button depends on that.
+- **The worker pills are `<button>`s that open the normal inspector.** A
+  worker's id IS its sub-agent id, so there is nothing to build: the pill opens
+  the same panel everything else uses. They were `<div>`s, so nothing said they
+  could be clicked and no keyboard could reach them.
+- **The dock steps aside when the inspector opens.** They occupy the same
+  corner, and clicking a pill is what opens the inspector — so they would
+  collide on the one interaction that matters most.
+
+**The transcript is trimmed, not deleted, and the reason is a timing one.** A
+spoken turn reaches the chat through `voice_chat_turn`, which only fires once
+the coding agent's turn lock is free; while a turn is running it queues (see
+*Talking and typing are one conversation*). For that stretch the dock is the
+only place the exchange is visible, so it keeps the newest turns and nothing
+older. `tests/desktop_ui/test_voice_dock.py` asserts a spoken turn still
+reaches the chat, because that is what makes dropping the log safe.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by

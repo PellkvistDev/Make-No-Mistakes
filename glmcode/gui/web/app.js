@@ -5932,7 +5932,10 @@ async function startVoice(viaWake = false) {
   applyGateToggleUI();
   renderVoiceWorkers();
   $("voice-caption").textContent = "";
-  $("voice-overlay").hidden = false;
+  $("voice-dock").classList.remove("collapsed");
+  $("voice-collapse").setAttribute("aria-expanded", "true");
+  $("voice-collapse").setAttribute("aria-label", "Collapse");
+  $("voice-dock").hidden = false;
   $("voice-chip").setAttribute("aria-pressed", "true");
   $("voice-chip").classList.add("active");
   // Web Audio analyser for the energy VAD.
@@ -6000,7 +6003,7 @@ function stopVoice() {
   voice.recording = false;
   if (voice.stream) { voice.stream.getTracks().forEach((t) => t.stop()); voice.stream = null; }
   if (voice.ctx) { try { voice.ctx.close(); } catch (e) { /* ignore */ } voice.ctx = null; }
-  $("voice-overlay").hidden = true;
+  $("voice-dock").hidden = true;
   $("voice-chip").setAttribute("aria-pressed", "false");
   $("voice-chip").classList.remove("active");
   try { api().voice_mode(false); } catch (e) { /* ignore */ }
@@ -6182,7 +6185,19 @@ function submitVoiceRequest(text) {
   }
 }
 
-// -- scrolling transcript in the overlay ---------------------------------- //
+// -- the latest exchange, in the dock ------------------------------------- //
+//
+// This was a scrolling transcript, and it stopped being one when spoken turns
+// started reaching the real chat (voice_chat_turn): a log here was the same
+// conversation shown twice, and it was most of why the panel had to be the
+// size of the screen.
+//
+// It is not gone entirely, because the chat cannot always show it yet. A
+// spoken turn is only written into the chat when the coding agent's turn lock
+// is free; while a turn is running it queues, so for that stretch this is the
+// only place the exchange is visible. Keeping the newest one covers that
+// without reprinting the history.
+const VOICE_KEEP_TURNS = 2;
 function addVoiceTurn(text, isReply) {
   const cap = $("voice-caption");
   if (!isReply) {
@@ -6196,6 +6211,7 @@ function addVoiceTurn(text, isReply) {
     voice.curTurnEl = block;
     voice.replyEl = null;
   }
+  while (cap.children.length > VOICE_KEEP_TURNS) cap.removeChild(cap.firstChild);
   cap.scrollTop = cap.scrollHeight;
 }
 // Returns the live <.voice-it> element for the reply being spoken, creating a
@@ -6364,16 +6380,26 @@ function renderVoiceWorkers() {
   if (!el) return;
   const ws = Object.values(voice.workers);
   if (!ws.length) { el.innerHTML = ""; return; }
-  el.innerHTML = ws.map((w) => {
+  el.innerHTML = "";
+  for (const w of ws) {
     const cls = w.status === "running" ? "vw-run"
       : (w.status === "done" ? "vw-done" : (w.status === "stopped" ? "vw-stop" : "vw-err"));
     const icon = w.status === "running" ? "●"
       : (w.status === "done" ? "✓" : (w.status === "stopped" ? "◼" : "✕"));
     const act = (w.status === "running" && w.activity)
       ? `<span class="vw-activity">${esc(w.activity)}</span>` : "";
-    return `<div class="voice-worker ${cls}"><span class="vw-icon">${icon}</span>` +
-           `<span class="vw-name">${esc(w.name)}</span>${act}</div>`;
-  }).join("");
+    // A button, not a div. A worker's id IS its sub-agent id, so the pill can
+    // open the same inspector everything else uses -- which used to be
+    // unreachable from voice mode, because the voice screen covered it.
+    const b = document.createElement("button");
+    b.className = "voice-worker " + cls;
+    b.type = "button";
+    b.title = "Open this worker's thread";
+    b.innerHTML = `<span class="vw-icon">${icon}</span>` +
+                  `<span class="vw-name">${esc(w.name)}</span>${act}`;
+    b.addEventListener("click", () => openSubagentPanel(w.id, w.name, w.status));
+    el.appendChild(b);
+  }
 }
 
 // Turn a worker's streamed action into a short human activity line.
@@ -6453,7 +6479,8 @@ function handleVoiceEvent(ev) {
     }
     case "worker_update": {
       const prev = voice.workers[ev.id] || {};
-      voice.workers[ev.id] = { name: ev.name, status: ev.status, activity: prev.activity || "" };
+      voice.workers[ev.id] = { id: ev.id, name: ev.name, status: ev.status,
+                               activity: prev.activity || "" };
       renderVoiceWorkers();
       if (ev.status === "done" || ev.status === "error") {
         earcon(ev.status === "done" ? "done" : "stop");  // a cue before it speaks up
@@ -6844,6 +6871,17 @@ function refreshWake() {
 
 $("voice-chip").addEventListener("click", () => { if (voice.active) stopVoice(); else startVoice(false); });
 $("voice-close").addEventListener("click", stopVoice);
+/* Collapse to just the orb.
+ *
+ * The state the old full-screen panel could not have at all: listening, and
+ * entirely out of the way. Remembered for the session rather than persisted --
+ * it is a "right now I want the screen" choice, not a preference. */
+$("voice-collapse").addEventListener("click", () => {
+  const dock = $("voice-dock");
+  const on = dock.classList.toggle("collapsed");
+  $("voice-collapse").setAttribute("aria-expanded", String(!on));
+  $("voice-collapse").setAttribute("aria-label", on ? "Expand" : "Collapse");
+});
 $("voice-mute").addEventListener("click", toggleMute);
 $("voice-replay").addEventListener("click", replayLastReply);
 $("voice-settings").addEventListener("click", openSettings);
