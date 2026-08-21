@@ -1530,7 +1530,6 @@ function noteWorker(ev) {
   const prev = liveWorkers[ev.id] || {};
   liveWorkers[ev.id] = { id: ev.id, name: ev.name || prev.name || ev.id,
                          status: ev.status, activity: prev.activity || "" };
-  renderVoiceWorkers();
   renderActivityRail();
 }
 
@@ -1540,7 +1539,6 @@ function noteWorkerActivity(ev) {
   const line = workerActivity(ev.kind, ev);
   if (!line) return;
   w.activity = line;
-  renderVoiceWorkers();
   renderActivityRail();
 }
 const subagentSteerPending = {}; // aid -> queued (undelivered) steering text, or absent
@@ -5952,10 +5950,8 @@ async function startVoice(viaWake = false) {
   voice.curTurnEl = null;
   voice.replyEl = null;
   $("voice-perm").hidden = true;
-  $("voice-replay").hidden = true;
   $("voice-mute").setAttribute("aria-pressed", "false");
   $("voice-mute").classList.remove("active");
-  $("voice-caption").innerHTML = "";
   voice.sens = (settings && settings.voice_sensitivity) || 1.0;
   voice.pttKey = (settings && settings.voice_ptt_key) || "Space";
   voice.endpointMs = (settings && settings.voice_silence_ms) || 750;
@@ -5966,12 +5962,9 @@ async function startVoice(viaWake = false) {
   voice.gated = !!viaWake;
   voice.gateOpen = true;
   applyGateToggleUI();
-  renderVoiceWorkers();
-  $("voice-caption").textContent = "";
-  $("voice-dock").classList.remove("collapsed");
-  $("voice-collapse").setAttribute("aria-expanded", "true");
-  $("voice-collapse").setAttribute("aria-label", "Collapse");
+  // The dock lives in the rail, so showing one means rendering the other.
   $("voice-dock").hidden = false;
+  renderActivityRail();
   $("voice-chip").setAttribute("aria-pressed", "true");
   $("voice-chip").classList.add("active");
   setTalkState(true);
@@ -6413,32 +6406,6 @@ function classifyPermission(text) {
   return null;
 }
 
-function renderVoiceWorkers() {
-  const el = $("voice-workers");
-  if (!el) return;
-  const ws = Object.values(liveWorkers);
-  if (!ws.length) { el.innerHTML = ""; return; }
-  el.innerHTML = "";
-  for (const w of ws) {
-    const cls = w.status === "running" ? "vw-run"
-      : (w.status === "done" ? "vw-done" : (w.status === "stopped" ? "vw-stop" : "vw-err"));
-    const icon = w.status === "running" ? "●"
-      : (w.status === "done" ? "✓" : (w.status === "stopped" ? "◼" : "✕"));
-    const act = (w.status === "running" && w.activity)
-      ? `<span class="vw-activity">${esc(w.activity)}</span>` : "";
-    // A button, not a div. A worker's id IS its sub-agent id, so the pill can
-    // open the same inspector everything else uses -- which used to be
-    // unreachable from voice mode, because the voice screen covered it.
-    const b = document.createElement("button");
-    b.className = "voice-worker " + cls;
-    b.type = "button";
-    b.title = "Open this worker's thread";
-    b.innerHTML = `<span class="vw-icon">${icon}</span>` +
-                  `<span class="vw-name">${esc(w.name)}</span>${act}`;
-    b.addEventListener("click", () => openSubagentPanel(w.id, w.name, w.status));
-    el.appendChild(b);
-  }
-}
 
 // Turn a worker's streamed action into a short human activity line.
 function workerActivity(kind, data) {
@@ -6471,7 +6438,6 @@ function handleVoiceEvent(ev) {
     case "content": {
       voice._replyBuf = (voice._replyBuf || "") + (ev.text || "");
       voiceReplyEl().textContent = voice._replyBuf;
-      $("voice-caption").scrollTop = $("voice-caption").scrollHeight;
       break;
     }
     case "play_audio":
@@ -6542,7 +6508,6 @@ function handleVoiceEvent(ev) {
       voice.turnComplete = true;
       if (voice.replyChunks.length) {
         voice.lastReply = voice.replyChunks.slice();
-        $("voice-replay").hidden = false;
       }
       if (!ttsPlaying && voice.active) onVoiceTtsIdle();
       break;
@@ -6572,9 +6537,7 @@ function setVoicePtt(on) {
   if (voice.recording) endUtterance();
   voice.pttHeld = false;
   voice.ptt = on;
-  const t = $("voice-ptt-toggle");
-  t.setAttribute("aria-checked", String(on));
-  t.textContent = on ? "Push-to-talk" : "Hands-free";
+  renderVoiceMode();
   $("voice-ptt-btn").hidden = !on;
   // A hold that was in progress is over: without this the button keeps its
   // held styling and comes back green the next time push-to-talk is enabled.
@@ -6588,12 +6551,51 @@ function setVoicePtt(on) {
   processAnnounceQueue();
 }
 
-function applyGateToggleUI() {
-  const t = $("voice-gate-toggle");
-  if (!t) return;
-  t.setAttribute("aria-checked", String(!!voice.gated));
-  t.classList.toggle("on", !!voice.gated);
+/* One control, three modes.
+ *
+ * It was two independent toggles -- "Wake each turn" and "Hands-free /
+ * push-to-talk" -- which between them could express the same listening mode
+ * two different ways, and neither of them named the third. There are three
+ * ways this listens and now there is one button that says which:
+ *
+ *   hands-free    always listening, act on whatever you say
+ *   push-to-talk  hold the key or the button to be heard
+ *   wake word     listening, but each request needs the word first
+ *
+ * The underlying flags are unchanged -- voice.ptt and voice.gated are what the
+ * audio path actually reads -- this is the only thing that sets them, so they
+ * can no longer disagree with what the button claims. */
+const VOICE_MODES = ["hands-free", "push-to-talk", "wake word"];
+
+function voiceMode() {
+  if (voice.ptt) return "push-to-talk";
+  return voice.gated ? "wake word" : "hands-free";
 }
+
+function renderVoiceMode() {
+  const b = $("voice-mode");
+  if (!b) return;
+  const m = voiceMode();
+  b.textContent = m;
+  b.dataset.mode = m;
+  b.title = {
+    "hands-free": "Hands-free — it acts on whatever you say. Click for push-to-talk.",
+    "push-to-talk": "Push-to-talk — hold the button or key to be heard. Click for wake word.",
+    "wake word": `Wake word — say “${(settings.voice_wake_word || "hey assistant")}” before each request. Click for hands-free.`,
+  }[m];
+}
+
+function cycleVoiceMode() {
+  const next = VOICE_MODES[(VOICE_MODES.indexOf(voiceMode()) + 1) % VOICE_MODES.length];
+  // Set both flags every time. Going from push-to-talk to wake word has to
+  // clear ptt AND set gated; setting only the one that "changed" is how the
+  // two toggles used to leave the pair in a state neither of them showed.
+  setVoicePtt(next === "push-to-talk");
+  setVoiceGated(next === "wake word");
+  renderVoiceMode();
+}
+
+function applyGateToggleUI() { renderVoiceMode(); }
 function setVoiceGated(on) {
   voice.gated = !!on;
   if (!voice.gated) {
@@ -6909,26 +6911,12 @@ $("voice-chip").addEventListener("click", () => { if (voice.active) stopVoice();
    known spot and it is where the wake-word "armed" state has always shown --
    but this is the one meant to be found. */
 $("talk-btn").addEventListener("click", () => { if (voice.active) stopVoice(); else startVoice(false); });
-$("voice-close").addEventListener("click", stopVoice);
-/* Collapse to just the orb.
- *
- * The state the old full-screen panel could not have at all: listening, and
- * entirely out of the way. Remembered for the session rather than persisted --
- * it is a "right now I want the screen" choice, not a preference. */
-$("voice-collapse").addEventListener("click", () => {
-  const dock = $("voice-dock");
-  const on = dock.classList.toggle("collapsed");
-  $("voice-collapse").setAttribute("aria-expanded", String(!on));
-  $("voice-collapse").setAttribute("aria-label", on ? "Expand" : "Collapse");
-});
+
 $("voice-mute").addEventListener("click", toggleMute);
-$("voice-replay").addEventListener("click", replayLastReply);
-$("voice-settings").addEventListener("click", openSettings);
-$("voice-gate-toggle").addEventListener("click", () => setVoiceGated(!voice.gated));
+$("voice-mode").addEventListener("click", cycleVoiceMode);
 $("voice-perm-yes").addEventListener("click", () => resolvePerm("y"));
 $("voice-perm-always").addEventListener("click", () => resolvePerm("a"));
 $("voice-perm-no").addEventListener("click", () => resolvePerm("n"));
-$("voice-ptt-toggle").addEventListener("click", () => setVoicePtt(!voice.ptt));
 $("voice-ptt-btn").addEventListener("mousedown", pttPress);
 $("voice-ptt-btn").addEventListener("mouseup", pttRelease);
 $("voice-ptt-btn").addEventListener("mouseleave", pttRelease);
@@ -7093,7 +7081,6 @@ function liveOnMessage(payload) {
     // overlay reads as one conversation rather than resetting to a single
     // line whenever the live engine says anything.
     voiceReplyEl().textContent = liveVoice.said;
-    $("voice-caption").scrollTop = $("voice-caption").scrollHeight;
   }
   // One event can carry several parts at once -- audio and a transcript
   // together -- so every part is looked at rather than the first one.
@@ -7340,15 +7327,11 @@ const RAIL_STATUS_CLASS = {
 
 function railItems() {
   const out = [];
-  if (voice.active) {
-    out.push({ key: "voice", cls: "ai-voice", name: "Voice", what: "",
-               open: () => {
-                 // Un-collapse rather than toggle: the rail is how you find it
-                 // again after collapsing it, so this has one direction.
-                 $("voice-dock").classList.remove("collapsed");
-                 $("voice-collapse").setAttribute("aria-expanded", "true");
-               } });
-  }
+  // Voice is not a ROW here: the dock is directly above these and always
+  // visible while a session is up, so a row saying "Voice" would be a label
+  // for something already on screen. It still has to keep the rail alive,
+  // which railHasVoice does without printing anything.
+
   // Background workers only. spawn_agents sub-agents already appear as
   // clickable rows inside the turn that made them, and repeating those here
   // would be furniture rather than information.
@@ -7366,8 +7349,10 @@ function renderActivityRail() {
   if (!rail || !box) return;
   const items = railItems();
   // Empty means gone, not an empty box: a rail with nothing in it is furniture
-  // that makes the window look busier while saying nothing.
-  rail.hidden = items.length === 0;
+  // that makes the window look busier while saying nothing. The voice dock
+  // lives in here now, so an active session keeps it up on its own -- and
+  // `voice` is one of the items, so that falls out rather than being a case.
+  rail.hidden = items.length === 0 && !voice.active;
   box.innerHTML = "";
   for (const it of items) {
     const b = document.createElement("button");

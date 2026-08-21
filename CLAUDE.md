@@ -1438,13 +1438,31 @@ lives in the chat, which is most of why it had to be screen-sized at all.
   corner, and clicking a pill is what opens the inspector — so they would
   collide on the one interaction that matters most.
 
-**The transcript is trimmed, not deleted, and the reason is a timing one.** A
-spoken turn reaches the chat through `voice_chat_turn`, which only fires once
-the coding agent's turn lock is free; while a turn is running it queues (see
-*Talking and typing are one conversation*). For that stretch the dock is the
-only place the exchange is visible, so it keeps the newest turns and nothing
-older. `tests/desktop_ui/test_voice_dock.py` asserts a spoken turn still
-reaches the chat, because that is what makes dropping the log safe.
+**It is four controls and no more**, and it lives at the top of the left rail,
+above the work it dispatched — the orb, mute, the listening mode, and
+push-to-talk when that is the mode. There is no collapsed state because this
+IS the small state, and no fixed position of its own because the rail places
+it.
+
+**One button, three modes** (`hands-free` / `push-to-talk` / `wake word`). It
+was two independent toggles which between them could express the same listening
+mode two different ways, and neither of them named the third. `voice.ptt` and
+`voice.gated` are what the audio path actually reads, and `cycleVoiceMode` sets
+**both** every time — setting only "the one that changed" is how the old pair
+could land in a state neither toggle displayed.
+
+**The permission card stays, and it is the only thing kept beyond that list.**
+A gated action has to be approvable and "just say yes" is not always heard.
+Hidden at rest, so the dock's resting size is unaffected.
+
+**The transcript is gone from the dock.** The cost is real and was accepted
+deliberately: a spoken turn only reaches the chat once the coding agent's turn
+lock is free, so during a long running turn there is now nowhere the exchange
+is visible. That is the trade for a dock that is always this size.
+
+**Historic, kept because it explains the shape**: the transcript was trimmed
+rather than deleted first, for exactly that timing reason.
+
 
 ## Actions go where the hands are; state goes in the periphery
 

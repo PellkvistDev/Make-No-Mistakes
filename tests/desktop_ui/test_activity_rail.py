@@ -207,11 +207,20 @@ def test_a_finished_worker_stops_looking_live(desktop):
     assert "ai-done" in done
 
 
-def test_a_live_voice_session_is_an_item(desktop):
+def test_a_live_voice_session_keeps_the_rail_up_without_a_row(desktop):
+    """Voice is not a row here: the dock sits at the top of this rail and is
+    always visible while a session is up, so a row saying "Voice" would be a
+    label for something already on screen. It still has to hold the rail open."""
     _app(desktop)
-    desktop.page.evaluate("() => { voice.active = true; renderActivityRail(); }")
+    desktop.page.evaluate("""() => {
+      voice.active = true;
+      document.getElementById('voice-dock').hidden = false;
+      renderActivityRail();
+    }""")
     desktop.page.wait_for_timeout(150)
-    assert "Voice" in desktop.page.text_content("#activity-rail")
+    assert desktop.page.is_visible("#activity-rail")
+    assert desktop.page.is_visible("#voice-orb")
+    assert desktop.page.query_selector(".activity-item") is None
 
 
 # --------------------------------------------------------------------- #
