@@ -274,50 +274,73 @@
 </aside>
 
 <!-- Voice conversation overlay (speech-to-speech) -->
-<div id="voice-overlay" class="voice-overlay" hidden>
-  <div class="voice-panel glass-strong" role="dialog" aria-modal="true" aria-label="Voice conversation">
+<!-- The voice dock.
+     NOT a modal, and that is the whole point of its shape. It used to be a
+     full-screen overlay with a scrim over the app, so turning voice on took
+     the app away: you could not read the chat behind it, open Settings, or
+     look at a sub-agent it had just dispatched for you. Nothing in here ever
+     needed that -- talking to it is something you do WHILE looking at things.
+
+     The transcript is gone from here too. Spoken turns go into the real chat
+     (voice_chat_turn), so a scrolling copy in the dock was the same
+     conversation twice. What is left is the LATEST exchange only, which the
+     chat cannot show while a coding turn holds the lock. -->
+<div id="voice-dock" class="voice-dock" hidden>
+  <div class="voice-card glass-strong" role="region" aria-label="Voice conversation">
     <div class="voice-head">
-      <h2>Voice</h2>
+      <div id="voice-orb" class="voice-orb" aria-hidden="true"><span class="voice-orb-core"></span></div>
+      <div class="voice-head-text">
+        <div id="voice-status" class="voice-status">Starting…</div>
+        <canvas id="voice-wave" class="voice-wave" width="240" height="26" aria-hidden="true"></canvas>
+      </div>
       <div class="voice-head-actions">
-        <button id="voice-gate-toggle" class="chip chip-btn" role="switch" aria-checked="false"
-                title="Require the wake word before each request">Wake each turn</button>
-        <button id="voice-ptt-toggle" class="chip chip-btn" role="switch" aria-checked="false"
-                title="Push-to-talk: hold the set key to speak instead of hands-free listening">Hands-free</button>
         <button id="voice-mute" class="icon-btn" aria-label="Mute microphone" aria-pressed="false" title="Mute — pause listening without ending the session">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
             <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>
           </svg>
         </button>
-        <button id="voice-settings" class="icon-btn" aria-label="Settings" title="Settings">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <button id="voice-collapse" class="icon-btn" aria-label="Collapse" aria-expanded="true" title="Collapse to just the orb">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="12" x2="18" y2="12"/></svg>
         </button>
         <button id="voice-close" class="icon-btn" aria-label="End voice conversation" title="End voice conversation">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
         </button>
       </div>
     </div>
-    <div class="voice-orb-wrap">
-      <div id="voice-orb" class="voice-orb" aria-hidden="true"><span class="voice-orb-core"></span></div>
-      <canvas id="voice-wave" class="voice-wave" width="360" height="56" aria-hidden="true"></canvas>
-    </div>
-    <div id="voice-status" class="voice-status">Starting…</div>
-    <div id="voice-caption" class="voice-caption" aria-live="polite"></div>
-    <div id="voice-perm" class="voice-perm" hidden>
-      <div class="voice-perm-q" id="voice-perm-q"></div>
-      <div class="voice-perm-detail" id="voice-perm-detail"></div>
-      <div class="voice-perm-actions">
-        <button id="voice-perm-yes" class="btn btn-primary">Approve</button>
-        <button id="voice-perm-always" class="btn btn-ghost" hidden>Always</button>
-        <button id="voice-perm-no" class="btn btn-ghost">Deny</button>
+
+    <div class="voice-body">
+      <!-- The latest exchange, not a log. Kept because a spoken turn reaches
+           the chat only once the coding agent's turn lock is free, so during a
+           busy turn this is the only place it is visible. -->
+      <div id="voice-caption" class="voice-caption" aria-live="polite"></div>
+
+      <div id="voice-perm" class="voice-perm" hidden>
+        <div class="voice-perm-q" id="voice-perm-q"></div>
+        <div class="voice-perm-detail" id="voice-perm-detail"></div>
+        <div class="voice-perm-actions">
+          <button id="voice-perm-yes" class="btn btn-primary">Approve</button>
+          <button id="voice-perm-always" class="btn btn-ghost" hidden>Always</button>
+          <button id="voice-perm-no" class="btn btn-ghost">Deny</button>
+        </div>
+        <div class="row-sub voice-perm-hint">…or just say “yes” or “no”.</div>
       </div>
-      <div class="row-sub voice-perm-hint">…or just say “yes” or “no”.</div>
-    </div>
-    <div id="voice-workers" class="voice-workers" aria-live="polite"></div>
-    <div class="voice-foot">
-      <button id="voice-ptt-btn" class="btn btn-primary voice-ptt-btn" hidden>Hold to talk</button>
-      <button id="voice-replay" class="btn btn-ghost" hidden>↺ Say that again</button>
-      <span id="voice-hint" class="row-sub">Just start talking. Tell it what to build — it'll delegate and keep listening.</span>
+
+      <!-- Clickable. A worker dispatched by voice used to be a dead pill on a
+           screen that covered the only panel that could show you its work. -->
+      <div id="voice-workers" class="voice-workers" aria-live="polite"></div>
+
+      <div class="voice-foot">
+        <button id="voice-ptt-btn" class="btn btn-primary voice-ptt-btn" hidden>Hold to talk</button>
+        <div class="voice-chips">
+          <button id="voice-gate-toggle" class="chip chip-btn" role="switch" aria-checked="false"
+                  title="Require the wake word before each request">Wake each turn</button>
+          <button id="voice-ptt-toggle" class="chip chip-btn" role="switch" aria-checked="false"
+                  title="Push-to-talk: hold the set key to speak instead of hands-free listening">Hands-free</button>
+          <button id="voice-replay" class="chip chip-btn" hidden title="Say the last reply again">↺ Again</button>
+          <button id="voice-settings" class="chip chip-btn" title="Voice settings">Settings</button>
+        </div>
+      </div>
     </div>
   </div>
 </div>
