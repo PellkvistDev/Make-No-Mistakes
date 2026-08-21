@@ -391,6 +391,10 @@
     }
     return {
       raw: gh,
+      // Which branch this client is bound to. It is fixed for the life of the
+      // client -- switching means building a new one, because the file cache
+      // that hangs off it holds another branch's contents.
+      branch,
       async tree() {
         const t = await gh("GET", `/repos/${owner}/${repo}/git/trees/${branch}?recursive=1`);
         return (t.tree || []).filter((e) => e.type === "blob")
@@ -418,6 +422,38 @@
       async deleteFile(path, message, sha) {
         return gh("DELETE", `/repos/${owner}/${repo}/contents/${path}`, { message, sha, branch });
       },
+      // The repo's own default branch, which is what a pull request goes
+      // BACK to. Not assumed to be "main": plenty of repositories are not,
+      // and a PR opened against a branch that does not exist fails with a
+      // message about the base, which reads as the tool being broken.
+      async defaultBranch() {
+        const r = await gh("GET", `/repos/${owner}/${repo}`);
+        return r.default_branch || "main";
+      },
+      // Branch off wherever `from` points. GitHub answers 422 if the name is
+      // already taken, which is the right failure -- reusing someone else's
+      // branch is not what "start a branch" meant.
+      async createBranch(name, fromSha) {
+        return gh("POST", `/repos/${owner}/${repo}/git/refs`,
+                  { ref: "refs/heads/" + name, sha: fromSha });
+      },
+      // What CI said about a commit. `check-runs` rather than the older
+      // `statuses` endpoint: Actions reports through checks, and a repository
+      // using both would otherwise show half its answer.
+      async checkRuns(ref) {
+        return gh("GET", `/repos/${owner}/${repo}/commits/${encodeURIComponent(ref)}/check-runs`);
+      },
+      async openPr(title, body, base, head, draft) {
+        return gh("POST", `/repos/${owner}/${repo}/pulls`,
+                  { title, body, base, head, draft: !!draft });
+      },
+      // Open pull requests whose head is this branch. Asked before opening
+      // one, because GitHub's own error for a duplicate says only "a pull
+      // request already exists" without saying where it is.
+      async prsForBranch(head) {
+        return gh("GET", `/repos/${owner}/${repo}/pulls`
+          + `?state=open&head=${encodeURIComponent(owner + ":" + head)}`);
+      },
       // Does the current branch exist? Returns its commit SHA or null.
       async branchSha() {
         try { const r = await gh("GET", `/repos/${owner}/${repo}/git/ref/heads/${branch}`); return r.object.sha; }
@@ -430,6 +466,16 @@
       async compare(baseSha) {
         return gh("GET",
           `/repos/${owner}/${repo}/compare/${encodeURIComponent(baseSha)}...${encodeURIComponent(branch)}`);
+      },
+      // Commits that touched a path, newest first. The desktop reads
+      // `git log -L a,b:file` -- the per-LINE history. There is no API for
+      // that: GitHub can filter commits by path and no finer. So this is the
+      // file's history, and `why` says so rather than implying a precision it
+      // does not have.
+      async commits(path, n) {
+        return gh("GET", `/repos/${owner}/${repo}/commits`
+          + `?path=${encodeURIComponent(path)}&sha=${encodeURIComponent(branch)}`
+          + `&per_page=${Math.max(1, Math.min(n || 5, 20))}`);
       },
       // Create the branch as an ORPHAN (no code history) with a single marker
       // file, so session data lives here without touching main/PRs.
@@ -1193,6 +1239,29 @@
     async function currentSha(path) {
       try { return (await gh.getFile(path)).sha; } catch { return undefined; }
     }
+    // Every file read is its own HTTPS round trip, and grep/search_code read
+    // the WHOLE repository. In series that is the difference between a search
+    // and a stall: a few hundred files at ~150ms each is minutes, on the
+    // device with the least patience available to it.
+    //
+    // Fetched in ordered CHUNKS rather than one unbounded race. The same
+    // number of requests either way -- so the GitHub rate limit is untouched
+    // -- but a race would give up two things that matter: results in tree
+    // order, and an early stop that actually stops early rather than after
+    // whatever had already been scheduled.
+    const SCAN_CHUNK = 8;
+    async function scanFiles(entries, visit) {
+      for (let i = 0; i < entries.length; i += SCAN_CHUNK) {
+        const slice = entries.slice(i, i + SCAN_CHUNK);
+        // A file that cannot be read is skipped, not fatal: a submodule, a
+        // symlink, or a blob too large for the contents API.
+        const files = await Promise.all(
+          slice.map((e) => load(e.path).catch(() => null)));
+        for (let j = 0; j < slice.length; j++) {
+          if (files[j] && visit(slice[j], files[j]) === false) return;
+        }
+      }
+    }
     function tokenize(s) {
       const out = [];
       for (const m of String(s).matchAll(/[A-Za-z0-9_]+/g)) {
@@ -1203,6 +1272,15 @@
     }
     const BIN = /\.(png|jpg|jpeg|gif|webp|ico|pdf|zip|gz|woff2?|ttf|mp4|mp3|wasm|lock)$/i;
     const IMG = /\.(png|jpe?g|gif|webp|bmp|avif|svg|ico)$/i;
+    // How much of one file read_file will spend on a single call. The phone
+    // has less context than the desktop, not more.
+    const READ_BUDGET = 12000;
+    // What a whole-repo scan should even look at. Both callers had this pair
+    // of conditions inline and identical; a filter that drifts between grep
+    // and search_code is two tools disagreeing about what the repo contains.
+    async function scannable() {
+      return (await tree()).filter((e) => !BIN.test(e.path) && e.size <= 300000);
+    }
 
     const api = {
       async list_dir(a) {
@@ -1233,35 +1311,59 @@
         }
         const f = await load(a.path);
         const lines = f.text.split("\n");
-        return lines.map((l, i) => `${String(i + 1).padStart(4)} | ${l}`).join("\n").slice(0, 12000);
+        const start = Math.max(1, parseInt(a.offset, 10) || 1);
+        const limit = Math.max(1, Math.min(parseInt(a.limit, 10) || 2000, 2000));
+        if (start > lines.length) {
+          return `${a.path} has ${lines.length} lines, so there is nothing at line ${start}.`;
+        }
+        const want = lines.slice(start - 1, start - 1 + limit);
+        // Cut on a LINE boundary, and only after the budget is spent. This
+        // used to be a flat .slice(0, 12000) on the joined text, which ended
+        // mid-line -- and a half line looks exactly like a whole one, so
+        // edit_file was handed old_string values that never existed in the
+        // file. The character budget stays, because one minified file can be
+        // the whole of it on a single line.
+        const shown = [];
+        let used = 0;
+        for (const [i, l] of want.entries()) {
+          const row = `${String(start + i).padStart(4)} | ${l}`;
+          if (shown.length && used + row.length > READ_BUDGET) break;
+          shown.push(row);
+          used += row.length + 1;
+        }
+        const last = start + shown.length - 1;
+        let text = shown.join("\n");
+        // ...and SAY it was cut. Silence here is the worst version: the model
+        // concludes the symbol it was looking for is not in the file, which is
+        // a wrong answer rather than a missing one.
+        if (last < lines.length) {
+          text += `\n... [${lines.length - last} more line${lines.length - last === 1 ? "" : "s"}. `
+                + `read_file with offset=${last + 1} for the rest]`;
+        }
+        return text;
       },
       async grep(a) {
         const rx = new RegExp(a.pattern, a.case_insensitive ? "i" : "");
-        const t = await tree();
         const hits = [];
-        for (const e of t) {
-          if (BIN.test(e.path) || e.size > 300000) continue;
-          let f; try { f = await load(e.path); } catch { continue; }
+        await scanFiles(await scannable(), (e, f) => {
           f.text.split("\n").forEach((l, i) => {
             if (hits.length < 100 && rx.test(l)) hits.push(`${e.path}:${i + 1}: ${l.trim().slice(0, 160)}`);
           });
-          if (hits.length >= 100) break;
-        }
+          return hits.length < 100;
+        });
         return hits.join("\n") || "(no matches)";
       },
       async search_code(a) {
         const q = new Set(tokenize(a.query || ""));
         if (!q.size) return "(empty query)";
-        const t = await tree();
         const scored = [];
-        for (const e of t) {
-          if (BIN.test(e.path) || e.size > 300000) continue;
-          let f; try { f = await load(e.path); } catch { continue; }
-          const toks = tokenize(f.text);
-          const set = new Set(toks);
+        // No early stop here: every file has to be scored before the best six
+        // are known. The chunking is the whole of the speed-up.
+        await scanFiles(await scannable(), (e, f) => {
+          const set = new Set(tokenize(f.text));
           let overlap = 0; for (const w of q) if (set.has(w)) overlap++;
           if (overlap) scored.push({ path: e.path, score: overlap / q.size, snippet: f.text.slice(0, 400) });
-        }
+        });
         scored.sort((x, y) => y.score - x.score);
         return scored.slice(0, 6).map((s) => `${s.path} (${s.score.toFixed(2)})\n${s.snippet}`).join("\n\n")
           || "(no matches)";
@@ -1357,6 +1459,182 @@
       return `Remembered in ${path}: ${text}`;
     };
 
+    // --- why: the reasons are in git, and the phone could not reach them --- //
+    //
+    // The desktop grew this tool because an agent reads CODE, which is the one
+    // artefact that cannot say what was tried and reverted: a line that came
+    // back looks exactly like a line never touched. So it proposes the thing
+    // that was measured and undone, and the only defence is that a human
+    // remembers.
+    //
+    // That argument is not weaker on the phone. It is stronger -- this device
+    // has the least context, the shortest turns, and no shell to go looking
+    // with. Leaving it out here would mean the reasons are reachable from one
+    // of the two machines that work on the same repository.
+    const COMMENT_STARTS = ["#", "//", "/*", "*", "*/", "--", ";", "<!--"];
+    const DEF_PATTERN = new RegExp(
+      "^\\s*(?:async\\s+)?(?:def|class|function|fn|func|type|interface|struct|impl)\\b"
+      + "|^\\s*(?:export\\s+)?(?:const|let|var)\\s+\\w+\\s*=\\s*(?:async\\s*)?(?:\\(|function)"
+      + "|^\\s*\\w+\\s*[:=]\\s*(?:async\\s*)?\\([^)]*\\)\\s*=>");
+    const TRAILER = /^(Co-Authored-By|Co-authored-by|Signed-off-by|Claude-Session|Generated with|https:\/\/claude\.ai)/i;
+    const TRIPLE_D = '"' + '""';
+    const TRIPLE_S = "'" + "''";
+    const indentOf = (s) => s.length - s.replace(/^\s+/, "").length;
+
+    // A blank line ends the run as firmly as code does. A comment separated
+    // from the thing it describes is usually about something else, and
+    // dragging it in attributes the wrong reason to the wrong code -- worse
+    // than returning nothing, because it reads exactly like an answer.
+    function commentRunAbove(lines, idx, limit) {
+      const out = [];
+      for (let i = idx - 1; i >= 0 && out.length < (limit || 40); i--) {
+        const t = lines[i].trim();
+        if (!t || !COMMENT_STARTS.some((c) => t.startsWith(c))) break;
+        out.push(lines[i].replace(/\s+$/, ""));
+      }
+      return out.reverse().join("\n");
+    }
+
+    // The nearest def ABOVE is not good enough: a comment between two
+    // functions belongs to the one below, and the nearest def above is the one
+    // that already ended. Indentation is the check -- the target has to be
+    // nested deeper than the header that supposedly contains it. Cheap, no
+    // parser, and it fails closed.
+    function enclosingDef(lines, idx) {
+      const want = idx < lines.length ? indentOf(lines[idx]) : 0;
+      for (let i = Math.min(idx, lines.length - 1); i >= 0; i--) {
+        if (DEF_PATTERN.test(lines[i]) && indentOf(lines[i]) < want) return i;
+      }
+      return -1;
+    }
+
+    // Signatures wrap routinely, so the docstring is not reliably at idx+1.
+    // Walk to the end of the header (parens balanced, line ending in a colon)
+    // and look at what follows.
+    function docstringBelow(lines, idx, limit) {
+      let depth = 0, head = -1;
+      for (let j = idx; j < Math.min(idx + 12, lines.length); j++) {
+        depth += (lines[j].split("(").length - 1) - (lines[j].split(")").length - 1);
+        if (depth <= 0 && /:\s*$/.test(lines[j])) { head = j; break; }
+      }
+      if (head < 0 || head + 1 >= lines.length) return "";
+      const first = lines[head + 1].trim();
+      const quote = first.startsWith(TRIPLE_D) ? TRIPLE_D
+                  : first.startsWith(TRIPLE_S) ? TRIPLE_S : "";
+      if (!quote) return "";
+      const body = [lines[head + 1].replace(/\s+$/, "")];
+      const opens = first.split(quote).length - 1;
+      if (opens >= 2 && first.length > quote.length) return body[0];
+      for (let j = head + 2; j < Math.min(head + 2 + (limit || 40), lines.length); j++) {
+        body.push(lines[j].replace(/\s+$/, ""));
+        if (lines[j].includes(quote)) break;
+      }
+      return body.join("\n");
+    }
+
+    function formatCommit(c, maxBody) {
+      const msg = String((c && c.commit && c.commit.message) || "");
+      const nl = msg.indexOf("\n");
+      const subject = (nl < 0 ? msg : msg.slice(0, nl)).trim();
+      const author = (c.commit && c.commit.author) || {};
+      const date = String(author.date || "").slice(0, 10);
+      const out = [`  ${String(c.sha || "").slice(0, 8)}  ${date}  ${subject}`];
+      // Trailers are plumbing, not a reason, and they cost context every call.
+      let body = (nl < 0 ? "" : msg.slice(nl + 1)).split("\n")
+        .map((l) => l.replace(/\s+$/, ""))
+        .filter((l) => !TRAILER.test(l.trim()));
+      while (body.length && !body[body.length - 1]) body.pop();
+      while (body.length && !body[0]) body.shift();
+      if (body.length > maxBody) {
+        const dropped = body.length - maxBody;
+        body = body.slice(0, maxBody).concat(
+          [`... (+${dropped} more lines — open the commit for all of it)`]);
+      }
+      return out.concat(body.map((l) => (l ? "      " + l : ""))).join("\n");
+    }
+
+    // Indent a block and cap it. A check's summary is written for a web page
+    // and can run to thousands of lines; unbounded it would be the whole of a
+    // phone turn's context spent on one failure.
+    function indentBlock(text, spaces, cap) {
+      const pad = " ".repeat(spaces);
+      const cut = text.length > cap ? text.slice(0, cap) + "\n... [truncated]" : text;
+      return cut.split("\n").map((l) => (l.trim() ? pad + l.trim() : "")).join("\n");
+    }
+
+    const WHY_CLOSING =
+      "\nThese are reasons, not a changelog. A commit saying something was "
+      + "TRIED and reverted is telling you not to do it again — check that "
+      + "before you repeat it.";
+
+    api.why = async (a) => {
+      const path = String((a && a.path) || "").replace(/^\.?\/*/, "");
+      if (!path) return "ERROR: why() needs a path.";
+      const line = Math.max(0, parseInt((a && a.line) || 0, 10) || 0);
+      const n = Math.max(1, Math.min(parseInt((a && a.max_commits) || 5, 10) || 5, 20));
+
+      let f;
+      try { f = await load(path); }
+      catch (e) { return `Couldn't read ${path}: ${(e && e.message) || e}`; }
+      const lines = f.text.split("\n");
+      const out = [];
+
+      // The comment block is computed and returned FIRST, and the history is
+      // added to it. A file the agent has only just written has no commits at
+      // all, and a tool that answers nothing for one is useless exactly when
+      // it was most likely to be asked.
+      if (line) {
+        if (line > lines.length) {
+          return `${path} has ${lines.length} lines, so there is no line ${line}. `
+               + "Read the file and ask about a line that exists.";
+        }
+        out.push(`${path}:${line}`);
+        out.push(`    ${line} | ${lines[line - 1].replace(/\s+$/, "").slice(0, 160)}`);
+        const said = [];
+        const direct = commentRunAbove(lines, line - 1);
+        if (direct) said.push(direct);
+        const d = enclosingDef(lines, line - 1);
+        if (d >= 0 && d !== line - 1) {
+          const block = [commentRunAbove(lines, d), lines[d].replace(/\s+$/, ""),
+                         docstringBelow(lines, d)].filter(Boolean).join("\n");
+          if (block && !said.includes(block)) {
+            said.push(`(from the enclosing block, line ${d + 1})\n${block}`);
+          }
+        }
+        if (said.length) {
+          out.push("\nWHAT THE CODE SAYS ABOUT ITSELF");
+          for (const x of said) out.push(x);
+        }
+      } else {
+        out.push(path);
+      }
+
+      let commits;
+      try { commits = await gh.commits(path, n); }
+      catch (e) {
+        out.push(`\n(Couldn't read the history: ${(e && e.message) || e})`);
+        return out.join("\n");
+      }
+      if (!Array.isArray(commits) || !commits.length) {
+        out.push("\nNo commit has touched this yet — it is uncommitted, or it "
+                 + "arrived under a different name.");
+        return out.join("\n");
+      }
+      // Said plainly rather than glossed over: the desktop's `why` reads
+      // `git log -L a,b:file` and answers for the LINE. Over the API the
+      // finest filter is the path, so these commits touched the file and may
+      // have nothing to do with the line asked about. Implying otherwise would
+      // hand back a confident wrong reason -- the exact failure the
+      // enclosing-block heuristics above fail closed to avoid.
+      out.push(line
+        ? "\nWHAT CHANGED THIS FILE, newest first (the GitHub API cannot filter "
+          + "by line, so these may not all be about line " + line + ")"
+        : "\nWHAT CHANGED THIS FILE, newest first");
+      for (const c of commits) out.push(formatCommit(c, 30));
+      out.push(WHY_CLOSING);
+      return out.join("\n");
+    };
+
     // What this chat has changed, as a diff. The desktop reads its shadow git
     // repo; the phone commits straight to a branch, so the equivalent question
     // is "what do my commits look like against where I started" -- which the
@@ -1397,6 +1675,147 @@
       return out.join("\n");
     };
 
+    // --- did it pass? ------------------------------------------------------
+    //
+    // The phone can now branch, edit, commit and open a pull request. The
+    // question that follows all of that -- "did the tests pass" -- was the one
+    // thing it still had to be answered somewhere else, and it is the most
+    // phone-shaped question in the whole loop: you push, you walk away, and
+    // you want to know ten minutes later without going back to a desk.
+    //
+    // Read-only and free of any host wiring, so unlike new_branch it is always
+    // offered.
+    api.check_ci = async (a) => {
+      const ref = String((a && a.ref) || "").trim() || gh.branch;
+      let sha = ref;
+      if (ref === gh.branch) {
+        try { sha = (await gh.branchSha()) || ref; } catch (e) { /* use the name */ }
+      }
+      let res;
+      try { res = await gh.checkRuns(sha); }
+      catch (e) { return `Couldn't read the checks: ${(e && e.message) || e}`; }
+      const runs = (res && res.check_runs) || [];
+      if (!runs.length) {
+        // Two different facts with one appearance, and saying only the first
+        // sends someone to wait for a run that is never coming.
+        return `No checks have reported for ${String(sha).slice(0, 8)} yet. They may not `
+             + "have started, or this repository has none configured.";
+      }
+      const running = runs.filter((r) => r.status !== "completed");
+      const failed = runs.filter((r) => r.status === "completed"
+        && !["success", "neutral", "skipped"].includes(r.conclusion));
+      const passed = runs.filter((r) => r.status === "completed"
+        && ["success", "neutral", "skipped"].includes(r.conclusion));
+
+      const out = [`Checks on ${gh.branch} (${String(sha).slice(0, 8)}): `
+        + `${passed.length} passed, ${failed.length} failed, ${running.length} still running.`];
+      for (const r of failed) {
+        out.push(`\nFAILED  ${r.name}${r.conclusion && r.conclusion !== "failure"
+          ? ` (${r.conclusion})` : ""}`);
+        // The check's own summary when it has one. Not the log: a job log is a
+        // redirect to blob storage that a page cannot read cross-origin, and
+        // promising one would be a tool that fails on the case it exists for.
+        const o = r.output || {};
+        if (o.title) out.push(`        ${o.title}`);
+        if (o.summary) out.push(indentBlock(String(o.summary), 8, 1200));
+        if (r.html_url) out.push(`        ${r.html_url}`);
+      }
+      for (const r of running) out.push(`\nrunning ${r.name}`);
+      for (const r of passed) out.push(`\npassed  ${r.name}`);
+      if (!failed.length && !running.length) {
+        out.push("\nEverything green.");
+      } else if (!failed.length) {
+        out.push("\nNothing has failed yet — ask again once the rest finish.");
+      }
+      return out.join("\n");
+    };
+
+    // --- branches, and finishing the work ---------------------------------- //
+    //
+    // Every write from the phone is a commit, and until now every one of them
+    // landed on whichever branch the chat was opened on -- which is the
+    // repository's DEFAULT branch, because that is the only one the phone can
+    // open. So work done here went straight to main, unreviewed, and on a repo
+    // whose Pages site or CI is wired to main it deployed on the way past.
+    //
+    // That is not a preference about workflow. It is the phone being unable to
+    // do the ordinary safe thing, and it is most of why "do it on the computer"
+    // was still the answer for anything real.
+    //
+    // Both tools are gated on the host wiring them (opts.switchBranch), the
+    // same way spawn is: agent-core cannot reach the session that owns the
+    // GitHub client, and a tool that silently did nothing would be worse than
+    // one that is absent.
+    if (opts.switchBranch) {
+      api.new_branch = async (a) => {
+        // GitHub accepts more than this, but a ref with a space in it is a
+        // branch nobody can type at a shell afterwards.
+        const name = String((a && a.name) || "").trim()
+          .replace(/\s+/g, "-").replace(/[^A-Za-z0-9._\/-]/g, "").replace(/^[-.\/]+/, "");
+        if (!name) return "ERROR: a branch needs a name.";
+        if (name === gh.branch) return `Already on ${name}.`;
+        let from;
+        try { from = await gh.branchSha(); }
+        catch (e) { return `Couldn't read ${gh.branch}: ${(e && e.message) || e}`; }
+        if (!from) return `${gh.branch} has no commits yet, so there is nothing to branch from.`;
+        try { await gh.createBranch(name, from); }
+        catch (e) {
+          const m = (e && e.message) || String(e);
+          // Matched on what GitHub SAID, not on the status. 422 covers both
+          // "already exists" and "that is not a valid ref name", and telling
+          // someone their name is taken when it is actually malformed sends
+          // them off to invent a second name that fails the same way.
+          // Carrying on onto an existing branch is not an option either: the
+          // commits would be real, and they would be someone else's.
+          if (/already exists/i.test(m)) {
+            return `A branch called ${name} already exists. Pick another name.`;
+          }
+          return `Couldn't create ${name}: ${m}`;
+        }
+        const was = gh.branch;
+        await opts.switchBranch(name);
+        return `Now on ${name}, branched from ${was}. Everything committed from `
+             + `here lands there instead of ${was}.`;
+      };
+
+      api.open_pull_request = async (a) => {
+        const head = gh.branch;
+        let base;
+        try { base = await gh.defaultBranch(); }
+        catch (e) { return `Couldn't read the repository: ${(e && e.message) || e}`; }
+        if (head === base) {
+          return `This chat is on ${base}, which is what a pull request would merge INTO — `
+               + "there is nothing to open. Use new_branch first, then make the changes there.";
+        }
+        // GitHub's own error for a duplicate says only "a pull request already
+        // exists", without saying where. Asking first means the answer is a
+        // link the user can actually open.
+        try {
+          const open = await gh.prsForBranch(head);
+          if (Array.isArray(open) && open.length) {
+            return `${head} already has an open pull request: ${open[0].html_url}. `
+                 + "New commits on this branch show up there automatically.";
+          }
+        } catch (e) { /* not being able to check is not a reason to refuse */ }
+        const title = String((a && a.title) || "").trim() || head;
+        try {
+          // Draft unless told otherwise. Work done on a phone is work nobody
+          // has looked at on a screen bigger than a hand, and a draft is the
+          // one state that says so without stopping anything.
+          const pr = await gh.openPr(title, String((a && a.body) || ""), base, head,
+                                     !(a && a.draft === false));
+          return `Opened #${pr.number}: ${pr.html_url}`;
+        } catch (e) {
+          const m = (e && e.message) || String(e);
+          if (/No commits between/.test(m)) {
+            return `${head} has no commits that ${base} does not, so there is nothing to open a `
+                 + "pull request for yet.";
+          }
+          return `Couldn't open the pull request: ${m}`;
+        }
+      };
+    }
+
     // Delegation: only exposed when the host wires a spawner (main agent only,
     // so sub-agents can't spawn further sub-agents).
     if (opts.spawn) {
@@ -1420,7 +1839,14 @@
   const TOOL_SCHEMAS = [
     tool("list_dir", "List files/folders under a directory in the repo.", { path: str("Directory (default root)") }),
     tool("glob", "Find files by glob, e.g. '**/*.js'.", { pattern: str("Glob pattern") }, ["pattern"]),
-    tool("read_file", "Read a file (with line numbers).", { path: str("File path") }, ["path"]),
+    tool("read_file",
+      "Read a text file. Output lines are prefixed with 'N | ' line numbers (the prefix is not " +
+      "part of the file). A long file is cut off and says so — call it again with offset to " +
+      "carry on from there.",
+      { path: str("File path"),
+        offset: { type: "integer", description: "1-based line to start from (default 1)" },
+        limit: { type: "integer", description: "Max lines to read (default 2000)" } },
+      ["path"]),
     tool("grep", "Search file contents by regex.", { pattern: str("Regex"), case_insensitive: bool("Case-insensitive") }, ["pattern"]),
     tool("search_code", "Find the most relevant code for a description.", { query: str("What you're looking for") }, ["query"]),
     tool("write_file", "Create or overwrite a file and commit it.", { path: str("Path"), content: str("Full new contents"), message: str("Commit message") }, ["path", "content"]),
@@ -1448,6 +1874,29 @@
       "reads it too. For facts that outlive the conversation, not for a running task list (that " +
       "is todo_write).",
       { text: str("The note, in one sentence") }, ["text"]),
+    // Same trigger as the desktop's, with one honest difference stated: over
+    // the API the finest filter is the path, not the line.
+    tool("why",
+      "Why a piece of code is the way it is: the comment or docstring that explains it, plus the " +
+      "commits that touched that file WITH their full messages. Reach for it before changing " +
+      "anything whose reason is not obvious from the code — a constant, a workaround, a retry or " +
+      "timeout, an ordering that looks arbitrary, a guard that looks redundant. Code cannot tell " +
+      "you what was already tried and reverted; a line that came back looks identical to one " +
+      "never touched, and the commit that removed an approach usually says why it did not work.",
+      { path: str("File path in the repo"),
+        line: { type: "integer",
+                description: "1-based line to explain. Omit for the whole file's history." },
+        max_commits: { type: "integer",
+                       description: "How many commits to report, newest first (default 5, max 20)" } },
+      ["path"]),
+    // Always offered, unlike the branch tools: it needs no host wiring, and a
+    // question this ordinary should not depend on how the app was assembled.
+    tool("check_ci",
+      "Did CI pass? Reports every check on this branch's latest commit — what passed, what is " +
+      "still running, and for anything that failed, its summary and a link. Use it after opening " +
+      "a pull request, or whenever the user asks whether the build or the tests are green. You " +
+      "cannot run tests on this device, so this is the only way to find out.",
+      { ref: str("A branch or commit to check (default: this chat's branch)") }),
     tool("review_changes",
       "Show everything this chat has changed so far, as a diff against where it started. Use it " +
       "to check your own work before saying a task is done, or when you are not sure what state " +
@@ -1460,6 +1909,27 @@
   function str(d) { return { type: "string", description: d }; }
   function bool(d) { return { type: "boolean", description: d }; }
 
+
+  // Offered only when the host can actually switch the client's branch, the
+  // same rule as SPAWN_SCHEMA: a schema whose implementation is absent is a
+  // tool the model calls and is told does not exist, mid-task, on the device
+  // with the least room to recover.
+  const BRANCH_SCHEMAS = [
+    tool("new_branch",
+      "Start a new branch and move this chat onto it. Every edit you make is committed the moment " +
+      "you make it, so on the repository's default branch that means committing straight to it — " +
+      "do this FIRST for anything beyond a one-line fix, and say that you did. Branches from " +
+      "wherever the chat is now.",
+      { name: str("Branch name, e.g. fix-login-redirect") }, ["name"]),
+    tool("open_pull_request",
+      "Open a pull request from this chat's branch back to the repository's default branch, so the " +
+      "work can be reviewed and merged. Use it when the task is done. Returns the link. Opens as a " +
+      "draft unless you say otherwise.",
+      { title: str("Pull request title"),
+        body: str("What changed and why — the reasoning, not a list of files"),
+        draft: bool("Open as a draft (default true)") },
+      ["title"]),
+  ];
 
   const SPAWN_SCHEMA = tool("spawn_agent",
     "Delegate one self-contained sub-task to a fresh sub-agent that works on its own and reports back " +
@@ -1566,6 +2036,16 @@
     "when it next syncs, or via CI. So: make correct, complete, minimal edits; read before you edit; " +
     "prefer search_code/grep to find things; and in your final reply note anything that still needs to " +
     "be run or verified on a real machine. Be concise.\n\n" +
+    // The phone commits as it edits, so "which branch" is not a workflow
+    // preference here -- it is where the work lands, decided before the first
+    // write rather than after the last one. On a repo whose Pages site or CI
+    // is wired to the default branch, going straight there also deploys.
+    "EVERY EDIT YOU MAKE IS COMMITTED IMMEDIATELY, to whichever branch this chat is on. If that " +
+    "is the repository's default branch and the task is anything more than a one-line fix, call " +
+    "new_branch FIRST and say that you did — otherwise the work lands on the default branch " +
+    "unreviewed, and anything wired to that branch runs. When the task is done, " +
+    "open_pull_request turns it into something the user can review and merge, and check_ci " +
+    "says whether it passed — the only way to find that out from here.\n\n" +
     // Naming the trigger, because a tool the model never thinks to call is not a
     // feature. The phone is also where it matters most: a turn here is cut off by
     // the screen locking or the app being backgrounded, and a list written down is
@@ -1574,6 +2054,14 @@
     "anything with more than two or three steps, keep a todo_write list and update it as you go, " +
     "so whoever picks this up (you, later, or the desktop) can see where it got to. Before you say " +
     "a task is done, use review_changes to look at what you actually changed.\n\n" +
+    // Named for the same reason: this repository writes down WHY in commit
+    // bodies, and code is the one artefact that cannot say what was tried and
+    // reverted. A line that came back looks identical to one never touched.
+    "Before you change something whose reason is not obvious — a constant, a workaround, a " +
+    "retry, an ordering that looks arbitrary, a guard that looks redundant — call why() on " +
+    "it. Code cannot tell you what was already tried and reverted — a line that came back looks " +
+    "identical to one never touched — and the commit that removed an approach usually says why " +
+    "it did not work.\n\n" +
     "THIS CHAT IS SHARED WITH THE USER'S DESKTOP. The same conversation moves between the two, and " +
     "the desktop has tools you do not have here (a shell, tests, a browser). Earlier turns may " +
     "therefore show tool calls that don't exist on this device — treat those as history, not as " +
@@ -1852,6 +2340,7 @@
     encryptVault, decryptVault, deriveKey, PBKDF2_ITERS,
     aesEncrypt, aesDecrypt, exportRawKey, importRawKey,
     makeGitHub, makeModel, makeTools, runAgent, TOOL_SCHEMAS, SPAWN_SCHEMA, VIEW_IMAGE_SCHEMA,
+    BRANCH_SCHEMAS,
     NEEDS_DESKTOP_SCHEMA, pendingNote, PENDING_MARKER,
     openPairToken, normalizePairCode, pairTokenFrom, PAIR_TOKEN_MIN,
     SYSTEM_PROMPT, SUBAGENT_PROMPT,

@@ -19,6 +19,7 @@ import json
 import pathlib
 import shutil
 import subprocess
+import tempfile
 
 import pytest
 
@@ -34,7 +35,7 @@ needs_node = pytest.mark.skipif(
 # answers with the NEW sha. Everything the phone's write path gets wrong shows
 # up as a rejection rather than as a passing test with a wrong argument.
 PRELUDE = r"""
-const C = require(process.argv[1]);
+const C = require(process.argv[2]);
 function fakeGh(files) {
   files = Object.assign({}, files || {});
   const calls = [];
@@ -71,11 +72,21 @@ function out(o) { console.log("<<<" + JSON.stringify(o) + ">>>"); }
 
 
 def _node(body, files=None):
-    """Run a snippet with the phone's core loaded and fakeGh available."""
+    """Run a snippet with the phone's core loaded and fakeGh available.
+
+    Written to a file rather than passed with `node -e`. A couple of these
+    scripts embed a repository of a thousand files to prove that grep stops
+    early, and Windows caps a command line at ~32KB -- so the -e form failed
+    there with "the filename or extension is too long", on the one platform
+    where nothing about the test was actually different.
+    """
     script = PRELUDE + "\n(async () => {\n" + body + "\n})().catch((e) => {" \
              "console.error(e && e.stack || e); process.exit(1); });"
-    r = subprocess.run(["node", "-e", script, str(CORE_JS)],
-                       capture_output=True, text=True, encoding="utf-8", timeout=60)
+    with tempfile.TemporaryDirectory() as tmp:
+        f = pathlib.Path(tmp) / "run.js"
+        f.write_text(script, encoding="utf-8")
+        r = subprocess.run(["node", str(f), str(CORE_JS)],
+                           capture_output=True, text=True, encoding="utf-8", timeout=60)
     assert r.returncode == 0, r.stderr
     body = r.stdout
     assert "<<<" in body, r.stdout + r.stderr
@@ -452,6 +463,15 @@ def test_review_changes_takes_no_arguments():
 
 
 @needs_node
+def test_the_prompt_names_when_to_call_why():
+    """A tool the model never thinks to call is not a feature -- and this one
+    is only ever reached for on a hunch, which is the hardest kind to have."""
+    p = _node("out(C.SYSTEM_PROMPT);")
+    assert "why()" in p
+    assert "tried and reverted" in p
+
+
+@needs_node
 def test_the_phone_prompt_names_when_to_reach_for_them():
     # A tool the model never thinks to call is not a feature, and the phone is
     # where this matters most: the screen locks, the app is backgrounded, and a
@@ -459,3 +479,807 @@ def test_the_phone_prompt_names_when_to_reach_for_them():
     p = _node("out(C.SYSTEM_PROMPT);")
     assert "todo_write" in p
     assert "review_changes" in p
+
+
+# --------------------------------------------------------------------- #
+# read_file
+#
+# It cut the file off at 12,000 characters and said nothing. Two failures in
+# one: the model concludes the symbol it was looking for is not in the file --
+# a wrong answer rather than a missing one -- and the cut landed MID-LINE, so
+# edit_file was handed old_string values that never existed anywhere.
+
+@needs_node
+def test_read_file_numbers_the_lines_it_shows():
+    r = _node("""
+      const t = C.makeTools(fakeGh({ "a.py": "one\\ntwo\\nthree\\n" }), {});
+      out(await t.read_file({ path: "a.py" }));
+    """)
+    assert "   1 | one" in r and "   3 | three" in r
+
+
+@needs_node
+def test_a_long_file_says_it_was_cut_and_where_to_carry_on():
+    r = _node("""
+      const big = Array.from({ length: 4000 }, (_, i) => "line " + i).join("\\n");
+      const t = C.makeTools(fakeGh({ "big.txt": big }), {});
+      out(await t.read_file({ path: "big.txt" }));
+    """)
+    assert "more lines" in r
+    assert "offset=" in r
+
+
+@needs_node
+def test_the_cut_lands_on_a_line_boundary():
+    """A half line looks exactly like a whole one, and edit_file matches on
+    exact strings."""
+    r = _node("""
+      const big = Array.from({ length: 4000 }, (_, i) => "line " + i + " " + "x".repeat(40)).join("\\n");
+      const t = C.makeTools(fakeGh({ "big.txt": big }), {});
+      const text = await t.read_file({ path: "big.txt" });
+      const rows = text.split("\\n").filter((l) => /^\\s*\\d+ \\| /.test(l));
+      out(rows[rows.length - 1]);
+    """)
+    assert r.rstrip().endswith("x" * 40), r
+
+
+@needs_node
+def test_offset_carries_on_from_where_it_stopped():
+    r = _node("""
+      const big = Array.from({ length: 4000 }, (_, i) => "line " + i).join("\\n");
+      const t = C.makeTools(fakeGh({ "big.txt": big }), {});
+      const first = await t.read_file({ path: "big.txt" });
+      const at = parseInt(/offset=(\\d+)/.exec(first)[1], 10);
+      const next = await t.read_file({ path: "big.txt", offset: at });
+      out({ at, head: next.split("\\n")[0] });
+    """)
+    assert f"{r['at']} | line {r['at'] - 1}" in r["head"], r
+
+
+@needs_node
+def test_the_whole_file_is_reachable_by_repeating():
+    """The notice is only worth anything if following it actually gets there."""
+    r = _node("""
+      const big = Array.from({ length: 4000 }, (_, i) => "line " + i).join("\\n");
+      const t = C.makeTools(fakeGh({ "big.txt": big }), {});
+      let at = 1, rounds = 0, sawLast = false;
+      while (rounds++ < 20) {
+        const text = await t.read_file({ path: "big.txt", offset: at });
+        if (text.includes("line 3999")) { sawLast = true; break; }
+        const m = /offset=(\\d+)/.exec(text);
+        if (!m) break;
+        at = parseInt(m[1], 10);
+      }
+      out({ sawLast, rounds });
+    """)
+    assert r["sawLast"], r
+
+
+@needs_node
+def test_a_short_file_gets_no_notice():
+    r = _node("""
+      const t = C.makeTools(fakeGh({ "a.py": "one\\ntwo\\n" }), {});
+      out(await t.read_file({ path: "a.py" }));
+    """)
+    assert "more lines" not in r
+
+
+@needs_node
+def test_limit_is_honoured_and_bounded():
+    r = _node("""
+      const big = Array.from({ length: 500 }, (_, i) => "line " + i).join("\\n");
+      const t = C.makeTools(fakeGh({ "big.txt": big }), {});
+      const three = await t.read_file({ path: "big.txt", limit: 3 });
+      out(three.split("\\n").filter((l) => /^\\s*\\d+ \\| /.test(l)).length);
+    """)
+    assert r == 3
+
+
+@needs_node
+def test_an_offset_past_the_end_is_said_plainly():
+    r = _node("""
+      const t = C.makeTools(fakeGh({ "a.py": "one\\ntwo\\n" }), {});
+      out(await t.read_file({ path: "a.py", offset: 900 }));
+    """)
+    assert "nothing at line 900" in r
+
+
+@needs_node
+def test_one_enormous_line_still_comes_back():
+    """A minified file can be the whole of itself on a single line. The budget
+    must not be able to produce an empty answer."""
+    r = _node("""
+      const t = C.makeTools(fakeGh({ "min.js": "x".repeat(80000) }), {});
+      const text = await t.read_file({ path: "min.js" });
+      out({ len: text.length, head: text.slice(0, 12) });
+    """)
+    assert r["len"] > 1000
+    assert r["head"].strip().startswith("1 |")
+
+
+@needs_node
+def test_an_image_is_refused_with_the_tool_that_works():
+    r = _node("""
+      const t = C.makeTools(fakeGh({ "logo.png": "..." }), {});
+      out(await t.read_file({ path: "logo.png" }));
+    """)
+    assert "view_image" in r
+
+
+@needs_node
+def test_read_file_offers_the_same_arguments_as_the_desktop():
+    """A chat syncs between the two, so its history carries calls made on the
+    other one. An argument the phone ignores is a read the model believes it
+    did and did not."""
+    desktop = [s["function"] for s in DESKTOP_SCHEMAS
+               if s["function"]["name"] == "read_file"][0]
+    phone = _schema("read_file")
+    for name in desktop["parameters"]["properties"]:
+        assert name in phone["parameters"]["properties"], name
+
+
+# --------------------------------------------------------------------- #
+# whole-repo scans
+#
+# grep and search_code read EVERY file in the repository, and every file is
+# its own HTTPS round trip. In series that is the difference between a search
+# and a stall -- a few hundred files at ~150ms each is minutes, on the device
+# with the least patience available to it.
+
+def _repo(n=40, hit_every=7):
+    return {f"src/f{i}.py": ("def f%d():\n    return %d  # NEEDLE\n" % (i, i)
+                             if i % hit_every == 0
+                             else "def f%d():\n    return %d\n" % (i, i))
+            for i in range(n)}
+
+
+@needs_node
+def test_a_scan_overlaps_its_reads():
+    """Ordered chunks, not one at a time. The count that matters is how many
+    round trips are outstanding at once, not how many are made."""
+    r = _node("""
+      const gh = fakeGh(%s);
+      let inflight = 0, peak = 0;
+      const get = gh.getFile;
+      gh.getFile = async (p) => {
+        inflight++; peak = Math.max(peak, inflight);
+        await new Promise((r) => setTimeout(r, 1));
+        inflight--;
+        return get(p);
+      };
+      const t = C.makeTools(gh, {});
+      await t.grep({ pattern: "nothing matches this" });
+      out(peak);
+    """ % __import__("json").dumps(_repo()))
+    assert r > 1, "reads are still serial"
+    assert r <= 8, r
+
+
+@needs_node
+def test_a_scan_does_not_open_every_file_at_once():
+    """A phone on cellular, and a rate limit shared with everything else this
+    chat does. Bounded, not unbounded."""
+    r = _node("""
+      const gh = fakeGh(%s);
+      let inflight = 0, peak = 0;
+      const get = gh.getFile;
+      gh.getFile = async (p) => {
+        inflight++; peak = Math.max(peak, inflight);
+        await new Promise((r) => setTimeout(r, 1));
+        inflight--; return get(p);
+      };
+      const t = C.makeTools(gh, {});
+      await t.search_code({ query: "return" });
+      out(peak);
+    """ % __import__("json").dumps(_repo(200)))
+    assert r <= 8, r
+
+
+@needs_node
+def test_grep_results_stay_in_tree_order():
+    """A race would give this up. Output that reorders itself between two runs
+    of the same search is output nobody can compare."""
+    r = _node("""
+      const gh = fakeGh(%s);
+      const get = gh.getFile;
+      // Answer out of order on purpose: later files come back first.
+      gh.getFile = async (p) => {
+        const n = parseInt(p.replace(/\\D+/g, ""), 10) || 0;
+        await new Promise((r) => setTimeout(r, (20 - (n %% 20))));
+        return get(p);
+      };
+      const t = C.makeTools(gh, {});
+      out(await t.grep({ pattern: "NEEDLE" }));
+    """ % __import__("json").dumps(_repo(24, 3)))
+    paths = [ln.split(":")[0] for ln in r.splitlines()]
+    nums = [int(p.replace("src/f", "").replace(".py", "")) for p in paths]
+    assert nums == sorted(nums), nums
+
+
+@needs_node
+def test_grep_stops_once_it_has_enough():
+    """The early stop has to actually stop. A race would keep going through
+    whatever had already been scheduled, which on a big repo is all of it."""
+    r = _node("""
+      const gh = fakeGh(%s);
+      let reads = 0;
+      const get = gh.getFile;
+      gh.getFile = async (p) => { reads++; return get(p); };
+      const t = C.makeTools(gh, {});
+      const text = await t.grep({ pattern: "NEEDLE" });
+      out({ reads, hits: text.split("\\n").length });
+    """ % __import__("json").dumps(_repo(1000, 1)))
+    assert r["hits"] == 100
+    assert r["reads"] < 200, r["reads"]      # not the whole thousand
+
+
+@needs_node
+def test_a_file_that_cannot_be_read_is_skipped_not_fatal():
+    """A submodule, a symlink, or a blob too large for the contents API."""
+    r = _node("""
+      const gh = fakeGh({ "a.py": "NEEDLE here\\n", "big.py": "x", "c.py": "NEEDLE too\\n" });
+      const get = gh.getFile;
+      gh.getFile = async (p) => {
+        if (p === "big.py") throw new Error("too large for the contents API");
+        return get(p);
+      };
+      const t = C.makeTools(gh, {});
+      out(await t.grep({ pattern: "NEEDLE" }));
+    """)
+    assert "a.py:1" in r and "c.py:1" in r
+
+
+@needs_node
+def test_both_scans_agree_on_what_the_repo_contains():
+    """The filter was inline and identical in each; two tools disagreeing
+    about which files exist is worse than either being wrong alone."""
+    r = _node("""
+      const gh = fakeGh({ "a.py": "alpha beta\\n", "logo.png": "binary-ish alpha\\n" });
+      const seen = [];
+      const get = gh.getFile;
+      gh.getFile = async (p) => { seen.push(p); return get(p); };
+      const t = C.makeTools(gh, {});
+      await t.grep({ pattern: "alpha" });
+      const afterGrep = seen.slice();
+      out({ afterGrep });
+    """)
+    assert "logo.png" not in r["afterGrep"]
+    assert "a.py" in r["afterGrep"]
+
+
+
+
+# --------------------------------------------------------------------- #
+# why
+#
+# The desktop grew this because an agent reads CODE, which is the one artefact
+# that cannot say what was tried and reverted: a line that came back looks
+# exactly like a line never touched. That argument is not weaker on the phone.
+# It is stronger -- this device has the least context, the shortest turns, and
+# no shell to go looking with.
+
+FILE = (
+    "import os\n"
+    "\n"
+    "# The cap is 40 because a bigger frame drops the scan rate to a crawl\n"
+    "# on the device this is for.\n"
+    "CAP = 40\n"
+    "\n"
+    "\n"
+    "def scan(frame,\n"
+    "         cap=CAP):\n"
+    '    """Decode one frame. Capped on purpose -- see CAP."""\n'
+    "    return frame[:cap]\n"
+    "\n"
+    "\n"
+    "def other():\n"
+    "    return 1\n"
+)
+
+COMMITS = [
+    {"sha": "aaaaaaaaaaaa", "commit": {
+        "author": {"date": "2026-08-01T10:00:00Z"},
+        "message": "Cap the decode frame\n\nA full 1920x1080 frame was tried and reverted: jsQR is plain\n"
+                   "JavaScript costing per pixel.\n\nCo-authored-by: Claude <noreply@anthropic.com>\n"
+                   "Claude-Session: https://claude.ai/code/session_x"}},
+    {"sha": "bbbbbbbbbbbb", "commit": {
+        "author": {"date": "2026-07-20T09:00:00Z"},
+        "message": "Add the scanner"}},
+]
+
+
+def _with_history(files=None, commits=None, extra=""):
+    import json as _json
+    return """
+      const gh = fakeGh(%s);
+      gh.__commits = %s;
+      gh.commits = async (p, n) => gh.__commits.slice(0, n || 5);
+      const t = C.makeTools(gh, {});
+      %s
+    """ % (_json.dumps(files or {"a.py": FILE}), _json.dumps(commits if commits is not None else COMMITS), extra)
+
+
+@needs_node
+def test_why_quotes_the_line_and_the_comment_above_it():
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 5 }));'))
+    assert "a.py:5" in r
+    assert "5 | CAP = 40" in r
+    assert "WHAT THE CODE SAYS ABOUT ITSELF" in r
+    assert "drops the scan rate to a crawl" in r
+
+
+@needs_node
+def test_why_reads_the_docstring_under_a_wrapped_signature():
+    """Signatures wrap routinely, so the docstring is not reliably at def + 1.
+    Looking only upwards finds half the reasons in this codebase."""
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 11 }));'))
+    assert "from the enclosing block" in r
+    assert "Decode one frame" in r
+
+
+@needs_node
+def test_a_comment_between_two_functions_is_not_claimed_by_the_one_above():
+    """The nearest def ABOVE a line is frequently the one that already ended.
+    Handing back a neighbour's docstring reads exactly like an answer, which is
+    worse than returning nothing -- so the heuristic fails closed."""
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 15 }));'))
+    assert "Decode one frame" not in r
+
+
+@needs_node
+def test_why_reports_the_commits_with_their_bodies():
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 5 }));'))
+    assert "aaaaaaaa" in r
+    assert "2026-08-01" in r
+    assert "Cap the decode frame" in r
+    assert "tried and reverted" in r
+    assert "These are reasons, not a changelog" in r
+
+
+@needs_node
+def test_trailers_are_stripped():
+    """Plumbing, not a reason, and it costs context on every call."""
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 5 }));'))
+    assert "Co-authored-by" not in r
+    assert "Claude-Session" not in r
+
+
+@needs_node
+def test_why_says_the_history_is_the_files_not_the_lines():
+    """The desktop reads `git log -L` and answers for the LINE. Over the API
+    the finest filter is the path. Implying otherwise would hand back a
+    confident wrong reason."""
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 5 }));'))
+    assert "cannot filter by line" in r
+    assert "may not all be about line 5" in r
+
+
+@needs_node
+def test_a_file_with_no_commits_still_gets_what_the_code_says():
+    """A tool that answers nothing for an uncommitted file is useless exactly
+    when the agent has just written it."""
+    r = _node(_with_history(commits=[],
+                            extra='out(await t.why({ path: "a.py", line: 5 }));'))
+    assert "drops the scan rate to a crawl" in r
+    assert "No commit has touched this yet" in r
+
+
+@needs_node
+def test_a_history_call_that_fails_still_returns_the_comment():
+    r = _node("""
+      const gh = fakeGh({ "a.py": %s });
+      gh.commits = async () => { throw new Error("GitHub 409: repository is empty"); };
+      const t = C.makeTools(gh, {});
+      out(await t.why({ path: "a.py", line: 5 }));
+    """ % __import__("json").dumps(FILE))
+    assert "drops the scan rate to a crawl" in r
+    assert "Couldn't read the history" in r
+    assert "repository is empty" in r
+
+
+@needs_node
+def test_why_without_a_line_is_the_whole_files_history():
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py" }));'))
+    assert "WHAT CHANGED THIS FILE" in r
+    assert "cannot filter by line" not in r
+    assert "WHAT THE CODE SAYS ABOUT ITSELF" not in r
+
+
+@needs_node
+def test_a_line_past_the_end_is_said_plainly():
+    r = _node(_with_history(extra='out(await t.why({ path: "a.py", line: 900 }));'))
+    assert "there is no line 900" in r
+
+
+@needs_node
+def test_an_unreadable_file_is_reported_not_raised():
+    r = _node(_with_history(extra='out(await t.why({ path: "nope.py", line: 1 }));'))
+    assert "Couldn't read nope.py" in r
+
+
+@needs_node
+def test_max_commits_is_bounded():
+    many = [{"sha": "s%d" % i, "commit": {"author": {"date": "2026-01-01T00:00:00Z"},
+                                          "message": "c%d" % i}} for i in range(30)]
+    r = _node(_with_history(commits=many, extra="""
+      const asked = [];
+      gh.commits = async (p, n) => { asked.push(n); return gh.__commits.slice(0, n); };
+      await t.why({ path: "a.py", max_commits: 999 });
+      await t.why({ path: "a.py", max_commits: 0 });
+      out(asked);
+    """))
+    assert r == [20, 5]
+
+
+@needs_node
+def test_a_long_commit_body_is_trimmed_rather_than_sent_whole():
+    body = "\n".join("line %d" % i for i in range(80))
+    long = [{"sha": "cccccccc", "commit": {"author": {"date": "2026-01-01T00:00:00Z"},
+                                           "message": "subject\n\n" + body}}]
+    r = _node(_with_history(commits=long,
+                            extra='out(await t.why({ path: "a.py" }));'))
+    assert "line 29" in r
+    assert "line 40" not in r
+    assert "more lines" in r
+
+
+@needs_node
+def test_why_asks_github_for_the_path_it_was_given():
+    r = _node(_with_history(extra="""
+      const asked = [];
+      gh.commits = async (p, n) => { asked.push(p); return []; };
+      await t.why({ path: "./a.py" });
+      out(asked);
+    """))
+    assert r == ["a.py"]          # the leading ./ is normalised away
+
+
+# --------------------------------------------------------------------- #
+# branches, and finishing the work
+#
+# Every write from the phone is a commit, and every one of them landed on
+# whichever branch the chat was opened on -- the repository's DEFAULT branch,
+# because that is the only one the phone can open. So work done here went
+# straight to main, unreviewed, and on a repo whose Pages site or CI is wired
+# to main it deployed on the way past.
+#
+# That is not a preference about workflow. It is the phone being unable to do
+# the ordinary safe thing.
+
+def _branchy(extra, branch="main", **kw):
+    import json as _json
+    return """
+      const gh = fakeGh(%s);
+      gh.branch = %s;
+      gh.__default = %s;
+      gh.__refs = [];
+      gh.__prs = %s;
+      gh.__opened = [];
+      gh.__head = %s;
+      gh.branchSha = async () => gh.__head;
+      gh.defaultBranch = async () => gh.__default;
+      gh.createBranch = async (name, sha) => {
+        if (gh.__refs.includes(name)) { const e = new Error("GitHub 422: Reference already exists"); throw e; }
+        gh.__refs.push(name); return { ref: "refs/heads/" + name, object: { sha } };
+      };
+      gh.prsForBranch = async (h) => gh.__prs;
+      gh.openPr = async (title, body, base, head, draft) => {
+        gh.__opened.push({ title, body, base, head, draft });
+        return { number: 42, html_url: "https://github.com/o/r/pull/42" };
+      };
+      const switched = [];
+      const t = C.makeTools(gh, { switchBranch: async (n) => { switched.push(n); gh.branch = n; } });
+      %s
+    """ % (_json.dumps(kw.get("files", {"a.txt": "x"})), _json.dumps(branch),
+           _json.dumps(kw.get("default", "main")), _json.dumps(kw.get("prs", [])),
+           _json.dumps(kw.get("head", "headsha")), extra)
+
+
+@needs_node
+def test_the_branch_tools_are_absent_unless_the_host_can_switch():
+    """The same rule spawn follows. agent-core cannot reach the session that
+    owns the GitHub client, and a tool that silently did nothing would be worse
+    than one that is absent."""
+    r = _node("""
+      const t = C.makeTools(fakeGh({}), {});
+      out([typeof t.new_branch, typeof t.open_pull_request]);
+    """)
+    assert r == ["undefined", "undefined"]
+
+
+@needs_node
+def test_new_branch_creates_it_and_moves_the_chat_onto_it():
+    r = _node(_branchy("""
+      const msg = await t.new_branch({ name: "fix-login" });
+      out({ msg, refs: gh.__refs, switched, now: gh.branch });
+    """))
+    assert r["refs"] == ["fix-login"]
+    assert r["switched"] == ["fix-login"]
+    assert "fix-login" in r["msg"] and "main" in r["msg"]
+
+
+@needs_node
+def test_new_branch_branches_from_where_the_chat_is():
+    r = _node(_branchy("""
+      const from = [];
+      gh.createBranch = async (n, sha) => { from.push(sha); gh.__refs.push(n); return {}; };
+      await t.new_branch({ name: "b" });
+      out(from);
+    """, head="deadbeef"))
+    assert r == ["deadbeef"]
+
+
+@needs_node
+def test_a_name_that_is_taken_is_refused_rather_than_joined():
+    """Carrying on onto someone else's branch is not what "start a branch"
+    meant, and the commits would be real."""
+    r = _node(_branchy("""
+      gh.__refs.push("taken");
+      const msg = await t.new_branch({ name: "taken" });
+      out({ msg, switched });
+    """))
+    assert "already exists" in r["msg"]
+    assert r["switched"] == []
+
+
+@needs_node
+def test_a_name_github_rejects_for_another_reason_says_which():
+    """422 covers both "already exists" and "that is not a valid ref name".
+    Telling someone their name is taken when it is actually malformed sends
+    them off to invent a second name that fails the same way."""
+    r = _node(_branchy("""
+      gh.createBranch = async () => { throw new Error("GitHub 422: Reference name is not valid"); };
+      out(await t.new_branch({ name: "b" }));
+    """))
+    assert "already exists" not in r
+    assert "not valid" in r
+
+
+@needs_node
+def test_a_branch_name_is_made_usable():
+    r = _node(_branchy("""
+      await t.new_branch({ name: "  fix the login redirect  " });
+      out(gh.__refs);
+    """))
+    assert r == ["fix-the-login-redirect"]
+
+
+@needs_node
+def test_new_branch_needs_a_name():
+    r = _node(_branchy("""
+      out({ msg: await t.new_branch({ name: "   " }), refs: gh.__refs });
+    """))
+    assert r["msg"].startswith("ERROR:")
+    assert r["refs"] == []
+
+
+@needs_node
+def test_an_empty_repository_has_nothing_to_branch_from():
+    r = _node(_branchy("""
+      out(await t.new_branch({ name: "b" }));
+    """, head=None))
+    assert "nothing to branch from" in r
+
+
+@needs_node
+def test_opening_a_pull_request_returns_the_link():
+    r = _node(_branchy("""
+      const msg = await t.open_pull_request({ title: "Fix the login redirect", body: "why" });
+      out({ msg, opened: gh.__opened });
+    """, branch="fix-login"))
+    assert "pull/42" in r["msg"] and "#42" in r["msg"]
+    assert r["opened"][0]["base"] == "main"
+    assert r["opened"][0]["head"] == "fix-login"
+
+
+@needs_node
+def test_a_pull_request_is_a_draft_unless_told_otherwise():
+    """Work done on a phone is work nobody has looked at on a screen bigger
+    than a hand, and a draft is the one state that says so without stopping
+    anything."""
+    r = _node(_branchy("""
+      await t.open_pull_request({ title: "a" });
+      await t.open_pull_request({ title: "b", draft: false });
+      out(gh.__opened.map((p) => p.draft));
+    """, branch="fix-login"))
+    assert r == [True, False]
+
+
+@needs_node
+def test_a_pull_request_from_the_default_branch_is_refused_with_what_to_do():
+    r = _node(_branchy("""
+      const msg = await t.open_pull_request({ title: "a" });
+      out({ msg, opened: gh.__opened });
+    """, branch="main"))
+    assert "new_branch first" in r["msg"]
+    assert r["opened"] == []
+
+
+@needs_node
+def test_an_existing_pull_request_is_named_rather_than_duplicated():
+    """GitHub's own error says only "a pull request already exists", without
+    saying where. Asking first means the answer is a link."""
+    r = _node(_branchy("""
+      out(await t.open_pull_request({ title: "a" }));
+    """, branch="fix-login", prs=[{"html_url": "https://github.com/o/r/pull/7"}]))
+    assert "pull/7" in r
+    assert "already has an open pull request" in r
+
+
+@needs_node
+def test_a_branch_with_nothing_on_it_is_said_plainly():
+    r = _node(_branchy("""
+      gh.openPr = async () => { throw new Error("GitHub 422: No commits between main and fix-login"); };
+      out(await t.open_pull_request({ title: "a" }));
+    """, branch="fix-login"))
+    assert "nothing to open a pull request for" in r
+
+
+@needs_node
+def test_the_default_branch_is_asked_for_not_assumed():
+    """Plenty of repositories are not on "main", and a PR opened against a
+    branch that does not exist fails with a message about the base, which
+    reads as the tool being broken."""
+    r = _node(_branchy("""
+      await t.open_pull_request({ title: "a" });
+      out(gh.__opened[0].base);
+    """, branch="work", default="trunk"))
+    assert r == "trunk"
+
+
+@needs_node
+def test_the_prompt_says_edits_are_committed_and_where():
+    p = _node("out(C.SYSTEM_PROMPT);")
+    assert "new_branch" in p
+    assert "open_pull_request" in p
+    assert "COMMITTED IMMEDIATELY" in p
+
+
+@needs_node
+def test_the_branch_schemas_match_the_implementations():
+    names = [f["function"]["name"] for f in _node("out(C.BRANCH_SCHEMAS);")]
+    assert names == ["new_branch", "open_pull_request"]
+    have = _node(_branchy('out(names.map((n) => typeof t[n]));'
+                          .replace("names", '["new_branch", "open_pull_request"]')))
+    assert have == ["function", "function"]
+
+
+# --------------------------------------------------------------------- #
+# check_ci
+#
+# The phone can branch, edit, commit and open a pull request. "Did the tests
+# pass" was the one question in that loop it still had to send you somewhere
+# else for -- and it is the most phone-shaped question of the lot: you push,
+# you walk away, and you want to know ten minutes later without going back to
+# a desk.
+
+def _ci(runs, extra='out(await t.check_ci({}));', branch="fix-login"):
+    import json as _json
+    return """
+      const gh = fakeGh({});
+      gh.branch = %s;
+      gh.branchSha = async () => "abcdef1234567890";
+      gh.__runs = %s;
+      gh.__asked = [];
+      gh.checkRuns = async (ref) => { gh.__asked.push(ref); return { check_runs: gh.__runs }; };
+      const t = C.makeTools(gh, {});
+      %s
+    """ % (_json.dumps(branch), _json.dumps(runs), extra)
+
+
+def _run(name, status="completed", conclusion="success", **kw):
+    r = {"name": name, "status": status, "conclusion": conclusion,
+         "html_url": "https://github.com/o/r/runs/1"}
+    r.update(kw)
+    return r
+
+
+@needs_node
+def test_all_green_says_so():
+    r = _node(_ci([_run("tests (ubuntu)"), _run("tests (windows)")]))
+    assert "2 passed, 0 failed, 0 still running" in r
+    assert "Everything green" in r
+
+
+@needs_node
+def test_a_failure_is_named_with_its_summary_and_a_link():
+    r = _node(_ci([
+        _run("tests (windows)", conclusion="failure",
+             output={"title": "1 failed", "summary": "test_grep_stops_once_it_has_enough"}),
+        _run("tests (ubuntu)"),
+    ]))
+    assert "FAILED  tests (windows)" in r
+    assert "1 failed" in r
+    assert "test_grep_stops_once_it_has_enough" in r
+    assert "https://github.com/o/r/runs/1" in r
+
+
+@needs_node
+def test_a_run_still_going_is_not_reported_as_a_pass():
+    r = _node(_ci([_run("browser-ui", status="in_progress", conclusion=None),
+                   _run("tests (ubuntu)")]))
+    assert "1 passed, 0 failed, 1 still running" in r
+    assert "running browser-ui" in r
+    assert "Everything green" not in r
+    assert "ask again once the rest finish" in r
+
+
+@needs_node
+def test_skipped_and_neutral_are_not_failures():
+    """A skipped job is not a broken build, and calling it one would make the
+    tool cry wolf on every repository that has a conditional check."""
+    r = _node(_ci([_run("a", conclusion="skipped"), _run("b", conclusion="neutral")]))
+    assert "2 passed, 0 failed" in r
+
+
+@needs_node
+def test_a_cancelled_or_timed_out_run_is_a_failure_and_says_which():
+    r = _node(_ci([_run("slow", conclusion="timed_out")]))
+    assert "FAILED  slow (timed_out)" in r
+
+
+@needs_node
+def test_nothing_reported_covers_both_reasons():
+    """"Not started yet" and "this repo has no CI" look identical from here,
+    and saying only the first sends someone to wait for a run that is never
+    coming."""
+    r = _node(_ci([]))
+    assert "No checks have reported" in r
+    assert "may not have started" in r
+    assert "none configured" in r
+
+
+@needs_node
+def test_it_asks_about_this_branchs_latest_commit():
+    r = _node(_ci([_run("a")], extra="await t.check_ci({}); out(gh.__asked);"))
+    assert r == ["abcdef1234567890"]
+
+
+@needs_node
+def test_another_ref_can_be_named():
+    r = _node(_ci([_run("a")], extra='await t.check_ci({ ref: "main" }); out(gh.__asked);'))
+    assert r == ["main"]
+
+
+@needs_node
+def test_a_huge_summary_is_trimmed():
+    """A check's summary is written for a web page and can run to thousands of
+    lines. Unbounded it would be a whole phone turn's context spent on one
+    failure."""
+    r = _node(_ci([_run("big", conclusion="failure",
+                        output={"summary": "\n".join("line %d" % i for i in range(2000))})]))
+    assert "truncated" in r
+    assert len(r) < 4000, len(r)
+
+
+@needs_node
+def test_a_refused_request_is_reported_not_raised():
+    r = _node("""
+      const gh = fakeGh({});
+      gh.branch = "b";
+      gh.branchSha = async () => "sha";
+      gh.checkRuns = async () => { throw new Error("GitHub 403: rate limited"); };
+      const t = C.makeTools(gh, {});
+      out(await t.check_ci({}));
+    """)
+    assert "Couldn't read the checks" in r
+    assert "rate limited" in r
+
+
+@needs_node
+def test_check_ci_needs_no_host_wiring():
+    """Unlike the branch tools. A question this ordinary should not depend on
+    how the app was assembled."""
+    r = _node("""
+      const t = C.makeTools(fakeGh({}), {});
+      out(typeof t.check_ci);
+    """)
+    assert r == "function"
+
+
+@needs_node
+def test_the_prompt_says_check_ci_is_the_only_way_to_know():
+    """The phone cannot run tests. A model that does not know this tool exists
+    answers "I can't tell from here", which is now false."""
+    p = _node("out(C.SYSTEM_PROMPT);")
+    assert "check_ci" in p

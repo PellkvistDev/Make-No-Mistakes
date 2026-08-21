@@ -568,6 +568,10 @@
         // Carried so a turn cut off by the app being killed outright -- not
         // merely backgrounded -- is still picked up on the next launch.
         interrupted: !!session.interrupted,
+        // Where this chat started, so review_changes still has something to
+        // diff against after the app has been killed -- which on a phone is
+        // the ordinary way a chat ends, not an unusual one.
+        baseRef: session.baseRef || null,
       }, session.cryptoKey);
       localStorage.setItem(SESSION_KEY, JSON.stringify(blob));
     } catch (e) { /* quota / crypto — skip silently */ }
@@ -580,7 +584,7 @@
     catch { return false; }
     if (!data || !data.repo || !Array.isArray(data.messages)) return false;
     const r = data.repo;
-    connectRepo(r.owner, r.repo, r.branch, r.full_name);
+    connectRepo(r.owner, r.repo, r.branch, r.full_name, r.default_branch);
     if (data.baseSystem) session.baseSystem = data.baseSystem;
     session.chatId = data.chatId || newChatId();
     session.chatTitle = data.chatTitle || "";
@@ -588,7 +592,16 @@
     session.transcript = data.transcript || [];
     session.pending = data.pending || [];
     session.interrupted = !!data.interrupted;
-    $("chat-repo-name").textContent = r.full_name;
+    // Restored rather than re-taken: re-taking it would silently move the
+    // starting point to wherever the branch is NOW, so everything committed
+    // before the app was killed would stop showing up in review_changes.
+    // A chat saved by a build that did not record one starts recording here,
+    // and then says "from now on" rather than claiming a base it does not
+    // have. AFTER chatId is set, because markBaseRef checks on the way back
+    // that it is still the same chat.
+    session.baseRef = data.baseRef || null;
+    if (!session.baseRef) markBaseRef();
+    renderRepoLabel();
     $("messages").innerHTML = "";
     for (const b of session.transcript) addBubble(b.role, b.text, false);
     addBubble("system", "Resumed your session in " + r.full_name + ".", false);
@@ -669,32 +682,88 @@
     return m;
   }
 
-  // Wire up the GitHub client + tools for a repo (shared by open and resume).
-  function connectRepo(owner, repo, branch, fullName) {
-    session.repo = { owner, repo, branch, full_name: fullName };
+  // Point this chat's GitHub client at a branch, and rebuild everything that
+  // hangs off it. Split out of connectRepo because switching branches MID-CHAT
+  // must not do what connecting a repo does: the conversation, the transcript
+  // and the notes left for the desktop all belong to the chat, not to the
+  // branch it happens to be committing to.
+  //
+  // The tools are rebuilt rather than re-pointed, and that is the whole reason
+  // this is not a one-line assignment: makeTools keeps a path -> contents cache,
+  // and a cache carried across a branch switch is the worst possible kind of
+  // wrong. Reads would SUCCEED and hand back the other branch's text.
+  function bindBranch(branch) {
+    const { owner, repo, full_name, default_branch } = session.repo;
+    session.repo = { owner, repo, branch, full_name,
+                     default_branch: default_branch || branch };
     session.gh = AC.makeGitHub({ token: session.secrets.githubToken, owner, repo, branch });
-    session.baseSystem = AC.SYSTEM_PROMPT + "\n\nRepository: " + fullName + " (branch " + branch + ").";
+    session.baseSystem = AC.SYSTEM_PROMPT + "\n\nRepository: " + full_name + " (branch " + branch + ").";
+    if (session.messages && session.messages[0] && session.messages[0].role === "system") {
+      session.messages[0] = { role: "system", content: session.baseSystem };
+    }
+    // Where THIS branch started, so review_changes diffs against the branch
+    // point rather than against wherever the chat began on another branch.
+    session.baseRef = null;
+    markBaseRef();
+    const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); haptic(18); };
+    // Passed as a getter rather than a value: it is resolved in the background
+    // (markBaseRef) and a chat is usable before it lands. Reading it at call
+    // time is what makes review_changes work on the first turn.
+    const baseRef = () => session.baseRef;
+    // Persisted immediately, not at the end of the turn: the branch is where
+    // every subsequent commit goes, and a reload that came back on the old one
+    // would carry on writing to it.
+    const switchBranch = async (name) => {
+      bindBranch(name);
+      toast("on " + name);
+      haptic(12);
+      addBubble("system", "🌿 Now working on branch " + name + ".", false);
+      await persistSession();
+    };
+    // Sub-agent tools have NO spawn (depth 1); the main tools add spawn_agent.
+    // Sub-agents get no branch tools either: one of them moving the chat onto
+    // another branch underneath the agent that dispatched it is not something
+    // that conversation could recover from.
+    session.subTools = AC.makeTools(session.gh, { confirmWrite, onCommit, viewImage, needsDesktop, baseRef });
+    session.tools = AC.makeTools(session.gh, {
+      confirmWrite, onCommit, spawn: runSubAgent, viewImage, needsDesktop, baseRef, switchBranch });
+    session.readTools = {};
+    for (const n of READ_TOOL_NAMES) session.readTools[n] = session.tools[n];
+    session.readTools.view_image = session.tools.view_image;   // let planning look at images too
+    renderRepoLabel();
+  }
+
+  // The header names the branch whenever it is not the repo's default, because
+  // on this device that is where every edit is being committed -- silently, as
+  // it is made. Three places used to write this label; they all call this now,
+  // or one of them shows the repo without the branch it is actually on.
+  function renderRepoLabel() {
+    const r = session.repo || {};
+    const def = r.default_branch || "";
+    $("chat-repo-name").textContent =
+      (r.full_name || "") + (r.branch && r.branch !== def ? " · " + r.branch : "");
+  }
+
+  // Wire up the GitHub client + tools for a repo (shared by open and resume).
+  function connectRepo(owner, repo, branch, fullName, defaultBranch) {
+    // `default_branch` travels with the repo record rather than sitting beside
+    // it, so a chat restored from local storage or pulled from sync still
+    // knows which branch is the default -- and can therefore say when it is
+    // somewhere else, which on this device is where every edit is landing.
+    // Defaulted to the branch being opened, which is what it is when a repo is
+    // picked from the list.
+    session.repo = { owner, repo, branch, full_name: fullName,
+                     default_branch: defaultBranch || branch };
     session.turnCommits = 0;
     session.images = {};   // name -> data URL, for view_image
     session.compact = null;  // cached summary of trimmed turns, per conversation
     session.toldCompact = false;
     session.pending = [];    // work parked for the desktop, per conversation
     session.carry = {};      // nothing to carry: this chat starts here
-    session.baseRef = null;  // resolved per chat, by markBaseRef
     session.readOnly = false;
     applyReadOnlyChrome(false);
     session.transcript = [];
-    const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); haptic(18); };
-    // Passed as a getter rather than a value: it is resolved in the background
-    // (markBaseRef) and a chat is usable before it lands. Reading it at call
-    // time is what makes review_changes work on the first turn.
-    const baseRef = () => session.baseRef;
-    // Sub-agent tools have NO spawn (depth 1); the main tools add spawn_agent.
-    session.subTools = AC.makeTools(session.gh, { confirmWrite, onCommit, viewImage, needsDesktop, baseRef });
-    session.tools = AC.makeTools(session.gh, { confirmWrite, onCommit, spawn: runSubAgent, viewImage, needsDesktop, baseRef });
-    session.readTools = {};
-    for (const n of READ_TOOL_NAMES) session.readTools[n] = session.tools[n];
-    session.readTools.view_image = session.tools.view_image;   // let planning look at images too
+    bindBranch(branch);
     clearAttachments();
   }
 
@@ -744,7 +813,7 @@
     session.readOnly = false;
     applyReadOnlyChrome(false);
     clearAttachments();
-    $("chat-repo-name").textContent = session.repo.full_name;
+    renderRepoLabel();
     $("messages").innerHTML = "";
     addBubble("system", "Connected to " + session.repo.full_name + ". I can read, search, and edit files here — each edit is committed. I can't run code on the phone; that happens when your desktop syncs or via CI.");
     show("screen-chat");
@@ -1071,7 +1140,7 @@
     const r = data.repo;
     if (r && r.full_name) {
       if (!session.repo || r.full_name !== session.repo.full_name) {
-        connectRepo(r.owner, r.repo, r.branch || "main", r.full_name);
+        connectRepo(r.owner, r.repo, r.branch || "main", r.full_name, r.default_branch);
       }
     } else {
       // No repo: the agent has nothing to act on here, but the conversation is
@@ -1109,7 +1178,7 @@
     session.messages = AC.applyHandoff(session.messages, data.device, DEVICE_LABEL);
     noteDesktopWork(data.repo_state);
     clearAttachments();
-    $("chat-repo-name").textContent = session.repo.full_name;
+    renderRepoLabel();
     $("messages").innerHTML = "";
     for (const b of session.transcript) addBubble(b.role, b.text, false);
     addBubble("system", "Resumed “" + (session.chatTitle || "chat") + "”.", false);
@@ -1633,8 +1702,15 @@
     return base.concat([AC.VIEW_IMAGE_SCHEMA, AC.NEEDS_DESKTOP_SCHEMA]);
   }
   // Advertise spawn_agent on the main turn only when sub-agents are enabled.
+  // The branch tools ride along on the main turn and nowhere else: a sub-agent
+  // moving the chat onto another branch underneath the agent that dispatched
+  // it is not something that conversation could recover from, and a spoken
+  // "open a pull request" wants the same confirmation a written one gets.
   function mainSchemas() {
-    const base = subagentsOn() ? AC.TOOL_SCHEMAS.concat([AC.SPAWN_SCHEMA]) : AC.TOOL_SCHEMAS;
+    let base = subagentsOn() ? AC.TOOL_SCHEMAS.concat([AC.SPAWN_SCHEMA]) : AC.TOOL_SCHEMAS;
+    // Guarded the same way WORKER_SCHEMAS is: a cached agent-core.js older
+    // than this file would make the spread throw and take the turn with it.
+    base = base.concat(AC.BRANCH_SCHEMAS || []);
     return visionSchemas(base);
   }
 
@@ -2688,7 +2764,11 @@
   function planMode() { return pref("mnm.plan", "0") === "1"; }
   function subagentsOn() { return pref("mnm.subagents", "1") === "1"; }
   function hapticsOn() { return pref("mnm.haptics", "1") === "1"; }
-  const READ_TOOL_NAMES = ["list_dir", "glob", "read_file", "grep", "search_code"];
+  // `why` belongs here for the same reason view_image does: it is read-only,
+  // and "what was already tried and reverted" is exactly a planning question --
+  // the one a plan that repeats a mistake was missing.
+  const READ_TOOL_NAMES = ["list_dir", "glob", "read_file", "grep", "search_code",
+                           "why", "check_ci"];
   // view_image is read-only, and looking at a mockup is exactly a planning job,
   // so plan mode gets it too (session.readTools already wires the implementation).
   const READ_SCHEMAS = AC.TOOL_SCHEMAS.filter((s) => READ_TOOL_NAMES.includes(s.function.name))
@@ -3664,6 +3744,16 @@
     voice.sentTools = names; voice.sentPromptChars = chars;
   };
   window.__diagClose = (s) => { voice.lastClose = s; };
+  // Seam for the branch tests. The REAL session and the real rebind, for the
+  // same reason __voiceTool is the real dispatcher: what is worth testing here
+  // is that moving to another branch rebuilds the GitHub client AND drops the
+  // file cache that hangs off it, and a stand-in for either is the one thing
+  // that cannot show it.
+  window.__branch = {
+    session: () => session,
+    bind: (name) => bindBranch(name),
+    persist: () => persistSession(),
+  };
 
   function voiceOnMessage(payload) {
     // The only thing that distinguishes "the session is up" from "the socket

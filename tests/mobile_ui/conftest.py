@@ -82,7 +82,8 @@ FAKE_GITHUB = r"""() => {
     if (p === "/user/repos" && method === "GET")
       return j([{ full_name: "you/app", name: "app", owner: { login: "you" }, default_branch: "main" }]);
     if (p === "/user/repos" && method === "POST") return j({ name: body.name });
-    if (/^\/repos\/[^/]+\/[^/]+$/.test(p)) return j({ name: p.split("/").pop() });
+    if (/^\/repos\/[^/]+\/[^/]+$/.test(p))
+      return j({ name: p.split("/").pop(), default_branch: "main" });
 
     const m = p.match(/^\/repos\/[^/]+\/[^/]+\/contents\/(.*)$/);
     if (m) {
@@ -121,6 +122,25 @@ FAKE_GITHUB = r"""() => {
         if (cur && body.sha !== cur.sha) return j({ message: "does not match" }, 409);
         delete files[path];
         return j({});
+      }
+    }
+    // Pull requests, so the branch tools are exercised against something that
+    // behaves like GitHub rather than against the catch-all below -- which
+    // answers {} to everything and would let a broken call look like a
+    // working one.
+    const pr = p.match(/^\/repos\/([^/]+)\/([^/]+)\/pulls$/);
+    if (pr) {
+      window.__prs = window.__prs || [];
+      if (method === "GET") {
+        const head = (u.searchParams.get("head") || "").split(":").pop();
+        return j(window.__prs.filter((x) => !head || x.head === head));
+      }
+      if (method === "POST") {
+        const made = { number: 100 + window.__prs.length, head: body.head,
+                       base: body.base, title: body.title, draft: !!body.draft,
+                       html_url: "https://github.com/o/r/pull/" + (100 + window.__prs.length) };
+        window.__prs.push(made);
+        return j(made);
       }
     }
     if (p.includes("/git/trees/")) return j({ tree: [{ type: "blob", path: "a.py", size: 8 }] });
