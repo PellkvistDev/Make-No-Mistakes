@@ -238,7 +238,17 @@ function waitForLoad(tabId, timeoutMs = 30000) {
 async function capture(tab) {
   try {
     await chrome.tabs.update(tab.id, { active: true });
-    await chrome.windows.update(tab.windowId, { focused: true, state: "normal" });
+    // focused ALONE, and never `state`. `state: "normal"` is Chrome's RESTORE:
+    // it un-maximizes a maximized window and drops a fullscreen one back to a
+    // floating rectangle. So every screenshot the agent took resized the
+    // browser the user lives in -- and there is no undo, because the previous
+    // state is not readable once it has been changed.
+    //
+    // `focused: true` is what was actually wanted. It raises a covered window,
+    // and for a MINIMIZED one Chrome restores it to whatever it was before --
+    // which is exactly the value we would otherwise have to guess at, since a
+    // minimized window reports its state as "minimized" and nothing else.
+    await chrome.windows.update(tab.windowId, { focused: true });
   } catch { /* keep going; the capture itself is the real test */ }
   for (let attempt = 0; attempt < 2; attempt++) {
     await new Promise((r) => setTimeout(r, attempt === 0 ? 120 : 400));

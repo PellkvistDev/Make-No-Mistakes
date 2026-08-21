@@ -1229,6 +1229,22 @@ The fake GitHub in `tests/test_phone_tools.py` enforces that rule. That is the
 only reason a test can see this at all — a fake that accepted any PUT would
 have passed throughout.
 
+## The agent must not reshape the user's browser window
+
+`capture()` called `chrome.windows.update(id, {state: "normal"})` before every
+screenshot. `state: "normal"` is not "make this visible" — it is Chrome's
+**restore**: it un-maximizes a maximized window and drops a fullscreen one back
+to a floating rectangle. So the agent resized the browser the user lives in, on
+the way past, with no undo — once the state has been changed the previous one is
+not readable from anywhere.
+
+`focused: true` alone is what was wanted. It raises a covered window, and for a
+minimized one Chrome restores whatever it was before — precisely the value that
+would otherwise have to be guessed at. `tests/test_extension_window.py` asserts
+that **no** `chrome.windows.update` call in the extension carries a `state`,
+not just the one in `capture()`: every one of them is reachable from an ordinary
+agent action.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by
