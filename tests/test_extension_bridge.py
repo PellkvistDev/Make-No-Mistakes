@@ -286,6 +286,12 @@ class _Ext:
     def fail(self, cmd, message):
         self._fails[cmd] = message
 
+    def keepalive(self):
+        """What background.js sends from JavaScript every 20 seconds. Unlike a
+        pong this cannot be answered by the browser's network stack: it is
+        proof the service worker itself is alive."""
+        self._send(json.dumps({"type": "keepalive"}))
+
     def ping(self, payload=b""):
         self._send_frame(payload, 0x9)
 
@@ -581,3 +587,138 @@ def test_the_log_says_who_actually_closed_it(bridge, ext):
     import glmcode.extension_bridge as eb
     src = __import__("pathlib").Path(eb.__file__).read_text(encoding="utf-8")
     assert "gave up reading the connection" in src
+
+
+# --------------------------------------------------------------------- #
+# A pong is the browser, not the extension
+#
+# Reported from a real machine, again: browser_tabs failed with "the browser
+# did not answer 'tabs' in time" while Settings said Connected. The previous
+# round of this made `connected` mean "a frame arrived recently" instead of "a
+# descriptor exists", which was an improvement and still not the truth --
+# background.js says why in its own comments: a protocol-level pong is answered
+# by Chrome's network stack WITHOUT the service worker being woken. The worker
+# is what runs every command, so a reaped one leaves a socket that pongs
+# forever and answers nothing.
+
+
+def _keepalive_speaker(bridge, port):
+    """An extension of the current build: it says hello and then keeps
+    speaking, the way background.js does on its own timer."""
+    e = _Ext(port)
+    e.keepalive()
+    for _ in range(100):
+        if bridge.connected:
+            break
+        time.sleep(0.02)
+    return e
+
+
+def test_a_ponging_socket_with_a_dead_worker_is_not_called_connected(bridge, ext,
+                                                                    monkeypatch):
+    """The exact report. The socket is healthy and answers every ping; the
+    extension behind it has stopped existing."""
+    import glmcode.extension_bridge as eb
+    monkeypatch.setattr(eb, "WORKER_QUIET_AFTER", 0.6)
+    monkeypatch.setattr(eb, "PING_EVERY", 0.15)
+    ext.keepalive()
+    for _ in range(100):
+        if bridge._keepalive_seen:
+            break
+        time.sleep(0.02)
+    assert bridge.connected is True
+    # The worker is reaped: no more keepalives. The socket stays up and goes on
+    # answering pings at the protocol level, exactly as a real one does.
+    for _ in range(60):
+        if not bridge.connected:
+            break
+        time.sleep(0.05)
+    assert bridge.connected is False, \
+        "a socket that only pongs was still reported as a live extension"
+
+
+def test_the_dead_one_is_dropped_so_the_extension_can_come_back(bridge, ext,
+                                                                monkeypatch):
+    """Dropping it IS the recovery, not just the bookkeeping: the extension
+    re-dials on its next wake and a fresh connection replaces this one. Holding
+    the corpse is what left every command timing out with nothing to fix."""
+    import glmcode.extension_bridge as eb
+    monkeypatch.setattr(eb, "WORKER_QUIET_AFTER", 0.6)
+    monkeypatch.setattr(eb, "PING_EVERY", 0.15)
+    ext.keepalive()
+    for _ in range(100):
+        if bridge._keepalive_seen:
+            break
+        time.sleep(0.02)
+    for _ in range(60):
+        if bridge._client is None:
+            break
+        time.sleep(0.05)
+    assert bridge._client is None, "the dead connection was kept"
+    why = [e["why"] for e in bridge.events if e["what"] == "dropped"]
+    assert any("service worker" in w for w in why), why
+
+    replacement = _keepalive_speaker(bridge, bridge.port)
+    try:
+        replacement.handle("tabs", lambda p: [{"id": 1, "title": "A", "url": "u",
+                                               "active": True, "usable": True}])
+        assert bridge.connected is True
+        assert bridge.call("tabs")
+    finally:
+        replacement.close()
+
+
+def test_an_extension_that_keeps_speaking_stays_connected(bridge, ext, monkeypatch):
+    """The heartbeat must not invent a disconnection. A quiet conversation is
+    not a dead worker as long as the worker is still saying so."""
+    import glmcode.extension_bridge as eb
+    monkeypatch.setattr(eb, "WORKER_QUIET_AFTER", 0.6)
+    monkeypatch.setattr(eb, "PING_EVERY", 0.15)
+    deadline = time.monotonic() + 1.6
+    while time.monotonic() < deadline:
+        ext.keepalive()
+        time.sleep(0.15)
+    assert bridge.connected is True
+
+
+def test_an_older_extension_is_not_killed_for_not_knowing_the_word(bridge, ext,
+                                                                  monkeypatch):
+    """These are loaded unpacked, so a copy predating the keepalive is a real
+    possibility. It keeps the old any-frame rule rather than being declared
+    dead every fifty seconds for speaking an older language."""
+    import glmcode.extension_bridge as eb
+    monkeypatch.setattr(eb, "WORKER_QUIET_AFTER", 0.4)
+    monkeypatch.setattr(eb, "PING_EVERY", 0.15)
+    time.sleep(1.2)                      # never sends a keepalive
+    assert bridge.connected is True
+
+
+def test_a_reply_counts_as_the_extension_speaking(bridge, ext, monkeypatch):
+    """A busy extension is obviously alive; it should not need to also chirp on
+    a timer to avoid being called dead mid-task."""
+    import glmcode.extension_bridge as eb
+    monkeypatch.setattr(eb, "WORKER_QUIET_AFTER", 0.8)
+    monkeypatch.setattr(eb, "PING_EVERY", 0.15)
+    ext.handle("tabs", lambda p: [])
+    ext.keepalive()
+    for _ in range(100):
+        if bridge._keepalive_seen:
+            break
+        time.sleep(0.02)
+    deadline = time.monotonic() + 1.6
+    while time.monotonic() < deadline:
+        bridge.call("tabs")
+        time.sleep(0.2)
+    assert bridge.connected is True
+
+
+def test_the_timeout_says_what_it_actually_means(bridge, ext):
+    """"did not answer in time" on its own sent every report of this to the
+    wrong place: the user looks at Settings, sees Connected, and concludes the
+    app is lying. It has to name the cause and say that it recovers."""
+    ext.handle("tabs", lambda p: None, answer=False)
+    with pytest.raises(BridgeError) as e:
+        bridge.call("tabs", timeout=0.4)
+    msg = str(e.value)
+    assert "service worker" in msg
+    assert "re-dials" in msg or "wake it" in msg

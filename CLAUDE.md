@@ -942,16 +942,47 @@ can take — so the only thing left is to remove every step around it:
 - **The panel names the tab it would act on.** "My own browser" is otherwise a
   leap of faith taken at the moment the agent starts clicking things.
 
-**An open socket is not evidence of a live browser.** `connected` used to mean
-"a file descriptor exists", which produced the worst version of this feature:
+**An open socket is not evidence of a live browser** — and an *answering*
+socket is not evidence of a live service worker. `connected` used to mean "a
+file descriptor exists", which produced the worst version of this feature:
 Settings said *Connected* while every browser action sat for the full timeout
 and then failed. A laptop that slept, a browser that was killed, a FIN that
-never arrived — all leave a socket that reads as fine and answers nothing. The
-bridge pings on a heartbeat and `connected` asks when the extension was last
-heard from; a stale client is dropped and anything waiting on it fails at once,
-naming the reason. Browsers answer a WebSocket ping at the protocol level,
-without the service worker being woken, so this stays true exactly when it must
-— while Chrome has the worker asleep.
+never arrived — all leave a socket that reads as fine and answers nothing. So
+the bridge pings on a heartbeat and `connected` asks when the extension was
+last heard from.
+
+**That was still not enough, and `background.js` said why in its own
+comments:** a WebSocket ping is answered by Chrome's network stack *without the
+service worker being woken at all*. The worker is what runs `tabs`, `snapshot`,
+`click` — everything. So a reaped worker leaves a socket that pongs forever and
+answers nothing, and the app called that Connected while `browser_tabs` failed
+with "the browser did not answer in time". The same report, one level down.
+
+- **Only what the EXTENSION said counts** — a `hello`, a `keepalive`, or a
+  reply. `_last_message` is tracked apart from `_last_seen` because they are
+  evidence of different things.
+- **A connection that never sends keepalives keeps the old any-frame rule.**
+  The extension is loaded unpacked, so a copy predating them is a real
+  possibility, and declaring it dead every fifty seconds for speaking an older
+  language would be a worse bug than the one being fixed.
+- **Dropping the dead one IS the recovery**, not bookkeeping. The extension
+  re-dials on its next wake and a fresh connection replaces it; holding the
+  corpse is what left every command timing out with nothing to fix.
+- **`setInterval` does not survive a reap** any more than `setTimeout` does —
+  the same lesson, eighty lines further down the same file. The keepalive is
+  the only thing telling the app the worker is alive, so the reconnect alarm
+  restarts it.
+- **The alarm is no longer cleared on a successful connect.** It was, and the
+  reason given was true at the time: waking the worker every thirty seconds for
+  a live connection is pure cost. The keepalive changed that — while connected
+  the worker is deliberately held *awake*, so there is nothing to wake and the
+  cost is zero, while clearing it removed the only timer that outlives a reap.
+- **`connect()` guards on the socket being USABLE**, not merely non-null. A
+  socket reaching CLOSING/CLOSED without `onclose` having run made it a
+  permanent early return, and the extension never re-dialled.
+- **The timeout message names the cause.** "Did not answer in time" on its own
+  sent every report of this to the wrong place: the user reads Settings, sees
+  Connected, and concludes the app is lying to them.
 
 The heartbeat **ticks finely and decides from elapsed time** rather than
 sleeping for the whole interval: a loop parked in an eight-second wait cannot
@@ -977,7 +1008,10 @@ about any of the causes:
   `chrome.alarms` is the one timer that outlives the worker; `tabs.onActivated`
   and `windows.onFocusChanged` cover the gap below the alarm's 30-second floor,
   since browsing wakes the worker anyway. `connect()` must therefore stay a
-  no-op when a socket already exists, or browsing sprays connections.
+  no-op when a socket is already USABLE, or browsing sprays connections --
+  guarded on `readyState`, not on the variable being non-null, since a socket
+  left CLOSING/CLOSED without `onclose` having run would otherwise make this a
+  permanent early return.
 - **The port was opened lazily, by the Settings panel's status call.** So a
   normal launch — app starts, setting already on, nobody opens Settings — left
   nothing to connect to. `boot()` opens it now when the setting is on, and only
@@ -986,22 +1020,6 @@ about any of the causes:
   `control_chrome` quietly launched a separate browser. It warns now
   (`not_connected_hint()`), naming the port and what to check, because the
   feature looked broken rather than off.
-
-**An open socket is not evidence of a live browser.** `connected` used to mean
-"a file descriptor exists", which produced the worst version of this feature:
-Settings said *Connected* while every browser action sat for the full timeout
-and then failed. A laptop that slept, a browser that was killed, a FIN that
-never arrived — all leave a socket that reads as fine and answers nothing. The
-bridge pings on a heartbeat and `connected` asks when the extension was last
-heard from; a stale client is dropped and anything waiting on it fails at once,
-naming the reason. Browsers answer a WebSocket ping at the protocol level,
-without the service worker being woken, so this stays true exactly when it must
-— while Chrome has the worker asleep.
-
-The heartbeat **ticks finely and decides from elapsed time** rather than
-sleeping for the whole interval: a loop parked in an eight-second wait cannot
-notice a shutdown, and a test that shortens the timings finds a loop that never
-re-reads them.
 
 **A blink is not a failure.** The socket goes away for ordinary reasons — Chrome
 recycling the service worker, an extension reload, a browser restart — each a

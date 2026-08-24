@@ -39,7 +39,15 @@ function setBadge(state) {
 }
 
 function connect() {
-  if (paused || socket) return;
+  // Guarded on the socket being USABLE, not merely non-null. onclose is what
+  // clears this, and a socket that reached CLOSING/CLOSED without it having
+  // run would make this an early return for the rest of the worker's life --
+  // the extension sitting there with a dead socket, never re-dialling, while
+  // the app shows it as connected.
+  if (paused) return;
+  if (socket && (socket.readyState === WebSocket.OPEN ||
+                 socket.readyState === WebSocket.CONNECTING)) return;
+  socket = null;
   const port = PORTS[portIndex % PORTS.length];
   let ws;
   try {
@@ -55,7 +63,13 @@ function connect() {
     // Every port in the list gets tried in turn, so a port taken by something
     // else costs a second rather than the feature.
     retryMs = RETRY_MIN_MS;
-    chrome.alarms.clear("reconnect");
+    // The alarm is NOT cleared here, and that is the point of it. It was, and
+    // that left a connected extension with no timer that outlives its worker:
+    // the keepalive interval holds the worker up until something reaps it
+    // anyway, and then nothing is left to wake it. The extension sat dead,
+    // with an open socket the app went on calling Connected, until the user
+    // happened to touch a tab. It is a heartbeat, not just a retry.
+    chrome.alarms.create("reconnect", { periodInMinutes: 0.5 });
     setBadge("on");
     send({ type: "hello", agent: "mnm-extension", version:
            chrome.runtime.getManifest().version });
@@ -101,7 +115,20 @@ function scheduleRetry() {
 }
 
 chrome.alarms.onAlarm.addListener((a) => {
-  if (a.name === "reconnect") connect();
+  if (a.name !== "reconnect") return;
+  // An alarm is the one timer that outlives the worker, so this fires on a
+  // FRESH worker after a reap -- where module state is gone, `socket` is null
+  // and connect() dials again. On a live worker holding a good socket it is a
+  // no-op, except for restarting the keepalive: setInterval does not survive a
+  // reap any more than setTimeout does, and the interval is the only thing
+  // telling the app the worker is alive. A worker that came back without it
+  // would keep the connection open and be reported dead by the app 50 seconds
+  // later, over and over.
+  connect();
+  if (socket && socket.readyState === WebSocket.OPEN && !keepaliveTimer) {
+    startKeepalive();
+    send({ type: "keepalive" });
+  }
 });
 
 // Anything the user does in the browser wakes the worker, so a reconnect

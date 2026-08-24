@@ -61,6 +61,13 @@ ACCEPT_POLL = 0.25
 # Chrome has the worker asleep.
 PING_EVERY = 8.0
 STALE_AFTER = 30.0
+# How long the extension's own keepalive may be missing before its service
+# worker is presumed gone. It speaks every 20 seconds (KEEPALIVE_MS in
+# background.js), so this is two missed beats and a margin -- long enough that
+# an ordinary hiccup is not called a death, short enough that the extension's
+# next wake re-dials rather than the user sitting in front of a Settings panel
+# that says Connected while nothing works.
+WORKER_QUIET_AFTER = 50.0
 # A screenshot is the only big thing that crosses this wire; the cap is a
 # sanity bound, not a budget.
 MAX_MESSAGE = 32 * 1024 * 1024
@@ -221,7 +228,16 @@ class ExtensionBridge:
         self._thread: threading.Thread | None = None
         self.on_change = None          # called when a client connects/leaves
         self.hello: dict = {}          # what the extension said about itself
-        self._last_seen = 0.0          # when the extension last said anything
+        self._last_seen = 0.0          # any frame, a protocol pong included
+        # When the extension last spoke AS THE EXTENSION -- a hello, a
+        # keepalive, or a reply. Kept apart from _last_seen because they are
+        # evidence of different things; see `connected`.
+        self._last_message = 0.0
+        # Whether THIS connection has ever sent a keepalive. An extension
+        # predating them (they are loaded unpacked, so an old copy is a real
+        # possibility) would otherwise be declared dead every 50 seconds for
+        # not speaking a language it does not know.
+        self._keepalive_seen = False
         self._reconnect_grace = RECONNECT_GRACE
         # The last few connect/disconnect events, with reasons. The one thing
         # every report of this feature has needed and none could supply: when
@@ -307,20 +323,34 @@ class ExtensionBridge:
 
     @property
     def connected(self) -> bool:
-        """A socket AND recent proof the other end is still there.
+        """A socket, and recent proof the EXTENSION -- not the socket -- is
+        still there.
 
-        Holding an open socket is not evidence of a live browser. A laptop that
-        slept, a browser that was killed, a network stack that never delivered
-        the FIN -- all leave a socket that reads as fine and answers nothing.
-        Reported as connected, that produced the worst version of this feature:
-        Settings said "Connected", and every browser action then sat for the
-        full timeout before failing.
+        Holding an open socket is not evidence of a live browser: a laptop that
+        slept, a browser that was killed, a FIN that never arrived all leave a
+        socket that reads as fine and answers nothing. The bridge pings for
+        that reason, and for a while this asked when any frame last arrived.
 
-        So the bridge pings, and this asks when the extension was last heard
-        from rather than whether a file descriptor exists.
+        That is still not enough, and background.js says why in its own
+        comments: **a protocol-level pong is answered by Chrome's network stack
+        without the service worker being woken at all.** The worker is what
+        runs `tabs`, `snapshot`, `click` -- everything. So a reaped worker left
+        a socket that answered every ping and no command, and the app called it
+        Connected while each action sat out its full timeout and failed with
+        "the browser did not answer in time". That is the exact report this
+        replaces, and it is the same lesson one level up: an ANSWERING socket
+        is not evidence of a live service worker.
+
+        The extension therefore speaks from JavaScript on a timer, and this
+        counts only what the extension itself said -- a hello, a keepalive, or
+        a reply. A connection that never sends keepalives is an older build
+        that does not know how; it keeps the old any-frame rule rather than
+        being declared dead for speaking an older language.
         """
         if self._client is None:
             return False
+        if self._keepalive_seen:
+            return (time.monotonic() - self._last_message) < WORKER_QUIET_AFTER
         return (time.monotonic() - self._last_seen) < STALE_AFTER
 
     def _heartbeat_loop(self) -> None:
@@ -347,6 +377,18 @@ class ExtensionBridge:
             if (now - self._last_seen) >= STALE_AFTER:
                 # Answered nothing for long enough that the socket is a fiction.
                 self._drop(conn, "stopped answering")
+                continue
+            if self._keepalive_seen and \
+                    (now - self._last_message) >= WORKER_QUIET_AFTER:
+                # Still ponging, but the extension itself has gone quiet: its
+                # service worker has been reaped and the socket outlived it.
+                # Dropping is the RECOVERY, not just the bookkeeping -- the
+                # extension re-dials the moment it next wakes (its reconnect
+                # alarm, or the user touching a tab), and a fresh connection
+                # replaces this one. Holding the corpse instead is what left
+                # Settings saying Connected while every command timed out.
+                self._drop(conn, "the extension stopped answering "
+                                 "(its service worker was probably reaped)")
                 continue
             if (now - last_ping) < PING_EVERY:
                 continue
@@ -402,7 +444,10 @@ class ExtensionBridge:
             # One extension at a time. A second connection replaces the first,
             # which is what a browser restart or an extension reload looks
             # like from here -- refusing it would need a manual reconnect.
-            self._last_seen = time.monotonic()
+            self._last_seen = self._last_message = time.monotonic()
+            # Per connection, not per bridge: the flag says what THIS extension
+            # speaks, and a browser restart may bring a different build.
+            self._keepalive_seen = False
             self._log("connected", "replacing an earlier connection"
                       if self._client is not None else "")
             with self._client_lock:
@@ -467,6 +512,11 @@ class ExtensionBridge:
 
                 opcode, data = read_message(conn, control)
                 self._last_seen = time.monotonic()
+                if opcode == OP_TEXT:
+                    # The extension speaking, rather than its browser's network
+                    # stack answering for it. This is the only thing that
+                    # proves the service worker is alive to run a command.
+                    self._last_message = self._last_seen
                 if opcode == OP_CLOSE:
                     closed_by = "the browser closed the connection"
                     break
@@ -504,6 +554,12 @@ class ExtensionBridge:
             self._notify()
 
     def _dispatch(self, msg: dict) -> None:
+        if msg.get("type") == "keepalive":
+            # No id and nothing to answer: receiving it IS the point. It also
+            # says this extension is new enough to be held to the
+            # worker-liveness rule in `connected`.
+            self._keepalive_seen = True
+            return
         if msg.get("type") == "hello":
             self.hello = {k: v for k, v in msg.items() if k != "type"}
             self._notify()
@@ -611,7 +667,17 @@ class ExtensionBridge:
         except queue.Empty:
             with self._pending_lock:
                 self._pending.pop(rid, None)
-            raise BridgeError(f"The browser did not answer '{command}' in time.")
+            # Name the likely cause. "did not answer in time" on its own sent
+            # every report of this to the wrong place -- the user looks at
+            # Settings, sees Connected, and concludes the app is lying to
+            # them. It was, and now it does not; but the message still has to
+            # say what this actually means and that it recovers by itself.
+            raise BridgeError(
+                f"The browser did not answer '{command}' in time. Its extension "
+                "is installed and the socket is open, but the service worker "
+                "behind it is not responding -- Chrome reaps those when idle. "
+                "It re-dials within about half a minute; try again after that, "
+                "or click any tab in that browser to wake it now.")
         if reply.get("gone"):
             raise _Blinked()
         if reply.get("error"):
