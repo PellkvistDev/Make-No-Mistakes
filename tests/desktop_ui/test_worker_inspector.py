@@ -173,3 +173,47 @@ def test_a_spoken_worker_is_still_answered_out_loud(desktop):
                      "title": "write style.css", "preview": "x", "always": ""})
     assert desktop.page.is_hidden("#perm-backdrop")
     assert desktop.page.is_visible("#voice-perm")
+
+
+# ------------------------------- a typed worker's result is filed too -----
+
+def test_a_worker_dispatched_by_typing_reports_back(desktop):
+    """The mirror of the registry bug, on the reporting side. announceQ is the
+    voice route's, so a worker started by typing finished on its own daemon
+    thread and the agent you were typing to was never told -- you had to hope
+    it thought to call check_workers."""
+    _app(desktop)
+    _typed(desktop, {"type": "worker_update", "sid": "s1", "id": "wk1",
+                     "name": "dark-mode", "status": "done",
+                     "summary": "did it", "result": "Edited style.css"})
+    calls = desktop.calls("record_worker_result")
+    assert calls, "the result went nowhere"
+    assert calls[0]["args"][:2] == ["dark-mode", "done"]
+
+
+def test_a_stopped_one_is_filed_as_stopped(desktop):
+    """Telling the agent a cancelled job crashed invites it to diagnose and
+    re-run exactly what was just cancelled."""
+    _app(desktop)
+    _typed(desktop, {"type": "worker_update", "sid": "s1", "id": "wk1",
+                     "name": "dark-mode", "status": "stopped",
+                     "summary": "", "result": ""})
+    calls = desktop.calls("record_worker_result")
+    assert calls and calls[0]["args"][1] == "stopped"
+
+
+def test_starting_one_files_nothing(desktop):
+    """"started" and "running" are not results."""
+    _app(desktop)
+    _typed(desktop, {"type": "worker_update", "sid": "s1", "id": "wk1",
+                     "name": "dark-mode", "status": "started", "summary": ""})
+    assert desktop.calls("record_worker_result") == []
+
+
+def test_a_spoken_worker_is_not_filed_twice(desktop):
+    """A worker reports on the sink of whoever dispatched it -- one route each
+    -- and the voice route files through its own announce path."""
+    _app(desktop)
+    _voice(desktop, {"type": "worker_update", "id": "wk1", "name": "dark-mode",
+                     "status": "done", "summary": "did it", "result": "r"})
+    assert len(desktop.calls("record_worker_result")) <= 1

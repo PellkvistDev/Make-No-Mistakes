@@ -36,10 +36,22 @@ def test_the_alarm_permission_is_declared():
     assert "alarms" in MANIFEST["permissions"]
 
 
-def test_the_alarm_is_cleared_once_connected():
-    """Otherwise it keeps waking the worker every thirty seconds forever, for a
-    connection that is already up."""
-    assert "chrome.alarms.clear" in BG
+def test_the_alarm_stays_armed_once_connected():
+    """This used to assert the opposite, and the reason it gave was true when
+    it was written: an alarm firing every thirty seconds for a connection that
+    is already up is pure cost.
+
+    The keepalive is what changed it. The worker now speaks every twenty
+    seconds to hold itself open, so while connected it is deliberately kept
+    ALIVE -- there is nothing asleep for the alarm to wake, and its cost is
+    zero. What clearing it did cost was the only timer that outlives a reap: a
+    connected extension had nothing left to bring it back, so when something
+    finally killed the worker anyway it sat dead behind an open socket, which
+    the app went on reporting as Connected, until the user happened to touch a
+    tab. It is a heartbeat, not just a retry."""
+    assert 'chrome.alarms.clear("reconnect")' not in BG
+    onopen = BG[BG.index("ws.onopen = () => {"):]
+    assert 'chrome.alarms.create("reconnect"' in onopen[:onopen.index("\n  };")]
 
 
 def test_browsing_wakes_a_reconnect_too():
@@ -52,11 +64,20 @@ def test_browsing_wakes_a_reconnect_too():
 
 def test_connect_is_safe_to_call_repeatedly():
     """Every one of those wake-ups calls connect(). If it opened a second
-    socket each time, browsing would spray connections at the app."""
+    socket each time, browsing would spray connections at the app.
+
+    Stated as the property rather than as the line that used to express it.
+    `if (paused || socket) return` also returned early for a socket in
+    CLOSING or CLOSED -- so one that got there without onclose having run made
+    this a permanent early return, and the extension never re-dialled. The
+    no-op has to hold for a USABLE socket and only for one."""
     body = BG[BG.index("function connect()"):]
     first = body[:body.index("\n}")]
-    assert re.search(r"if \(paused \|\| socket\) return", first), \
-        "connect() must be a no-op while a socket already exists"
+    assert "paused" in first and "return" in first
+    assert "WebSocket.OPEN" in first and "WebSocket.CONNECTING" in first, \
+        "connect() must no-op on a live socket -- and only on a live one"
+    assert not re.search(r"if \(paused \|\| socket\) return", first), \
+        "a CLOSED socket must not block re-dialling for the worker's lifetime"
 
 
 def test_the_ports_match_the_python_side():

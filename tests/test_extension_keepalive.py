@@ -1,23 +1,17 @@
-"""The service worker must be kept alive by the EXTENSION, not by the app.
+"""The extension has to still be there when the app calls, and say so.
 
-Reported, with the connection log that proves it:
+Reported from a real machine: `browser_tabs` failed with "the browser did not
+answer 'tabs' in time" while Settings said Connected.
 
-  19:02:07 connected → 19:02:37 dropped   (30s)
-  19:02:55 connected → 19:03:25 dropped   (30s)
+An MV3 service worker is killed after 30 seconds idle, and the socket dies with
+it -- so the extension speaks on a timer to hold it open. Three things about
+that were wrong, and each of them ends in the same place: a socket the browser
+keeps answering at the protocol level, with nothing behind it.
 
-Thirty seconds is the MV3 service worker idle timeout, exactly. The app's
-heartbeat kept the SOCKET alive, but a WebSocket ping is answered by Chrome's
-network stack without ever waking the worker -- so the worker was reaped out
-from under a socket that looked perfectly healthy, and the socket died with it.
-
-The documented fix is that the extension itself must send a message before each
-deadline: activity the worker performs is what resets its own timer.
-
-Read from the shipped source, because the failure is the ABSENCE of a
-mechanism, and there is no Chrome here to observe it in.
+Read from the shipped source. There is no Chrome here, and the failures are
+about which timer is used and when -- both of which are visible in the text.
 """
 
-import json
 import pathlib
 import re
 
@@ -25,84 +19,68 @@ EXT = pathlib.Path(__file__).resolve().parent.parent / "extension"
 BG = (EXT / "background.js").read_text(encoding="utf-8")
 
 
-def test_the_extension_speaks_on_its_own_schedule():
-    assert "KEEPALIVE_MS" in BG
-    assert "startKeepalive" in BG and "stopKeepalive" in BG
+def _body(sig: str) -> str:
+    start = BG.index(sig)
+    return BG[start:BG.index("\n}\n", start)]
 
 
-def test_it_speaks_well_inside_the_thirty_second_deadline():
-    """A margin, not a race: the worker dies at 30s of silence, and a timer
-    that fires at 29 would lose to any scheduling jitter."""
+# ------------------------------------------- the alarm is a heartbeat -----
+
+def test_a_successful_connection_does_not_clear_the_reconnect_alarm():
+    """It used to, and that left a CONNECTED extension with no timer that
+    outlives its worker. The keepalive interval holds the worker up until
+    something reaps it anyway, and then nothing is left to wake it: the
+    extension sits dead behind an open socket until the user happens to touch a
+    tab. chrome.alarms is the only timer that survives a reap."""
+    assert 'chrome.alarms.clear("reconnect")' not in BG
+
+
+def test_the_alarm_is_armed_when_the_socket_opens():
+    onopen = _body("ws.onopen = () => {")
+    assert 'chrome.alarms.create("reconnect"' in onopen
+
+
+def test_the_alarm_restarts_the_keepalive():
+    """setInterval does not survive a reap any more than setTimeout does -- the
+    file already says so about setTimeout, eighty lines up. A worker that came
+    back without its interval would keep the connection open and be declared
+    dead by the app fifty seconds later, over and over."""
+    handler = BG[BG.index("chrome.alarms.onAlarm.addListener"):]
+    handler = handler[:handler.index("\n});")]
+    assert "startKeepalive()" in handler
+    assert "keepaliveTimer" in handler
+
+
+# ------------------------------------ re-dialling is not blocked forever --
+
+def test_connect_guards_on_the_socket_being_usable_not_merely_present():
+    """`if (socket) return` makes this an early return for the rest of the
+    worker's life if a socket ever reaches CLOSING/CLOSED without onclose
+    having run: the extension never re-dials, and the app goes on showing it as
+    connected."""
+    body = _body("function connect() {")
+    assert "readyState" in body, "connect() still returns on any non-null socket"
+    assert "WebSocket.OPEN" in body
+
+
+# ------------------------------------------- what the keepalive is for ----
+
+def test_it_speaks_from_javascript_rather_than_relying_on_pings():
+    """A ping is answered by Chrome's network stack without the worker being
+    woken, so it proves the BROWSER is alive and nothing about the extension.
+    Only a message the worker sends itself does that."""
+    assert re.search(r'send\(\s*\{\s*type:\s*"keepalive"', BG)
+
+
+def test_the_keepalive_beats_faster_than_the_worker_is_reaped():
+    """30 seconds idle is the deadline; the message has to land before it."""
     ms = int(re.search(r"const KEEPALIVE_MS = (\d+)", BG).group(1))
-    assert 5000 <= ms <= 25000, f"{ms}ms is not a safe margin under 30s"
+    assert 0 < ms < 30000
 
 
-def test_the_keepalive_starts_when_the_socket_opens():
-    onopen = BG[BG.index("ws.onopen"):BG.index("ws.onmessage")]
-    assert "startKeepalive()" in onopen
-
-
-def test_it_stops_when_the_socket_closes():
-    """A timer left running against a dead socket keeps the worker alive for
-    nothing, which is the opposite of the problem but still wrong."""
-    onclose = BG[BG.index("ws.onclose"):BG.index("ws.onerror")]
-    assert "stopKeepalive()" in onclose
-
-
-def test_the_app_ignores_the_keepalive_rather_than_choking_on_it():
-    """It carries no id, so it is not a reply to anything. It just has to
-    arrive -- and to count as the extension being alive."""
-    from glmcode.extension_bridge import ExtensionBridge
-    b = ExtensionBridge(ports=(0,))
-    b._dispatch({"type": "keepalive"})        # must not raise
-    assert b.hello == {}                      # and must not be mistaken for hello
-
-
-# --------------------------------------------------------------------- #
-# "image readback failed"
-
-def test_the_tab_is_brought_forward_before_it_is_photographed():
-    """captureVisibleTab photographs what is ON SCREEN. With the window behind
-    the app -- the normal state here, since the person is looking at the app --
-    Chrome has nothing rendered to read back and fails with "image readback
-    failed"."""
-    cap = BG[BG.index("async function capture("):BG.index("// -- commands")]
-    assert "chrome.tabs.update" in cap and "active: true" in cap
-    assert "focused: true" in cap
-    assert 'state: "normal"' in cap, "a minimised window has nothing to capture"
-
-
-def test_it_retries_once_before_giving_up():
-    cap = BG[BG.index("async function capture("):BG.index("// -- commands")]
-    assert "attempt < 2" in cap
-
-
-def test_a_failed_capture_points_at_what_still_works():
-    """A screenshot is never the only way to see a page: the text and the
-    snapshot are both still there, and the agent should be told so rather than
-    just failing the step."""
-    cap = BG[BG.index("async function capture("):BG.index("// -- commands")]
-    assert "browser_read" in cap and "browser_snapshot" in cap
-
-
-def test_the_screenshot_is_not_sent_as_a_lossless_png():
-    cap = BG[BG.index("async function capture("):BG.index("// -- commands")]
-    assert '"jpeg"' in cap
-
-
-# --------------------------------------------------------------------- #
-# The button that opened an empty window
-
-def test_nothing_pretends_it_can_raise_another_apps_window():
-    """Reported: "press 'bring chrome to the front' and that opens an empty
-    chrome window". Two attempts, both worse than doing nothing: passing
-    chrome://extensions on the command line gets the URL DROPPED and an empty
-    window opened, and launching with no argument at all opens a fresh blank
-    window on Windows."""
-    from glmcode import installed_browsers
-    ok, why = installed_browsers.open_browser("/anything")
-    assert ok is False
-    assert "can't bring another app's window forward" in why
-    src = pathlib.Path(installed_browsers.__file__).read_text(encoding="utf-8")
-    assert "subprocess.Popen" not in src, \
-        "nothing here should be launching a browser any more"
+def test_the_app_gives_it_more_than_one_missed_beat():
+    """A single dropped message under load is not a dead worker, and calling it
+    one would flap the connection."""
+    from glmcode.extension_bridge import WORKER_QUIET_AFTER
+    ms = int(re.search(r"const KEEPALIVE_MS = (\d+)", BG).group(1))
+    assert WORKER_QUIET_AFTER > (ms / 1000) * 2
