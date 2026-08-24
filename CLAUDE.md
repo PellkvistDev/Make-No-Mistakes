@@ -601,6 +601,95 @@ the live engine both devices already use Gemini's own `inputTranscription` /
 is no Gemini in the loop at all — Whisper hears, the delegator answers — so the
 question does not arise there either.
 
+## A chat has two agents and ONE set of workers
+
+Reported as *"there are problems with the connection between the voice agents
+and the text agents — no context works"*, and it was literal. `_workers` is an
+instance attribute and a chat builds **two** Agents: the one you type to and
+the delegator you speak to. Each kept its own registry.
+
+So a worker started by speaking was invisible to `check_workers` typed into
+the same chat, and `steer_worker`, `stop_worker`, `worker_changes` and
+`revert_worker` all answered *"no worker matches"* for it. The reverse held
+too — dispatch by typing, ask out loud how it is going, and the delegator said
+nothing had been dispatched.
+
+What made this worse rather than merely incomplete: the **result** already
+crossed over (`worker_reports`). So the coding agent was told a worker had
+finished and then could not find the worker it had just been told about.
+
+`Agent.adopt_workers_of` is the fix, called from `_ensure_convo`. Three notes:
+
+- **The live Agent objects come with it** (`_active_subagents`). Steering and
+  stopping reach a worker *through* them, so sharing only the records would
+  make a worker visible from the other side and un-steerable — which looks
+  like it worked, and is the worse failure.
+- **Each agent keeps its own id counter**, so the number alone is not unique.
+  `_dispatch_worker` walks past a taken id under the shared lock; without that
+  the second dispatch overwrites the first one's record.
+- **`_worker_perms` is deliberately NOT shared**, and sharing it was the first
+  version. Blocked permission requests are released in bulk by two callers who
+  each mean only their own — closing voice mode denies the delegator's,
+  cancelling a turn denies the coding agent's. Pooled, stopping a typed turn
+  would silently deny a card a spoken worker was waiting on. Answering ONE
+  needs no pool: the frontend hands back an rid and
+  `Api.resolve_worker_permission` tries both agents for it.
+
+## "No frontend attached" was said to an app that has one
+
+*"And when the text agent spawns agents, it doesn't work."*
+
+A sub-agent's event sink (`_CaptureEvents`) inherits `AgentEvents`, whose
+`ask_permission` refuses with **"no frontend attached to approve this"** — a
+message written for the CLI, arriving in the GUI. An `ask` handler was passed
+only when the parent was `conversational`, so in voice mode a worker could be
+approved out loud and everywhere else it could not be approved at all.
+
+In the default `ask` mode that denied **every** `write_file`, `edit_file` and
+`run_command` a spawned sub-agent tried, silently, with no prompt anywhere.
+`spawn_agents` could not change a single file unless the user was in `yolo`.
+"It doesn't work" was exactly right.
+
+- **`_worker_ask` is the mechanism, not the main permission modal.** It is
+  per-request (`rid`) and blocks only the asking thread, so several sub-agents
+  asking at once queue instead of overwriting each other. `spawn_agents` runs
+  up to `MAX_SUBAGENTS` in parallel; the modal was a single slot.
+- **The card carries a name, not an id.** A `spawn_agents` sub-agent has an
+  aid like `sa9f3c21-2` and no entry in the worker registry, so looking its
+  name up there would put that string in front of the user.
+- **A typed spawn does not speak.** `worker_permission` queues its sentence
+  for TTS, so sending one from a typed spawn would have the app start talking
+  at someone who never opened voice mode. `spoken` is empty unless the parent
+  is conversational.
+- **Cancelling a turn releases the blocked asks.** A sub-agent parked in
+  `_worker_ask` is not watching `self.cancel` — it is waiting on an Event for
+  five minutes — and `spawn_agents` JOINS its threads. Without it a cancelled
+  turn sits there with the app showing a stopped turn that has plainly not
+  stopped.
+
+**The card is one queue with two sources.** `permId = ev.id` was right for the
+main agent (one thread, blocked on the answer) and wrong for sub-agents. Each
+entry says which backend call answers it — `resolve_worker_permission` by rid
+for a sub-agent, `permission_response` by id for the main agent — rather than
+the card guessing. A spoken worker's question still goes to the dock's card
+instead: it is answerable by saying yes, and a modal over the app is not.
+
+## The inspector is the same panel, whoever dispatched the work
+
+A worker's id IS its sub-agent id, so the rail's pills had nothing to build —
+they open the panel everything else uses. What they opened was **empty**.
+
+`handleVoiceEvent` dropped `subagent` and `subagent_stream` on the floor, so a
+worker dispatched by speaking never had a thread created (`subagent_stream` is
+what builds it) and never had its status recorded (`subagent` is the only
+thing that sets `subagentStatus`, which gates the steer/stop composer). The
+panel came up blank and dead, on the worker you are most likely to want to
+redirect. This is the same bug as *"worker_update was handled only on the
+voice route"* one section down, found on the other side of the same seam.
+
+**Only the transcript ROW is skipped on that route.** A spoken dispatch has no
+turn in the chat to hang one on, and the rail already shows it.
+
 ## A worker's report outlives the voice session
 
 Work dispatched by voice used to report back only to the delegator, which is a

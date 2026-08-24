@@ -161,6 +161,11 @@ class VoiceApi:
         convo.mcp = coding.mcp
         convo.model_override = coding.model_override
         convo.vision_client = coding.vision_client
+        # One chat, one set of workers. Without this the delegator and the
+        # coding agent each kept their own registry, so work started by
+        # speaking could not be checked on, steered, stopped or reverted by
+        # typing -- and vice versa.
+        convo.adopt_workers_of(coding)
         cs.convo_agent = convo
         cs.convo_events = ev
         return convo
@@ -352,13 +357,35 @@ class VoiceApi:
         return src
 
     def resolve_worker_permission(self, rid: str, answer: str, feedback: str = ""):
-        """Answer a background worker's permission request (approve-by-voice or
-        the overlay buttons). answer: 'y' (once), 'a' (always this kind), 'n'."""
+        """Answer a sub-agent's or background worker's permission request.
+        answer: 'y' (once), 'a' (always this kind), 'n'.
+
+        BOTH agents are tried, and neither may be assumed. This started as an
+        approve-by-voice call and so only ever looked at the delegator -- but a
+        sub-agent spawned by TYPING asks through the same mechanism now, and in
+        a chat where voice mode was never opened there is no delegator to ask.
+        Once it has been opened the two share one registry
+        (Agent.adopt_workers_of), so the first hit answers either way; before
+        that, the coding agent is the only one holding anything.
+
+        It stays in this mixin, next to the spoken permission card and
+        deny_pending_worker_permissions, rather than being copied into the
+        other one -- two mixins on one instance is what a mixin is for.
+        """
         cs = self._active
-        if cs is None or cs.convo_agent is None:
+        if cs is None:
             return {"ok": False}
         ans = answer if answer in ("y", "a", "n") else "n"
-        ok = cs.convo_agent.resolve_worker_permission(rid, ans, feedback)
+        ok = False
+        for agent in (cs.convo_agent, cs.agent):
+            if agent is None:
+                continue
+            try:
+                if agent.resolve_worker_permission(rid, ans, feedback):
+                    ok = True
+                    break
+            except Exception:
+                pass
         return {"ok": bool(ok)}
 
     def send_voice(self, text: str):
