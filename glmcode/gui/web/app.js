@@ -817,6 +817,105 @@ function renderHistory(items, todos) {
   scrollDown(true);
 }
 
+/* ------------------------------------------------ a spoken turn, live
+ *
+ * Reported: "before, it was much clearer when the agent actually heard me and
+ * thought of an answer -- now I just wait there and then my prompt and the
+ * agent's answer pop up in the chat after a while."
+ *
+ * Both halves used to be visible in the full-screen overlay as they happened,
+ * and the compact dock has no transcript. What replaced it was a bubble
+ * arriving at the END of the exchange, so the whole of listening, thinking and
+ * answering was silence with nothing on screen.
+ *
+ * So the chat shows the turn WHILE it happens, which is what the phone has
+ * always done and what typing already looks like: your words appear as they
+ * are heard, the reply streams into a bubble under them. `voice_chat_turn`
+ * then reconciles rather than reprinting -- it is the same exchange, arriving
+ * again as the authoritative copy.
+ *
+ * Held per turn, not per session: spokenTurnDone() drops the references so the
+ * next exchange builds its own bubbles instead of overwriting these. */
+const spokenTurn = { userEl: null, wrap: null, bubble: null, user: "", reply: "" };
+
+function renderSpokenReply(wrap, text) {
+  let bubble = wrap.querySelector(".bubble-assistant");
+  if (!bubble) {
+    bubble = document.createElement("div");
+    bubble.className = "bubble-assistant";
+    const body = document.createElement("div");
+    body.className = "md";
+    bubble.appendChild(body);
+    wrap.appendChild(bubble);
+  }
+  bubble.dataset.raw = text;              // Copy yields the markdown source
+  bubble.querySelector(".md").innerHTML = md(text);
+  return bubble;
+}
+
+// What it heard, as it hears it. Called repeatedly with the text so far --
+// partial transcriptions stream in, so the bubble is updated in place rather
+// than one bubble per fragment.
+function spokenHeard(text) {
+  if (!text) return;
+  spokenTurn.user = text;
+  if (!spokenTurn.userEl) {
+    spokenTurn.userEl = addUserMessage(text, [], "Spoken", false);
+    scrollDown();
+    return;
+  }
+  // In place, via the text node -- addUserMessage puts the words in one and
+  // then appends the "Spoken" note beside them, so assigning textContent on
+  // the bubble would take the note with it.
+  const b = spokenTurn.userEl.querySelector(".bubble-user");
+  if (b && b.firstChild && b.firstChild.nodeType === Node.TEXT_NODE) {
+    b.firstChild.nodeValue = text;
+  } else if (b) {
+    b.insertBefore(document.createTextNode(text), b.firstChild);
+  }
+  spokenTurn.userEl.dataset.rawText = text;
+  scrollDown();
+}
+
+/* The reply, accumulated HERE rather than read back off the engine.
+ *
+ * voice._replyBuf is per model round-trip -- stream_start clears it, and a
+ * turn that uses a tool part-way through gets several of those. Rendering
+ * from it put the second round's text on screen INSTEAD of the first round's
+ * rather than after it. liveVoice.said has the opposite shape (per turn), so
+ * the one thing both engines agree on is the delta. */
+function spokenReplyDelta(delta) {
+  if (!delta) return;
+  spokenReplySet(spokenTurn.reply + delta);
+}
+
+function spokenReplySet(text) {
+  if (!text) return;
+  spokenTurn.reply = text;
+  if (!spokenTurn.wrap) spokenTurn.wrap = newAssistantBlock();
+  spokenTurn.bubble = renderSpokenReply(spokenTurn.wrap, text);
+  scrollDown();
+}
+
+function spokenTurnDone() {
+  spokenTurn.userEl = spokenTurn.wrap = spokenTurn.bubble = null;
+  spokenTurn.user = spokenTurn.reply = "";
+}
+
+/* The record arriving for a turn already on screen. Matched on the heard text
+   alone: the reply can differ in whitespace between what streamed and what
+   Python finally recorded, and printing the exchange twice is a worse answer
+   than putting the authoritative text in the bubble that is already there. */
+function reconcileSpokenTurn(ev) {
+  if (!spokenTurn.userEl && !spokenTurn.wrap) return false;
+  if (ev.user && spokenTurn.user && ev.user !== spokenTurn.user) return false;
+  if (ev.user) spokenHeard(ev.user);
+  if (ev.assistant) spokenReplySet(ev.assistant);
+  spokenTurnDone();
+  scrollDown();
+  return true;
+}
+
 function newAssistantBlock() {
   hideWelcome();
   const wrap = document.createElement("div");
@@ -1001,18 +1100,13 @@ function handle(ev) {
      * change of subject.
      */
     case "voice_chat_turn": {
+      // The authoritative record, from Python, at the END of the exchange.
+      // The chat has usually shown this turn live already (spokenHeard /
+      // spokenReplyDelta below) -- reconcile with what is on screen rather than
+      // printing it a second time.
+      if (reconcileSpokenTurn(ev)) return;
       if (ev.user) addUserMessage(ev.user, [], "Spoken", false);
-      if (ev.assistant) {
-        const wrap = newAssistantBlock();
-        const bubble = document.createElement("div");
-        bubble.className = "bubble-assistant";
-        bubble.dataset.raw = ev.assistant;   // Copy yields the markdown source
-        const body = document.createElement("div");
-        body.className = "md";
-        body.innerHTML = md(ev.assistant);
-        bubble.appendChild(body);
-        wrap.appendChild(bubble);
-      }
+      if (ev.assistant) renderSpokenReply(newAssistantBlock(), ev.assistant);
       scrollDown();
       return;
     }
@@ -1544,6 +1638,24 @@ const subagentStatus = {};    // aid -> "running" | "done" | "error"
  * three tools) updated nothing and appeared nowhere in the app. One store,
  * written by both routes, read by the voice dock and the activity rail. */
 const liveWorkers = {};       // id -> {id, name, status, activity}
+
+/* Workers belong to a CHAT. This was a bare object nothing ever cleared, so
+ * switching chats left the previous one's workers in the rail -- and ids are
+ * per chat ("wk1", "wk2"), so the new chat's first worker overwrote the old
+ * chat's entry and its pill opened a thread belonging to another conversation.
+ *
+ * Rebuilt from the session payload rather than merely cleared: a worker still
+ * running in the chat you come back to has to be there, and its events were
+ * missed while you were away (a background chat's events go to
+ * handleBackgroundEvent and never reach this store). */
+function setWorkersForChat(rows) {
+  for (const key of Object.keys(liveWorkers)) delete liveWorkers[key];
+  for (const w of rows || []) {
+    liveWorkers[w.id] = { id: w.id, name: w.name || w.id,
+                          status: w.status, activity: "" };
+  }
+  renderActivityRail();
+}
 
 function noteWorker(ev) {
   const prev = liveWorkers[ev.id] || {};
@@ -5299,6 +5411,7 @@ function showNoSession() {
   activeSessionId = null;
   document.body.classList.add("no-session");
   clearChatDom();
+  setWorkersForChat([]);
   $("empty-hint").hidden = true;
   $("welcome").hidden = false;
   settings.cwd = "";
@@ -5315,6 +5428,7 @@ function applySession(res) {
   document.body.classList.remove("no-session");
   resetTtsPlayback();  // switching chats shouldn't let old audio keep playing
   clearChatDom();
+  setWorkersForChat(res.workers);
   settings.cwd = res.cwd;
   syncSettingsUI();
   updateUsage(res.prompt_tokens, res.completion_tokens, res.context);
@@ -5971,16 +6085,20 @@ const startThresh = () => Math.max(V_ABS_MIN, voice.noiseFloor * V_START_MULT) /
 const stopThresh = () => Math.max(V_ABS_MIN * 0.7, voice.noiseFloor * V_STOP_MULT) / voice.sens;
 const bargeThresh = () => Math.max(V_ABS_MIN * 2, voice.noiseFloor * V_BARGE_MULT) / voice.sens;
 
-/* There is no status LINE any more -- the dock is four controls and nothing
- * else -- but the sentences it carried are still the only thing that
- * distinguishes "listening", "thinking" and "muted" from each other, and the
- * orb is one animated dot for all three. So the text moves onto the orb as
- * its tooltip rather than being deleted with the element: twenty-six calls
- * writing into a stub is the same bug as the caption, and dropping the words
- * as well would lose the only place the app says what it is doing. */
+/* The state, in words, beside the orb.
+ *
+ * This was briefly a tooltip -- the reasoning being that the dock is four
+ * controls and a status line is a fifth thing. That was wrong, and reported as
+ * such: "it was much clearer when the agent actually heard me and thought of
+ * an answer". The orb is ONE animated dot for listening, thinking and
+ * speaking, so without the word there is nothing on screen that distinguishes
+ * them, and a tooltip is not on screen. It is not a fifth control either --
+ * it is the orb saying what it means, on the row the orb is already on. */
 function setVoiceStatus(text) {
+  const el = $("voice-state");
+  if (el) el.textContent = text || "";
   const orb = $("voice-orb");
-  if (orb) { orb.title = text; orb.setAttribute("aria-label", text); }
+  if (orb) orb.title = text || "";
 }
 function setVoiceOrb(state) {
   const orb = $("voice-orb");
@@ -6270,6 +6388,9 @@ async function finishUtterance() {
 // Send one request to the delegator, then -- in wake-gated mode -- soft-mute
 // again until the wake word is heard.
 function submitVoiceRequest(text) {
+  // In the chat straight away. The exchange also arrives from Python at the
+  // end (voice_chat_turn) and reconciles with this rather than reprinting it.
+  spokenHeard(text);
   voice.sendTries = 0;
   sendVoiceTurn(text);
   if (voice.gated) {
@@ -6451,10 +6572,11 @@ function handleVoiceEvent(ev) {
       voice.turnComplete = false;  // a reply is now being generated + spoken
       break;
     case "content": {
-      // Buffered for replayLastReply and for the chat, not for the dock: the
-      // dock has no transcript, and the exchange lands in the chat through
-      // voice_chat_turn.
+      // Buffered for replayLastReply, and streamed into the chat as it
+      // arrives -- the dock has no transcript, and waiting for
+      // voice_chat_turn meant the whole reply was silence until it finished.
       voice._replyBuf = (voice._replyBuf || "") + (ev.text || "");
+      spokenReplyDelta(ev.text || "");
       break;
     }
     case "play_audio":
@@ -7077,12 +7199,16 @@ function liveOnMessage(payload) {
   if (sc.interrupted) liveStopPlayback();
   if (sc.inputTranscription && sc.inputTranscription.text) {
     liveVoice.heard += sc.inputTranscription.text;
+    // Into the chat as it is heard. Partials arrive in fragments, so this
+    // updates one bubble rather than adding a bubble per fragment.
+    spokenHeard(liveVoice.heard);
   }
   if (sc.outputTranscription && sc.outputTranscription.text) {
     // Accumulated for the record that goes to the CHAT (the desktop passes
     // this transcript to _persist_voice_turn), not for the dock -- the dock
     // has no transcript any more.
     liveVoice.said += sc.outputTranscription.text;
+    spokenReplyDelta(sc.outputTranscription.text);
   }
   // One event can carry several parts at once -- audio and a transcript
   // together -- so every part is looked at rather than the first one.

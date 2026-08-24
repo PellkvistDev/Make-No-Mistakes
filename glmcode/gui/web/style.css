@@ -2105,10 +2105,25 @@ body.sidebar-open #sidebar { transform: translateX(0); }
 .voice-dock-row { display: flex; align-items: center; gap: 7px; }
 .voice-dock-row .icon-btn { width: 26px; height: 26px; flex: none; }
 
+/* The word beside the orb. Reported: "it was much clearer when the agent
+   actually heard me and thought of an answer" -- the orb is one dot for
+   listening, thinking and speaking, so the word is what tells them apart.
+   min-width: 0 + ellipsis so a long line ("Needs your OK -- say yes or no")
+   cannot widen the dock. */
+.voice-state {
+  flex: 1; min-width: 0;
+  font-family: var(--font); font-size: 11px; line-height: 1.2;
+  color: var(--text-dim); letter-spacing: 0.01em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Heard-you and speaking are the two the eye should catch without reading. */
+.voice-card:has(.voice-orb-hearing) .voice-state { color: var(--accent); }
+.voice-card:has(.voice-orb-speaking) .voice-state { color: #34c759; }
+
 /* A status light with a pulse, not a centrepiece. It was 132px in the middle
    of a full-screen panel. */
 .voice-orb {
-  --amp: 0; flex: none; width: 28px; height: 28px; border-radius: 50%;
+  --amp: 0; flex: none; width: 30px; height: 30px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
   background: radial-gradient(circle at 50% 45%, var(--glass-hi), transparent 70%);
   transition: transform 0.12s ease;
@@ -2127,7 +2142,16 @@ body.sidebar-open #sidebar { transform: translateX(0); }
   background: linear-gradient(160deg, #34c759, #30d158);
   animation: voice-pulse 0.9s ease-in-out infinite;
 }
-.voice-orb-hearing { background: radial-gradient(circle at 50% 45%, rgba(255,69,58,0.25), transparent 70%); }
+/* "It heard me" is the single most important thing this dock says, and it was
+   a faint tint behind an 18px dot. A ring that grows with the measured
+   amplitude reads at a glance and from the corner of the eye. */
+.voice-orb-hearing {
+  background: radial-gradient(circle at 50% 45%, rgba(255, 69, 58, 0.3), transparent 70%);
+  box-shadow: 0 0 0 calc(1px + var(--amp) * 4px) rgba(255, 69, 58, 0.35);
+}
+.voice-orb-hearing .voice-orb-core {
+  background: linear-gradient(160deg, #ff6961, #ff453a);
+}
 .voice-orb-gated .voice-orb-core {
   background: linear-gradient(160deg, #8a8a90, #6c6c72);
   opacity: 0.55; animation: none; box-shadow: none;
@@ -2171,6 +2195,11 @@ body.sidebar-open #sidebar { transform: translateX(0); }
 
 @media (prefers-reduced-motion: reduce) {
   .voice-orb-core, .activity-item .ai-dot { animation: none !important; }
+  /* The ring stays -- it is the thing that says the microphone is live -- but
+     it stops breathing. !important like its neighbours: this block sits ABOVE
+     the rule it overrides, and between two selectors of equal weight the later
+     one would otherwise win. */
+  body.voice-on::after { animation: none !important; }
 }
 
 [hidden] { display: none !important; }
@@ -2380,6 +2409,30 @@ body.sidebar-open .activity-rail {
 @media (max-width: 1100px) { body:not(.voice-on) .activity-rail { display: none; } }
 @media (max-width: 1368px) {
   body.sidebar-open:not(.voice-on) .activity-rail { display: none; }
+}
+
+/* You are in voice mode, and the window says so.
+ *
+ * Reported: "it's kinda hard to tell I'm in voice mode, that should be clearer
+ * and more beautiful." The dock is deliberately small and lives in a margin
+ * column, and the Talk button turns green -- both of which are easy to miss
+ * when your eyes are on the chat. A live microphone is a state the whole
+ * window should carry, not a control you have to go and find.
+ *
+ * A ring rather than a banner or a tint: it frames everything without moving,
+ * covering or recolouring any of it. pointer-events: none because it spans the
+ * viewport and must never take a click; above the sheets so a modal does not
+ * cut a hole in the frame. */
+body.voice-on::after {
+  content: ""; position: fixed; inset: 0; z-index: 70;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1.5px rgba(52, 199, 89, 0.5),
+              inset 0 0 34px rgba(52, 199, 89, 0.10);
+  animation: voice-live-ring 3.4s ease-in-out infinite;
+}
+@keyframes voice-live-ring {
+  50% { box-shadow: inset 0 0 0 1.5px rgba(52, 199, 89, 0.8),
+                    inset 0 0 44px rgba(52, 199, 89, 0.16); }
 }
 
 /* No margin to sit in, so it stops being a margin column: a compact dock at

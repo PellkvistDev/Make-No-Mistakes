@@ -1572,13 +1572,72 @@ could land in a state neither toggle displayed.
 A gated action has to be approvable and "just say yes" is not always heard.
 Hidden at rest, so the dock's resting size is unaffected.
 
-**The transcript is gone from the dock.** The cost is real and was accepted
-deliberately: a spoken turn only reaches the chat once the coding agent's turn
-lock is free, so during a long running turn there is now nowhere the exchange
-is visible. That is the trade for a dock that is always this size.
+**The transcript is gone from the dock, and the CHAT shows the turn live
+instead.** Deleting it was right; what came with it was not, and was reported:
+*"before, it was much clearer when the agent actually heard me and thought of
+an answer — now I just kinda wait there and then my prompt and the agent's
+answer pops up in the chat after a while."*
+
+The exchange was rendered from `voice_chat_turn`, which Python emits at the
+END, so listening, thinking and answering were all silence. It now goes into
+the chat as it happens — `spokenHeard` as the words are transcribed,
+`spokenReplyDelta` as the reply generates — which is what the phone has always
+done and what typing already looks like. `voice_chat_turn` then **reconciles**
+with what is on screen rather than reprinting it, matched on the heard text
+alone, since the streamed reply and the recorded one can differ in whitespace.
+
+- **The reply is accumulated in `spokenTurn`, not read back off the engine.**
+  `voice._replyBuf` is per model round-trip and `stream_start` clears it, so a
+  turn that looks something up part-way through gets several — rendering from
+  it put the second round's text on screen *instead of* the first round's.
+  `liveVoice.said` has the opposite shape (per turn), so the one thing both
+  engines agree on is the delta.
+- **The heard text is updated through its text NODE.** `addUserMessage` puts
+  the words in one and appends the "Spoken" note beside them, so assigning
+  `textContent` on the bubble takes the note with it.
+- **The references are per turn.** Held across one, the second exchange
+  overwrites the first instead of following it.
 
 **Historic, kept because it explains the shape**: the transcript was trimmed
-rather than deleted first, for exactly that timing reason.
+rather than deleted first, on the reasoning that a spoken turn only reaches the
+chat once the coding agent's turn lock is free. That timing is real for the
+model's HISTORY and was never true of the screen — `_record_voice_exchange`
+emits `voice_chat_turn` either way.
+
+## The state has to be on screen, and being in voice mode has to be obvious
+
+Two halves of one report: *"it's kinda hard to tell I'm in voice mode, that
+should be clearer and more beautiful"*.
+
+**The status text is beside the orb, not in a tooltip.** It was briefly a
+tooltip, on the reasoning that the dock is four controls and a status line is a
+fifth thing. That was wrong: the orb is ONE animated dot for listening,
+thinking and speaking, so the word is what tells them apart — it is not a fifth
+control, it is the orb saying what it means. A tooltip is not on screen.
+
+**A live microphone is a state the whole window carries.** `body.voice-on`
+draws a soft green ring inside the viewport. The dock is deliberately small and
+lives in a margin column, and the Talk button turning green is easy to miss
+with your eyes on the chat; a ring frames everything without moving, covering
+or recolouring any of it. `pointer-events: none`, because it spans the viewport
+and must never take a click, and above the sheets so a modal does not cut a
+hole in it. Under `prefers-reduced-motion` it stops breathing but stays — it is
+the thing that says the microphone is live.
+
+## Workers belong to a chat
+
+Reported as *"workers seem to be cross-session"*, and they were. `liveWorkers`
+was a bare object that nothing ever cleared, so switching chats left the
+previous one's workers in the rail — and worker ids are per chat (`wk1`,
+`wk2`), so the new chat's first worker overwrote the old chat's entry under the
+same key and its pill opened a thread belonging to another conversation.
+
+**Rebuilt from the session payload rather than merely cleared.** A worker still
+running in the chat you come back to has to be there, and its events were
+missed while you were away: a background chat's events go to
+`handleBackgroundEvent` and never reach this store. `_worker_rows` reads the
+coding agent's registry, which since `adopt_workers_of` is the whole chat's set
+however it was dispatched.
 
 
 ## Actions go where the hands are; state goes in the periphery
