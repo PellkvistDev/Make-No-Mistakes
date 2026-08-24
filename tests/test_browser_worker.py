@@ -149,9 +149,13 @@ def test_workers_get_a_name_worth_saying_out_loud():
 def test_the_coding_agent_can_now_ask_about_what_it_started():
     """It had NO worker tools. Everything it could delegate blocked until it
     finished, so there was never anything running to ask about -- which is
-    exactly what made a background browser impossible."""
+    exactly what made a background browser impossible.
+
+    resume_agent joined them later, and for the coding agent it is the one that
+    matters most: what it spawns are spawn_agents sub-agents, which used to be
+    thrown away the moment they reported."""
     names = [s["function"]["name"] for s in tools.WORKER_SCHEMAS]
-    assert names == ["check_workers", "steer_worker", "stop_worker"]
+    assert names == ["check_workers", "steer_worker", "stop_worker", "resume_agent"]
 
 
 def test_control_chrome_offers_the_background_mode():

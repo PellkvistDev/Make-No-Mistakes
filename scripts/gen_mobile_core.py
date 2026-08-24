@@ -61,7 +61,7 @@ def collect() -> list:
     worse idea than generating the numbers it operates on.
     """
     from glmcode import live, pairing, syncstore, tools
-    from glmcode.prompts import UNTRUSTED_INPUT_RULE
+    from glmcode.prompts import RESUME_PREAMBLE, UNTRUSTED_INPUT_RULE
 
     return [
         ("PBKDF2_ITERS", syncstore.PBKDF2_ITERS,
@@ -102,6 +102,12 @@ def collect() -> list:
         ("UNTRUSTED_INPUT_RULE", UNTRUSTED_INPUT_RULE,
          "A security rule that holds on one device and not the other is worth "
          "much less than it looks: both work on the same repository."),
+
+        ("RESUME_PREAMBLE", RESUME_PREAMBLE,
+         "What a resumed sub-agent is told. Both devices resume workers, and "
+         "the framing is the whole of why it carries on rather than "
+         "re-summarising the report it just gave -- a paraphrase on one side "
+         "is a different instruction with nothing to say so."),
 
         ("WORKER_SCHEMAS", tools.CONVERSATIONAL_SCHEMAS,
          "The descriptions ARE the interface -- they decide whether the model "

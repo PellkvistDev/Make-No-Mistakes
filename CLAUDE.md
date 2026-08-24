@@ -1411,6 +1411,46 @@ load-bearing, and the second was found by its own test:
   project's real `.git/config`, which is why the check lives in `BackupRepo` and
   is not left to the caller.
 
+## A finished sub-agent is worth more than its report
+
+Asked for: *"the ability to continue subagents after they finish — the main
+agent should be able to use some resume tool on them with more prompt."*
+
+The gap was structural. `_run_single_subagent` popped the sub out of
+`_active_subagents` in a `finally` and returned its report TEXT, so the moment
+it finished the Agent was dropped — its whole conversation, every file it had
+read, everything it had worked out. A follow-up meant `spawn_agents` again with
+a fresh sub-agent that had to be told all that background a second time, in a
+prompt the coordinator had to reconstruct from a report.
+
+`resume_agent(agent, task)` is `steer_worker` one state later: steer while it
+runs, resume once it has stopped.
+
+- **The id does not change**, so the sub-agent inspector's thread continues
+  where it left off rather than opening a second one, and for a worker
+  `revert_worker` still undoes the whole line of work — its baseline is the
+  ORIGINAL dispatch, which is what "undo that worker" should mean.
+- **A running one is sent to `steer_worker` by name.** "No agent matches" would
+  have the model spawn a duplicate of something already doing the work.
+- **Only the last `MAX_RESUMABLE` are kept.** Each is holding its entire
+  conversation, so this is a memory bound rather than a policy. Asking for one
+  that has been dropped says so — silently starting a blank sub-agent under a
+  name the coordinator believes it is continuing is the worst version of this.
+- **`RESUME_PREAMBLE` is framed like `STEER_NUDGE_TEMPLATE`,** and for the same
+  reason: it arrives directly after a final report, which is the one place the
+  model has just been told to stop. It leads with the instruction, says the
+  earlier report is already delivered, and ends on the new mission.
+- **Both devices, one preamble.** It is in the generated block
+  (`scripts/gen_mobile_core.py`), because a chat syncs and carries the other
+  device's calls in its own history — a paraphrase on one side is a different
+  instruction with nothing to say so.
+
+Found while writing it: `spawn_agents`' own description still told the model
+its sub-agents were *"effectively read-only in ask mode"*. That stopped being
+true when sub-agents gained a permission card, and it is exactly the kind of
+stale sentence that quietly stops a feature being used — the model reads it and
+declines to delegate anything that writes.
+
 ## A worker that did not finish is not a worker that failed
 
 Four places described any non-`done` worker as a failure, and told the user and

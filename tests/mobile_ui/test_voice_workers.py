@@ -203,3 +203,84 @@ def test_a_worker_killed_by_the_app_going_away_says_so(phone):
     assert "interrupted" in said
     assert "backgrounded" in said, "it has to say WHY, or it reads as a random failure"
     assert "done" not in said
+
+
+# --------------------------------------------- picking one back up -------
+#
+# Asked for on the desktop ("continue subagents after they finish"), and the
+# schema is shared, so the phone has to do it too rather than silently ignoring
+# an argument the model believes it passed.
+
+
+def _finished(phone, name="tidy", answer="tidied it"):
+    p = phone.page
+    _to_chat(phone)
+    _seed_worker_reply(phone, answer)
+    _tool(phone, "dispatch_worker", {"name": name, "task": "tidy the readme"})
+    p.wait_for_function(
+        "async () => /done/.test(await window.__voiceTool('check_workers', {}))",
+        timeout=20000)
+    return p
+
+
+def test_a_finished_worker_can_be_picked_back_up(phone):
+    p = _finished(phone)
+    _seed_worker_reply(phone, "and wrote the tests")
+    out = _tool(phone, "resume_agent", {"agent": "tidy", "task": "now the tests"})
+    assert "wk1" in out
+    p.wait_for_function(
+        "async () => /and wrote the tests/.test("
+        "await window.__voiceTool('check_workers', {}))", timeout=20000)
+
+
+def test_it_keeps_what_it_already_worked_out(phone):
+    """The whole point: the follow-up costs one message instead of a fresh
+    worker that has to be told the background again."""
+    p = _finished(phone)
+    _seed_worker_reply(phone, "second pass")
+    _tool(phone, "resume_agent", {"agent": "tidy", "task": "now the tests"})
+    p.wait_for_function(
+        "async () => /second pass/.test("
+        "await window.__voiceTool('check_workers', {}))", timeout=20000)
+    # Read off the LAST request the worker actually made, which is the only
+    # place the history it was carrying is visible from here.
+    last = p.evaluate("() => JSON.stringify(window.__sent[window.__sent.length - 1])")
+    assert "tidy the readme" in last, "the resumed turn lost the original mission"
+    assert "now the tests" in last
+    assert "tidied it" in last, "it lost the report it had already made"
+
+
+def test_it_is_one_worker_and_not_a_second_one(phone):
+    """Resuming continues wk1 rather than opening wk2 -- otherwise one line of
+    work reads back as two, and revert_worker would only undo half of it."""
+    p = _finished(phone)
+    _seed_worker_reply(phone, "second pass")
+    _tool(phone, "resume_agent", {"agent": "tidy", "task": "now the tests"})
+    p.wait_for_function(
+        "async () => /second pass/.test("
+        "await window.__voiceTool('check_workers', {}))", timeout=20000)
+    assert "wk2" not in _tool(phone, "check_workers")
+
+
+def test_a_running_worker_is_sent_to_steer_instead(phone):
+    p = phone.page
+    _to_chat(phone)
+    _seed_worker_reply(phone)
+    p.evaluate("() => { window.__holdNext = true; }")
+    _tool(phone, "dispatch_worker", {"name": "slow", "task": "something long"})
+    out = _tool(phone, "resume_agent", {"agent": "slow", "task": "also this"})
+    assert "steer_worker" in out
+    p.evaluate("() => window.__release && window.__release()")
+    p.wait_for_timeout(500)
+
+
+def test_an_unknown_one_is_an_error_the_model_can_say_out_loud(phone):
+    _to_chat(phone)
+    out = _tool(phone, "resume_agent", {"agent": "nothing-like-this", "task": "go"})
+    assert out.startswith("ERROR")
+
+
+def test_it_refuses_without_a_task(phone):
+    _finished(phone)
+    out = _tool(phone, "resume_agent", {"agent": "tidy", "task": ""})
+    assert out.startswith("ERROR")
