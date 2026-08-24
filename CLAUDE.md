@@ -1411,6 +1411,53 @@ load-bearing, and the second was found by its own test:
   project's real `.git/config`, which is why the check lives in `BackupRepo` and
   is not left to the caller.
 
+## "Be honest" is not an instruction; a verdict slot is
+
+Reported: *"often they fail a task but they lie and say they succeed."*
+
+The model does not think it is lying, so a plea for honesty changes nothing.
+Three things in the old report formats produced the over-claim, and
+`HONEST_REPORT_RULE` answers each:
+
+1. **Every slot presupposed success.** "What you did", "what you
+   accomplished" — there was nowhere to put what did *not* happen, so a
+   narrative of activity was the only shape available and the reader inferred
+   the rest. The report now opens with a verdict: `DONE` / `PARTIAL` /
+   `FAILED`, each defined rather than merely named.
+2. **Failure was a conditional appendix** — *"if you could not complete the
+   mission…"*. A partial success never classifies itself as one, so it rounded
+   up. `PARTIAL` is a first-class outcome that has to list what is finished and
+   what is not, separately.
+3. **Nothing asked how it KNEW.** A sub-agent that wrote a file and ran nothing
+   had no reason not to call that done. `DONE` now requires having checked, and
+   an unverified claim must carry that *in the same sentence* — a caveat at the
+   end reads as covering the whole report rather than the one claim it belongs
+   to.
+
+**The load-bearing sentence is the reassurance, not the prohibitions.** The
+over-claim comes from believing failure is punished, so the rule says outright
+that an accurate `PARTIAL` costs nothing and that overstating is the only
+reporting mistake with a real price — because it is the one that gets built on,
+and it resurfaces later somewhere it makes no sense.
+
+**What counts as evidence is per-place, and stated per-place.** A sub-agent is
+told the two claims the coordinator builds on (tests passing; a file actually
+written). The Browser Agent is told that evidence means the page *after* the
+action — a click it did not see take effect did not take effect — and that
+being blocked by a login or a captcha is ordinary weather, because a model that
+reads blocking as failure invents a result instead. The phone is told that
+`DONE` is rarely honest there at all: it cannot run anything, so "and you
+checked it" is a bar it can almost never clear, and without saying so it would
+read the definition, find nothing it could have run, and use `DONE` anyway.
+
+**One rule, four places, generated.** Same reasoning as `UNTRUSTED_INPUT_RULE`:
+the desktop's sub-agents, the Browser Agent and the phone's workers are the
+same kind of thing answering to the same person, and a rule that holds in three
+of them is worth much less than it looks. It is inlined into each prompt at
+import rather than at `.format()` time — callers format these with their own
+fields, so a placeholder they know nothing about would raise `KeyError` on
+every spawn.
+
 ## A finished sub-agent is worth more than its report
 
 Asked for: *"the ability to continue subagents after they finish — the main

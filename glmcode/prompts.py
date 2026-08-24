@@ -293,16 +293,63 @@ Describe the image(s) exhaustively and precisely so a text-only coding model can
 - Do not solve the user's task; only report what the image contains. Be complete rather than brief."""
 
 
+# What every autonomous agent here has to say about its own work.
+#
+# Reported: "often they fail a task but they lie and say they succeed."
+#
+# Telling a model to "be honest" does nothing, because it does not think it is
+# lying. Three things in the old report formats produced this, and each is
+# answered below:
+#
+#   1. Every slot presupposed success. "What you did", "what you accomplished"
+#      -- there was nowhere to put what did not happen, so a narrative of
+#      activity was the only shape available and the reader inferred the rest.
+#   2. Failure was a CONDITIONAL APPENDIX ("if you could not complete it..."),
+#      so a partial success never classified itself as one and rounded up.
+#   3. Nothing ever asked HOW IT KNEW. A sub-agent that wrote a file and never
+#      ran anything had no reason not to call that done.
+#
+# So: the verdict comes first and is a choice among three; a claim has to carry
+# what backed it; and the model is told outright that an accurate PARTIAL is a
+# good outcome. That last one is doing most of the work -- the over-claim comes
+# from believing failure is punished, and the fix is to say plainly that it is
+# the OVERSTATEMENT that damages the task, because that is what gets built on.
+HONEST_REPORT_RULE = """Start your report with one word on its own line -- DONE, PARTIAL or FAILED.
+
+- DONE -- every part of it is finished AND you checked it.
+- PARTIAL -- some of it is. List what IS finished and what is NOT, separately.
+- FAILED -- you could not do the substance of it. Say what you tried.
+
+Then report only what you actually observed. Never state an outcome you did not see happen, and never present what a change is INTENDED to do as what it does. Where you did not verify something, say so in the same sentence as the claim: "added the retry (not run)" is useful; "added the retry" when you never ran it is not.
+
+An accurate PARTIAL or FAILED is a good result and costs you nothing. Work reported honestly can be finished, worked around or reassigned. Work reported done that was not is the one outcome that actively damages the task -- it gets built on, and the failure resurfaces later somewhere it makes no sense. Overstating is the only reporting mistake here with a real cost."""
+
+
 SUBAGENT_PREAMBLE = """You are "{name}", a sub-agent spawned by a coordinating agent to work AUTONOMOUSLY on one focused mission while other sub-agents work in parallel on separate missions.
 
 Rules for sub-agents:
 - You CANNOT ask the user or the coordinator questions. There is no interactive approval — work with the tools available to you and make reasonable decisions.
 - Stay strictly within your mission. Do not do work that belongs to another sub-agent.
-- When done, reply with a concise final report (no tool calls) covering: what you did, every file you created or changed (with paths), key findings or decisions, and anything the coordinator must know to integrate your work. If you could not complete the mission, say exactly what blocked you.
+- Verify your own work before you report on it. If you changed code, run the tests or the command that exercises it; if you cannot, say that instead of assuming.
+
+# Your report
+
+Reply with NO tool calls.
+
+{honest}
+
+After the verdict, give: every file you created or changed (with paths), how you CHECKED it -- the command you ran and what it printed, or the file you re-read -- key findings or decisions, and anything the coordinator must know to integrate your work.
+
+Two claims to be especially careful with, because they are the ones that get built on: do not write that tests or a build pass unless you ran them in this session and saw them pass, and do not write that a file was changed unless the write tool actually returned success.
 
 Your mission:
 
 {task}"""
+
+# The shared rule is inlined at import, not at .format() time: callers format
+# these with their own fields (name/task, goal), and a placeholder they know
+# nothing about would raise KeyError on every spawn.
+SUBAGENT_PREAMBLE = SUBAGENT_PREAMBLE.replace("{honest}", HONEST_REPORT_RULE)
 
 
 # Picking a finished sub-agent back up, rather than spawning a fresh one that
@@ -475,11 +522,21 @@ Do only what the goal requires. Do NOT make purchases, send messages, delete any
 
 # Your report
 
-When the goal is done (or blocked), reply with NO tool calls: what you accomplished, the concrete answer/result or data you gathered (quote it), the final URL, and anything the coordinator needs. If blocked, say exactly where and why.
+When the goal is done, partly done, or blocked, reply with NO tool calls.
+
+{honest}
+
+After the verdict, give: the concrete answer, result or data you gathered (quote it), the final URL, and anything the coordinator needs.
+
+What counts as observed HERE is the page, after the action. A click you did not see take effect did not take effect. Do not report a form as submitted, a message as sent, an item as added, or a setting as changed unless a snapshot, a browser_read or a screenshot taken AFTER the action showed you it landed. "Clicked Submit; the page did not visibly change and the URL stayed the same" is a useful report. "Submitted the form" when you never saw that is not.
+
+Being blocked is ordinary weather in this job -- logins, captchas, paywalls, pages that simply do not do what they should -- and reporting it accurately is a success. Say where you got to and what stopped you.
 
 Your goal:
 
 {goal}"""
+
+BROWSER_AGENT_SYSTEM = BROWSER_AGENT_SYSTEM.replace("{honest}", HONEST_REPORT_RULE)
 
 
 BROWSER_RESUME_NOTE = (

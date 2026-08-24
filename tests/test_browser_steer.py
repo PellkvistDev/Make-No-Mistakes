@@ -74,9 +74,17 @@ def test_it_is_not_a_wall_of_prohibitions():
 
 def test_the_browser_agent_finishes_only_on_done_or_blocked():
     """The other half of the pair: this is why a "stop" reading is so easy for
-    this particular sub-agent to take."""
+    this particular sub-agent to take -- its one instruction for finishing is
+    to reply with no tool calls, so stopping and reporting are the same move.
+
+    The wording widened from "done (or blocked)" to include partly done, and
+    that is the same lesson from the other side: a binary of finished-or-
+    blocked has nowhere to put a partial result, so a partial rounds UP into a
+    claim of success. Pinned as the property -- it reports on more than one
+    outcome -- rather than as the exact phrase, which is what broke here."""
     assert "NO tool calls" in BROWSER_AGENT_SYSTEM
-    assert "done (or blocked)" in BROWSER_AGENT_SYSTEM
+    for outcome in ("done", "partly done", "blocked"):
+        assert outcome in BROWSER_AGENT_SYSTEM, outcome
 
 
 # --------------------------------------------------------------------- #
