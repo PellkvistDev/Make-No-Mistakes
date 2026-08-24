@@ -1205,6 +1205,16 @@ body.perf-mode #palette {
 }
 /* Same fixed-position padding-vs-viewport issue as #chat above. */
 body.subagent-open #composer-wrap { right: 50%; padding-left: 24px; padding-right: 24px; }
+/* ...which leaves the composer about 320px at the default window, and with six
+   controls in it the textarea was squeezed to TWENTY-TWO pixels. That is not a
+   clipped placeholder; it is a box you cannot type in, reached by opening the
+   panel this app most wants you to open.
+   So the composer sheds Talk while the inspector is up. It is the one control
+   here with a second home -- the titlebar chip opens the same session, and
+   setTalkState keeps the two in step -- and dropping it is what buys the
+   textarea back. The floor stops flex crushing what is left. */
+body.subagent-open #talk-btn { display: none; }
+body.subagent-open #input { min-width: 120px; }
 
 body.no-session #composer, body.no-session #attach-btn, body.no-session #composer-wrap .status-chip {
   opacity: 0.4; pointer-events: none;

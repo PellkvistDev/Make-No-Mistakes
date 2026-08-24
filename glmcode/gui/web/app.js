@@ -1971,6 +1971,22 @@ function showActiveSubagentThread() {
   api().set_active_view(activeSubagentId || "");
 }
 
+/* The composer's hint is longer than the box once the inspector takes half the
+ * window, and a hint cut to "Ask anything... (@ t" teaches nothing. Swapped
+ * rather than left to clip: the "@" trick is worth knowing, and if there is no
+ * room to say it, saying less is better than saying half of it.
+ *
+ * Driven off the class the panel already toggles, so there is one source of
+ * truth for "is the inspector up" rather than a second flag to keep in step. */
+const COMPOSER_HINT = "Ask anything\u2026  (@ to add a file)";
+const COMPOSER_HINT_TIGHT = "Ask anything\u2026";
+function syncComposerHint() {
+  const el = $("input");
+  if (!el) return;
+  el.placeholder = document.body.classList.contains("subagent-open")
+    ? COMPOSER_HINT_TIGHT : COMPOSER_HINT;
+}
+
 function openSubagentPanel(aid, name, status) {
   ensureSubagentTab(aid, name);
   // The tab may be created well after this sub-agent's last status update
@@ -1982,17 +1998,20 @@ function openSubagentPanel(aid, name, status) {
   showActiveSubagentThread();
   refreshBrowserView();  // reveal the live viewport iff this is a browser agent
   document.body.classList.add("subagent-open");
+  syncComposerHint();
 }
 
 function closeSubagentPanel() {
   document.body.classList.remove("subagent-open");
   document.body.classList.remove("browser-full");
+  syncComposerHint();
   api().set_active_view("");  // back to reading the main chat
 }
 
 function clearSubagentPanel() {
   document.body.classList.remove("subagent-open");
   document.body.classList.remove("browser-full");
+  syncComposerHint();
   $("subagent-tabs").innerHTML = "";
   $("subagent-panel-body").innerHTML = "";
   for (const key of Object.keys(subagentThreads)) delete subagentThreads[key];
