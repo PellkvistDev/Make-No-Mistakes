@@ -3272,8 +3272,21 @@ function modelEntries(res, everything) {
 }
 
 function renderModelChip(res) {
-  $("model-chip-label").textContent = res.chat_model || "model";
-  $("model-chip").title = `Model: ${res.chat_model} (via ${res.chat_provider}) — click to switch`;
+  const chip = $("model-chip");
+  // Nothing configured yet. This used to leave the chip BLANK -- an empty pill
+  // in the titlebar on first run, at the moment a new user most needs telling
+  // that a model is the one thing they have to set up. It also put
+  // "Model: undefined (via undefined)" in the tooltip, since the fallback was
+  // only applied to the label.
+  if (!res.chat_model) {
+    $("model-chip-label").textContent = "Choose a model";
+    chip.title = "No model set up yet — click to add an API key and pick one";
+    chip.classList.add("needs-setup");
+    return;
+  }
+  chip.classList.remove("needs-setup");
+  $("model-chip-label").textContent = res.chat_model;
+  chip.title = `Model: ${res.chat_model} (via ${res.chat_provider || "?"}) — click to switch`;
 }
 
 /* A ring showing how much of today's free-tier allowance is gone. Drawn only
@@ -6024,6 +6037,11 @@ async function boot() {
     input.focus();
   } else {
     showNoSession();
+    // The titlebar chip is filled by populateModelPicker, and nothing on this
+    // path called it -- so with no chat open the model showed as a blank pill
+    // until the user happened to open Settings. Not awaited: the chip filling
+    // in a moment later is better than holding up the first paint for it.
+    populateModelPicker();
   }
   // OS-level notifications (permission prompts, finished turns) only fire
   // while the user is away in another app -- keep Python's picture of
@@ -7410,7 +7428,12 @@ function setTalkState(on) {
   b.setAttribute("aria-label", on ? "End the voice conversation" : "Talk to it");
   b.title = on ? "End the voice conversation"
                : "Talk to it — a hands-free voice conversation";
-  b.querySelector(".talk-label").textContent = on ? "Listening" : "Talk";
+  // "End", not "Listening". A button should say what pressing it does, and
+  // the state is said in three better places now -- the dock's status line,
+  // the orb, and the ring round the window. It is also 60px narrower, which
+  // matters: the composer's placeholder needs 272px and "Listening" left it
+  // 252px, so the hint was clipped for the whole of every voice session.
+  b.querySelector(".talk-label").textContent = on ? "End" : "Talk";
   renderActivityRail();       // voice is a rail item while it is running
 }
 

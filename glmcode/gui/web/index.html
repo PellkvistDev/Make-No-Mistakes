@@ -88,14 +88,11 @@
 <div id="voice-dock" class="voice-dock" hidden>
   <div class="voice-card glass-strong" role="region" aria-label="Voice conversation">
     <div class="voice-dock-row">
-      <!-- The orb and the word next to it are ONE status light: the orb is
-           the same animated dot for listening, thinking and speaking, so the
-           word is what says which. Moving it to a tooltip (it was briefly
-           there) put the only place the app said what it was doing behind a
-           hover. aria-hidden on the orb because the text beside it is the
-           accessible version of the same thing. -->
+      <!-- The orb and the status line are ONE status light: the orb is the
+           same animated dot for listening, thinking and speaking, so the word
+           is what says which. aria-hidden on the orb because the line below is
+           the accessible version of the same thing. -->
       <div id="voice-orb" class="voice-orb" aria-hidden="true"><span class="voice-orb-core"></span></div>
-      <span id="voice-state" class="voice-state" role="status" aria-live="polite"></span>
       <button id="voice-mute" class="icon-btn" aria-label="Mute microphone" aria-pressed="false" title="Mute — pause listening without ending the session">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
@@ -106,6 +103,11 @@
            same mode two ways, and neither said what the third one was. -->
       <button id="voice-mode" class="voice-mode-btn" title="Listening mode — click to change">Hands-free</button>
     </div>
+    <!-- On its own line, not beside the orb. The rail column is 76px wide in
+         the app's DEFAULT window (1280 with the sidebar open), so four things
+         on one row truncated to "List..." and "Han..." -- the status word was
+         unreadable exactly where it matters most. -->
+    <span id="voice-state" class="voice-state" role="status" aria-live="polite"></span>
     <button id="voice-ptt-btn" class="btn btn-primary voice-ptt-btn" hidden>Hold to talk</button>
     <div id="voice-perm" class="voice-perm" hidden>
       <div class="voice-perm-q" id="voice-perm-q"></div>
@@ -248,7 +250,7 @@
     <button id="mic-btn" class="icon-btn" aria-label="Dictate into the box" title="Dictate — click to record, click again to transcribe into the box">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-11.7 5.2"/><path d="M14 21l7-7 2 2-7 7-3 1 1-3z"/></svg>
     </button>
-    <textarea id="input" rows="1" placeholder="Ask anything…  (type @ to add a file)"
+    <textarea id="input" rows="1" placeholder="Ask anything…  (@ to add a file)"
               aria-label="Message"></textarea>
     <!-- Starting a conversation is an action, and every other message action
          lives here rather than in the titlebar, which is where this one was:

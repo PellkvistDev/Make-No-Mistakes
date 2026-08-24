@@ -1262,7 +1262,18 @@ body.no-session #composer, body.no-session #attach-btn, body.no-session #compose
   padding: 7px 4px; max-height: 180px;
   user-select: text;
 }
-#input::placeholder { color: var(--text-faint); }
+/* One line, always. The placeholder was longer than the box at ordinary window
+   sizes, so it WRAPPED and the textarea's own height clipped the second line
+   -- "(type @ to add a fil". Measured: it needed 272px and had 252px once the
+   Talk button widened for a live session.
+   Fixed from both ends: the hint is shorter, the Talk label no longer grows,
+   and this stops it wrapping if it ever runs out of room again. No ellipsis --
+   Chromium computes text-overflow to `clip` on ::placeholder whatever is asked
+   for, so claiming one here would be decoration. */
+#input::placeholder {
+  color: var(--text-faint);
+  white-space: nowrap; overflow: hidden;
+}
 .send-btn {
   width: 36px; height: 36px; border-radius: 50%; flex: none;
   display: flex; align-items: center; justify-content: center;
@@ -2105,17 +2116,25 @@ body.sidebar-open #sidebar { transform: translateX(0); }
 .voice-dock-row { display: flex; align-items: center; gap: 7px; }
 .voice-dock-row .icon-btn { width: 26px; height: 26px; flex: none; }
 
-/* The word beside the orb. Reported: "it was much clearer when the agent
-   actually heard me and thought of an answer" -- the orb is one dot for
-   listening, thinking and speaking, so the word is what tells them apart.
-   min-width: 0 + ellipsis so a long line ("Needs your OK -- say yes or no")
-   cannot widen the dock. */
+/* The status word, on its own line under the controls.
+ *
+ * It was beside the orb, and that did not survive contact with the real
+ * window: the rail column is 76px wide at 1280 with the sidebar open -- the
+ * app's DEFAULT size -- so orb + word + mute + mode on one row truncated to
+ * "List..." and "Han...". The word was unreadable in exactly the layout most
+ * people are looking at.
+ *
+ * A second line rather than a wider dock: the dock has to stay small, and two
+ * short lines are still small. Full width of the card, so "Listening" and
+ * "Thinking" never truncate; a genuinely long one ("Needs your OK -- say yes
+ * or no") still ellipsises rather than widening anything. */
 .voice-state {
-  flex: 1; min-width: 0;
-  font-family: var(--font); font-size: 11px; line-height: 1.2;
+  display: block; width: 100%; min-width: 0;
+  font-family: var(--font); font-size: 11px; line-height: 1.25;
   color: var(--text-dim); letter-spacing: 0.01em;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+.voice-state:empty { display: none; }
 /* Heard-you and speaking are the two the eye should catch without reading. */
 .voice-card:has(.voice-orb-hearing) .voice-state { color: var(--accent); }
 .voice-card:has(.voice-orb-speaking) .voice-state { color: #34c759; }
@@ -2329,6 +2348,14 @@ body.sidebar-open #sidebar { transform: translateX(0); }
   .talk-btn .talk-label { display: none; }
 }
 
+/* Nothing configured yet: the chip is the way in, so it should look like one
+   rather than like an empty pill someone forgot to fill. */
+#model-chip.needs-setup {
+  border-color: rgba(10, 132, 255, 0.55);
+  color: var(--text);
+}
+#model-chip.needs-setup #model-chip-label { color: var(--accent); }
+
 /* ---- live activity rail ------------------------------------------------ *
  *
  * The chat is a centred 860px column, so there is a wide empty margin either
@@ -2344,24 +2371,34 @@ body.sidebar-open #sidebar { transform: translateX(0); }
 .rail-stack {
   pointer-events: auto;
   display: flex; flex-direction: column; gap: 8px;
-  width: 100%; max-width: 190px; max-height: 100%;
+  /* Docked: a FIXED width, not max-content. Sized to its contents it grew and
+     shrank as the status line changed -- "Listening..." to "Needs your OK --
+     say yes, no, or always" moved it from 172px to 220px and back, so the dock
+     jittered under the pointer while you were reading it. */
+  width: 208px; max-height: 100%;
 }
+/* The DOCKED form is the base, and the margin column is the upgrade -- that
+   way round because the margin is usually not there. `(100vw - sidebar) / 2 -
+   430` is 76px at 1280 with the sidebar open, which is the app's default
+   window: for most people, most of the time, there is no column to put this
+   in. It used to hide itself in that case, so the ambient view of what is
+   running was invisible almost always. */
 .activity-rail {
-  position: fixed; left: 0; top: 52px; bottom: 128px;
-  width: max(24px, calc(50% - 430px));
+  position: fixed; left: 0; top: auto; bottom: 108px;
+  width: auto;
   /* Above the chat, not level with it. #chat is fixed across the FULL width --
      its margin is padding, not a gap -- so at the same z-index it covers the
      rail and swallows every click. The rail looked perfectly fine and did
      nothing, which is the kind of thing only a click finds. */
   z-index: var(--z-composer);
-  display: flex; align-items: center; justify-content: center;
-  padding: 0 10px;
+  display: flex; align-items: flex-end; justify-content: flex-start;
+  padding: 0 12px;
   pointer-events: none;
 }
 .activity-rail[hidden] { display: none; }
 .activity-items {
   display: flex; flex-direction: column; gap: 6px;
-  min-height: 0; overflow-y: auto; width: 100%;
+  min-height: 0; overflow-y: auto; width: 100%; max-height: 168px;
 }
 .activity-item {
   display: flex; align-items: center; gap: 7px; width: 100%;
@@ -2385,30 +2422,43 @@ body.sidebar-open #sidebar { transform: translateX(0); }
 .activity-item.ai-err .ai-dot { background: #ff453a; }
 .activity-item.ai-voice .ai-dot { background: #34c759; }
 
-/* The chat-history sidebar starts OPEN, and it takes this column when it does
-   -- so hiding the rail while it is open (the first version of this) meant the
-   rail was invisible in the app's normal state. The chat shifts right instead
-   of shrinking, so the margin is still there; the rail moves with it. */
-body.sidebar-open .activity-rail {
-  left: var(--sidebar-w);
-  width: max(24px, calc((100vw - var(--sidebar-w)) / 2 - 430px));
+/* The sidebar takes this column when it is open, so the dock moves clear of
+   it rather than sitting underneath. */
+body.sidebar-open .activity-rail { left: var(--sidebar-w); }
+
+/* It becomes a margin COLUMN only where the column is wide enough to read
+   one: 200px. That needs 1260px without the sidebar and 1528px with it -- the
+   thresholds are the arithmetic above solved for 200, not numbers picked by
+   eye, which is how the old pair (1100 / 1368) came to sit either side of the
+   default window and hide the feature from it. */
+@media (min-width: 1260px) {
+  body:not(.sidebar-open) .activity-rail {
+    top: 52px; bottom: 128px; padding: 0 10px;
+    width: max(24px, calc(50% - 430px));
+    align-items: center; justify-content: center;
+  }
+  body:not(.sidebar-open) .rail-stack { width: 100%; min-width: 0; max-width: 190px; }
+  body:not(.sidebar-open) .activity-items { max-height: none; }
+}
+@media (min-width: 1528px) {
+  body.sidebar-open .activity-rail {
+    top: 52px; bottom: 128px; padding: 0 10px;
+    width: max(24px, calc((100vw - var(--sidebar-w)) / 2 - 430px));
+    align-items: center; justify-content: center;
+  }
+  body.sidebar-open .rail-stack { width: 100%; min-width: 0; max-width: 190px; }
+  body.sidebar-open .activity-items { max-height: none; }
 }
 
-/* The ITEMS are the first thing to go when there is no room for them, which
-   is why nothing may live only there: every one is reachable from the
-   sub-agent panel as well. Below these widths the margin has collapsed to its
-   24px minimum and a rail would be sitting on top of the text -- the second
-   threshold is the first plus the sidebar it has to share the window with.
-
-   The voice CONTROLS are exempt, and that is not a refinement. Mute, the mode
-   and push-to-talk exist in exactly one place now that the full-screen
-   overlay is gone, so a rule that hides the rail hides the only way to mute a
-   live microphone -- and the default window is 1280 wide with the sidebar
-   open, which is inside both thresholds. It was not a narrow-window edge
-   case; it was the ordinary one. */
-@media (max-width: 1100px) { body:not(.voice-on) .activity-rail { display: none; } }
-@media (max-width: 1368px) {
-  body.sidebar-open:not(.voice-on) .activity-rail { display: none; }
+/* Below this there is genuinely nowhere to put rows without covering the
+   conversation, and the original reasoning applies for real: every item is
+   reachable from the sub-agent panel, so losing them costs nothing. The voice
+   CONTROLS stay, because mute, the mode and push-to-talk have no second home
+   now that the full-screen overlay is gone -- a rule that hides them hides the
+   only way to stop a live microphone. */
+@media (max-width: 900px) {
+  .activity-items { display: none; }
+  body:not(.voice-on) .activity-rail { display: none; }
 }
 
 /* You are in voice mode, and the window says so.
@@ -2435,16 +2485,3 @@ body.voice-on::after {
                     inset 0 0 44px rgba(52, 199, 89, 0.16); }
 }
 
-/* No margin to sit in, so it stops being a margin column: a compact dock at
-   the bottom-left, above the composer, carrying the four controls alone. */
-@media (max-width: 1368px) {
-  body.voice-on .activity-rail {
-    left: 0; top: auto; bottom: 108px; width: auto;
-    align-items: flex-end; justify-content: flex-start;
-    padding: 0 12px;
-  }
-  body.voice-on.sidebar-open .activity-rail {
-    left: var(--sidebar-w); width: auto;
-  }
-  body.voice-on .activity-items { display: none; }
-}

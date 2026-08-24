@@ -127,7 +127,9 @@ def test_it_shows_that_a_session_is_live(desktop):
     desktop.page.evaluate("() => setTalkState(true)")
     desktop.page.wait_for_timeout(120)
     assert desktop.page.get_attribute("#talk-btn", "aria-pressed") == "true"
-    assert desktop.page.text_content("#talk-btn").strip() == "Listening"
+    # "End", not "Listening": a button says what pressing it does, and the
+    # state is said by the dock's status line, the orb and the window ring.
+    assert desktop.page.text_content("#talk-btn").strip() == "End"
 
 
 def test_both_entry_points_agree(desktop):
@@ -231,12 +233,36 @@ def test_a_live_voice_session_keeps_the_rail_up_without_a_row(desktop):
 # --------------------------------------------------------------------- #
 # when there is no room for it
 
-def test_it_goes_away_on_a_narrow_window(desktop):
-    """The margin collapses to its 24px minimum, and a rail there would sit on
-    top of the text. Nothing may live ONLY here for exactly this reason."""
+def test_a_narrow_window_docks_it_rather_than_hiding_it(desktop):
+    """This asserted the opposite, and the reason it gave -- a rail in a
+    collapsed margin would sit on top of the text -- was true of a full-height
+    COLUMN. It was not a reason to have nothing.
+
+    The arithmetic is what settles it: the column is
+    `(100vw - sidebar) / 2 - 430`, which is 76px at 1280 with the sidebar open.
+    That is the app's DEFAULT window, so "there is no room for a column" is the
+    ordinary case, not an edge one -- and hiding on it meant the ambient view
+    of what is running was invisible for almost everyone almost always. It
+    becomes a small dock above the composer instead, which is where the voice
+    controls already sit."""
     _app(desktop, width=1000)
     _worker(desktop)
+    assert desktop.page.is_visible("#activity-rail")
+    box = desktop.page.eval_on_selector(
+        "#activity-rail", "e => e.getBoundingClientRect()")
+    assert box["height"] < 400, "it is a dock, not a column up the side"
+
+
+def test_there_is_genuinely_no_room_below_900(desktop):
+    """Where the old reasoning does apply. Every item is reachable from the
+    sub-agent panel, so losing the rows costs nothing; the voice controls have
+    no second home and stay."""
+    _app(desktop, width=820)
+    _worker(desktop)
     assert desktop.page.is_hidden("#activity-rail")
+    _voice_on(desktop)
+    assert desktop.page.is_visible("#voice-orb")
+    assert desktop.page.is_hidden("#activity-items")
 
 
 def test_it_moves_with_the_chat_when_the_sidebar_is_open(desktop):
@@ -253,13 +279,15 @@ def test_it_moves_with_the_chat_when_the_sidebar_is_open(desktop):
     assert left >= 268, left      # clear of the sidebar
 
 
-def test_it_goes_away_when_the_sidebar_leaves_no_room(desktop):
-    """The threshold is the plain one plus the sidebar it shares the window
-    with."""
+def test_the_sidebar_moves_the_dock_rather_than_removing_it(desktop):
+    """The sidebar takes the column, so the dock clears it -- it does not go."""
     _app(desktop, width=1200)
     desktop.page.evaluate("() => document.body.classList.add('sidebar-open')")
     _worker(desktop)
-    assert desktop.page.is_hidden("#activity-rail")
+    assert desktop.page.is_visible("#activity-rail")
+    left = desktop.page.evaluate(
+        "() => document.getElementById('activity-rail').getBoundingClientRect().left")
+    assert left >= 268, left
 
 
 def test_the_voice_controls_survive_when_the_rail_does_not(desktop):
@@ -280,14 +308,27 @@ def test_the_voice_controls_survive_when_the_rail_does_not(desktop):
     assert desktop.page.is_visible("#voice-mode")
 
 
-def test_it_is_the_voice_controls_alone_down_there(desktop):
-    """Exempting the rail wholesale would put the item rows back over the text,
-    which is what the thresholds exist to prevent."""
+def test_the_dock_carries_the_work_as_well_as_the_controls(desktop):
+    """This asserted the rows were dropped when the rail docked, which is what
+    made the feature invisible in the default window. A dock at the bottom-left
+    has room for a few rows; only below 900px is that untrue."""
     _app(desktop, width=1000)
     _worker(desktop)
     _voice_on(desktop)
     assert desktop.page.is_visible("#voice-orb")
-    assert desktop.page.is_hidden("#activity-items")
+    assert desktop.page.is_visible("#activity-items")
+    assert "dark-mode" in desktop.page.text_content("#activity-rail")
+
+
+def test_the_docked_rows_cannot_climb_the_window(desktop):
+    """A chat with a dozen workers must not grow a column up the side -- which
+    is the thing the old hide rule was really protecting against."""
+    _app(desktop, width=1000)
+    for n in range(12):
+        _worker(desktop, wid=f"wk{n}", name=f"worker-{n}")
+    h = desktop.page.eval_on_selector(
+        "#activity-rail", "e => e.getBoundingClientRect().height")
+    assert h < 400, h
 
 
 def test_it_clears_the_composer_when_it_drops_out_of_the_margin(desktop):
