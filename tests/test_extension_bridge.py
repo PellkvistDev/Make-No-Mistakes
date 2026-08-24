@@ -446,11 +446,21 @@ def test_a_read_survives_the_socket_being_replaced(bridge, ext):
 
 def test_a_read_waits_for_the_extension_to_come_back(bridge, ext):
     """The gap is usually shorter than this; the point is that a call arriving
-    inside it waits rather than failing the whole task."""
+    inside it waits rather than failing the whole task.
+
+    The grace is widened for the test, and that is not a fudge to make a red
+    test green. What is being checked is that the wait EXISTS -- a call inside
+    a blink survives it -- and the shipped 6 seconds is chosen for a real
+    browser recycling a service worker, not for a machine running the whole
+    suite at once. Left at 6, this failed about one run in ten: the reconnect
+    landed after the grace had already expired, which says nothing about the
+    behaviour and everything about the load. (Pre-existing; the test came in
+    with #113.)"""
+    bridge._reconnect_grace = 20.0
     ext.handle("info", lambda p: {"url": "back"})
     bridge.call("info")
     ext.close()
-    for _ in range(60):                    # the drop is noticed asynchronously
+    for _ in range(120):                   # the drop is noticed asynchronously
         if not bridge.connected:
             break
         time.sleep(0.05)
@@ -466,7 +476,7 @@ def test_a_read_waits_for_the_extension_to_come_back(bridge, ext):
 
     threading.Thread(target=reconnect_soon, daemon=True).start()
     try:
-        assert bridge.call("info", timeout=8)["url"] == "back"
+        assert bridge.call("info", timeout=20)["url"] == "back"
     finally:
         if later.get("ext"):
             later["ext"].close()

@@ -1745,6 +1745,55 @@ button **until it reads the mode wanted**, because one button cycling three
 ways means "click once for push-to-talk" is only true from hands-free. A fixed
 click count asserts against whichever mode it happens to land in.
 
+## Photograph the UI; do not read it
+
+Every layout bug in this app so far was found by a person using it and
+reporting it, which is the expensive way. The desktop harness can boot the
+real page with the real CSS and take a picture, and a picture settles in one
+look what an hour of reading the stylesheet does not.
+
+Two things shipped and were caught this way, both in the app's **default
+window** — 1280 wide with the sidebar open:
+
+- **The voice dock truncated its own labels** to `List…` and `Han…`. The rail
+  column is `(100vw - sidebar) / 2 - 430`, which is **76px** there. Four
+  controls never fit on one row. The status word moved onto its own line under
+  them.
+- **The activity rail was invisible.** Its collapse thresholds (1100px / 1368px
+  with the sidebar) sat either side of the default window, so the ambient view
+  of running work — the whole feature — was hidden for almost everyone almost
+  always. It docks at the bottom-left now instead of disappearing, carrying the
+  rows as well as the controls. Only below 900px is there genuinely no room,
+  and there the rows go (they are reachable from the sub-agent panel) while the
+  voice controls stay (they are not).
+
+**The thresholds are the arithmetic solved for a number, not numbers picked by
+eye.** A column is worth having at 200px, which needs 1260px without the
+sidebar and 1528px with it. The old pair were guesses, and guesses are how they
+came to bracket the one window size that matters most.
+
+**Sized to content is not free.** The docked stack was `width: max-content`,
+so it grew and shrank as the status line changed — the dock jittered under the
+pointer while you read it. Fixed width.
+
+Two more found in the same pass, both measured rather than eyeballed:
+
+- **The composer placeholder needed 272px and had 252px** once the Talk button
+  widened for a live session, so it wrapped and the textarea clipped the second
+  line mid-word. The hint is shorter and the Talk label no longer grows —
+  it says **End**, which is what pressing it does, and the state is said in
+  three better places (the dock's line, the orb, the ring).
+  `text-overflow` is NOT set on `::placeholder`: Chromium computes it to `clip`
+  whatever you ask for, so declaring one would be decoration.
+- **The model chip was a blank pill** with no chat open — `boot()` never called
+  `populateModelPicker`, and `renderModelChip` put "Model: undefined (via
+  undefined)" in the tooltip because the fallback was applied only to the
+  label.
+
+`scripts/` has no screenshot tool and does not need one: the harness in
+`tests/desktop_ui/conftest.py` is thirty lines away from a script that boots
+the page and photographs it. Do that before believing a layout is fine.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by
