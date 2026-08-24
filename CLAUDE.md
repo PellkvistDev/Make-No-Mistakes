@@ -1877,9 +1877,27 @@ Two more found in the same pass, both measured rather than eyeballed:
   undefined)" in the tooltip because the fallback was applied only to the
   label.
 
+A second pass, over the surfaces the first one skipped, found the worst of
+them: **with the sub-agent inspector open the composer's textarea is 22px
+wide.** `body.subagent-open` gives the panel the right half, which leaves the
+composer ~320px at the default window, and six controls eat all of it. Not a
+clipped hint -- a box you cannot type in, reached by clicking a sub-agent to
+watch it work. Talk is what gets dropped to buy it back: it is the only control
+there with a second home (the titlebar chip opens the same session, and
+`setTalkState` keeps the two in step). Dictation stays despite costing room,
+because it has nowhere else to be -- "nothing may live only here" cuts both
+ways.
+
 `scripts/` has no screenshot tool and does not need one: the harness in
 `tests/desktop_ui/conftest.py` is thirty lines away from a script that boots
 the page and photographs it. Do that before believing a layout is fine.
+
+**Check the mock against the real contract before believing a defect.** That
+same pass appeared to find "undefined" filling the whole first-run key sheet.
+It was the fake payload using `name`/`base_url` where the app reads
+`key`/`label`/`blurb` -- a bug in the script, not the app. A photograph is
+evidence of what the page did with what it was given, which is only evidence
+about the app when the input was shaped like the real one.
 
 ## Tests
 
