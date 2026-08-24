@@ -327,3 +327,69 @@ def test_nothing_here_throws(desktop):
     desktop.page.evaluate("() => setTalkState(true)")
     desktop.page.wait_for_timeout(150)
     assert desktop.errors == []
+
+
+# --------------------------------------------------------------------- #
+# workers belong to a chat
+
+def _open_chat(desktop, sid, workers=None):
+    desktop.page.evaluate("""(a) => applySession({
+      id: a.sid, cwd: "/tmp/p", items: [], todos: [], sessions: [],
+      workers: a.workers,
+      prompt_tokens: 0, completion_tokens: 0, context: 0 })""",
+      {"sid": sid, "workers": workers or []})
+    desktop.page.wait_for_timeout(200)
+
+
+def _names(desktop):
+    return desktop.page.evaluate(
+        "() => [...document.querySelectorAll('.activity-item .ai-name')]"
+        ".map(e => e.textContent)")
+
+
+def test_another_chats_workers_do_not_follow_you(desktop):
+    """Reported: "workers seem to be cross-session". liveWorkers was a bare
+    object nothing ever cleared, so switching chats left the previous one's
+    workers in the rail."""
+    _app(desktop)
+    _worker(desktop, wid="wk1", name="dark-mode")
+    assert _names(desktop) == ["dark-mode"]
+    _open_chat(desktop, "s2")
+    assert _names(desktop) == [], "the other chat's worker came along"
+
+
+def test_ids_from_two_chats_do_not_collide(desktop):
+    """Worker ids are per chat -- "wk1", "wk2" -- so a shared store has the new
+    chat's first worker overwrite the old chat's entry under the same key.
+
+    Stated against going BACK, because that is where the harm shows. Looking at
+    the second chat, a clobbered store and a cleared one print the same single
+    row; it is the first chat that has quietly lost its worker, and whose pill
+    would open a thread belonging to another conversation."""
+    _app(desktop)
+    _worker(desktop, wid="wk1", name="dark-mode")
+    _open_chat(desktop, "s2")
+    _worker(desktop, wid="wk1", name="add-tests")
+    assert _names(desktop) == ["add-tests"]
+    _open_chat(desktop, "s1", workers=[
+        {"id": "wk1", "name": "dark-mode", "status": "running"}])
+    assert _names(desktop) == ["dark-mode"], "the first chat's worker was clobbered"
+
+
+def test_coming_back_shows_what_is_still_running(desktop):
+    """Merely clearing is not enough: a worker still going in the chat you
+    return to has to be there, and its events were missed while you were away
+    (a background chat's events never reach this store)."""
+    _app(desktop)
+    _open_chat(desktop, "s2", workers=[
+        {"id": "wk1", "name": "dark-mode", "status": "running"},
+        {"id": "wk2", "name": "add-tests", "status": "done"}])
+    assert _names(desktop) == ["dark-mode", "add-tests"]
+
+
+def test_closing_the_last_chat_empties_the_rail(desktop):
+    _app(desktop)
+    _worker(desktop, wid="wk1", name="dark-mode")
+    desktop.page.evaluate("() => showNoSession()")
+    desktop.page.wait_for_timeout(150)
+    assert _names(desktop) == []

@@ -1549,7 +1549,30 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
             "context": agent.context_estimate(),
             "busy": agent.busy,
             "needs_notes": self._needs_project_notes(agent.workdir),
+            # The chat's workers, so the activity rail can be rebuilt for the
+            # chat being opened. It was a bare frontend object that nothing
+            # ever cleared, so switching chats left the previous one's workers
+            # on screen -- and worker ids are per chat ("wk1", "wk2"), so the
+            # new chat's first worker overwrote the old chat's entry and its
+            # pill opened someone else's thread.
+            "workers": self._worker_rows(agent),
         }
+
+    @staticmethod
+    def _worker_rows(agent) -> list:
+        """What the rail needs about each worker, in dispatch order.
+
+        Read from the coding agent, which since Agent.adopt_workers_of shares
+        one registry with the chat's delegator -- so this is the whole chat's
+        set however it was dispatched, and not just the typed half.
+        """
+        try:
+            with agent._workers_lock:
+                workers = list(agent._workers.values())
+        except Exception:
+            return []
+        return [{"id": w["id"], "name": w["name"], "status": w["status"]}
+                for w in workers]
 
     @staticmethod
     def _needs_project_notes(workdir: Path) -> bool:
