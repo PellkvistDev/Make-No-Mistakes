@@ -1914,13 +1914,29 @@
       },
     });
 
-    const messages = [
+    // Kept on the record, not local to this call: resume_agent picks the
+    // worker back up with everything it already worked out, and both of these
+    // are that context. runAgent mutates `messages` in place, so the record
+    // holds the live history rather than a copy of its opening.
+    w.messages = [
       { role: "system", content: AC.SUBAGENT_PROMPT + "\n\nRepository: "
         + session.repo.full_name + " (branch " + session.repo.branch + ")." },
       { role: "user", content: task },
     ];
-    // Deliberately NOT awaited. The caller is a Live function call and the
-    // model is stopped until it returns.
+    w.tools = tools;
+    runWorkerTurn(w);
+    return "Started " + w.id + " (" + w.name + "). It runs while this app is "
+      + "open — tell the user it is going, and carry on.";
+  }
+
+  /* One turn of a worker, from wherever its history currently stands.
+   *
+   * Deliberately NOT awaited by its callers. The caller is a Live function
+   * call and the model is stopped until the tool returns, so awaiting the work
+   * would hold the spoken conversation silent for the whole of it. */
+  function runWorkerTurn(w) {
+    const tools = w.tools;
+    const messages = w.messages;
     AC.runAgent({
       model: session.model, tools, messages,
       toolSchemas: visionSchemas(AC.TOOL_SCHEMAS), maxSteps: 16,
@@ -1949,8 +1965,38 @@
       persistSession();
       syncSave().catch(() => {});
     });
-    return "Started " + w.id + " (" + w.name + "). It runs while this app is "
-      + "open — tell the user it is going, and carry on.";
+  }
+
+  /* Pick a FINISHED worker back up with more to do.
+   *
+   * The point is the context: it still has the files it read and what it
+   * concluded, so a follow-up costs one message instead of a fresh worker that
+   * has to be told the whole background again. Shared with the desktop --
+   * same tool name, same argument names, same preamble (generated) -- because
+   * a chat syncs between the devices and carries the other one's calls in its
+   * own history. */
+  function resumeAgent(ref, task) {
+    if (!task) return "ERROR: resume_agent needs a task.";
+    const w = workerFind(ref);
+    if (!w) return "ERROR: no worker called " + ref + ".";
+    if (w.state === "running") {
+      return "ERROR: " + w.id + " is still running. Use steer_worker to add to "
+        + "what it is already doing; resume_agent is for one that has finished.";
+    }
+    if (!w.messages || !w.tools) {
+      return "ERROR: " + w.id + " was not started in this session, so its "
+        + "context is gone. Dispatch a fresh worker with the background it needs.";
+    }
+    w.messages.push({ role: "user", content: AC.RESUME_PREAMBLE.replace("{task}", task) });
+    w.state = "running";
+    w.stop = false;
+    w.started = Date.now();
+    w.ended = 0;
+    w.report = "";
+    addBubble("system", "⚙️ " + w.id + " (" + w.name + "): " + task, false);
+    runWorkerTurn(w);
+    return "Picked " + w.id + " (" + w.name + ") back up. It runs while this app "
+      + "is open — tell the user it is going, and carry on.";
   }
 
   function checkWorkers() {
@@ -3725,6 +3771,7 @@
     if (name === "stop_worker") return stopWorker(args.worker || "");
     if (name === "worker_changes") return workerChanges(args.worker || "");
     if (name === "revert_worker") return revertWorker(args.worker || "");
+    if (name === "resume_agent") return resumeAgent(args.agent || "", args.task || "");
     const t = session.tools;
     if (!t) return "ERROR: this chat is not open.";
     const fn = t[name];

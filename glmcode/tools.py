@@ -2873,8 +2873,10 @@ TOOL_SCHEMAS = [
         "one a COMPLETE, self-contained mission with all the context it needs — it does "
         "not see this conversation. Give sub-agents non-overlapping missions so they "
         "don't edit the same files at once. Sub-agent capabilities follow the current "
-        "permission mode: in 'ask' mode they are effectively read-only (research), in "
-        "'auto-edit' they can also modify files, in 'full auto' they can do anything. "
+        "permission mode, the same as your own: in 'ask' mode a gated action puts a "
+        "permission card in front of the user and waits for them, rather than being "
+        "refused. When one of them finishes and you need more from it, use resume_agent "
+        "rather than spawning a replacement -- it still has everything it worked out. "
         "Do NOT use this for trivial work or tightly-coupled steps you should just do "
         "yourself.",
         {
@@ -3216,6 +3218,26 @@ CONVERSATIONAL_SCHEMAS = [
         ["worker"],
     ),
     _schema(
+        "resume_agent",
+        "Pick a FINISHED sub-agent or worker back up and give it more to do. It still has "
+        "everything it worked out the first time -- the files it read, what it changed, what "
+        "it concluded -- so this is far better than spawning a fresh one that has to be told "
+        "it all again. Use it whenever the next piece of work follows on from something one "
+        "of them already did: a fix to what it built, the next step, or a question about its "
+        "own work. Identify it by name or id. For one that is still RUNNING use steer_worker "
+        "instead.",
+        {
+            "agent": {"type": "string",
+                      "description": "The sub-agent's or worker's name, or its id "
+                                     "(e.g. 'wk1')."},
+            "task": {"type": "string",
+                     "description": "What it should do now. It remembers its own work, so "
+                                    "say only what is NEW -- no need to restate the "
+                                    "original mission."},
+        },
+        ["agent", "task"],
+    ),
+    _schema(
         "revert_worker",
         "Undo a worker's file changes, rolling the project back to how it was right before "
         "that worker started. Use when the user says to undo or revert a worker's work. This "
@@ -3243,6 +3265,7 @@ STEER_WORKER_TOOL = "steer_worker"
 STOP_WORKER_TOOL = "stop_worker"
 WORKER_CHANGES_TOOL = "worker_changes"
 REVERT_WORKER_TOOL = "revert_worker"
+RESUME_AGENT_TOOL = "resume_agent"
 SUBAGENT_TOOL = "spawn_agents"
 CONTROL_CHROME_TOOL = "control_chrome"
 VIEW_IMAGE_TOOL = "view_image"
@@ -3269,7 +3292,13 @@ SHELL_TOOL_NAMES = frozenset({RUN_COMMAND_TOOL, "run_powershell"})
 # the same three tools serve it as serve the spoken conversation.
 WORKER_SCHEMAS = [s for s in CONVERSATIONAL_SCHEMAS
                   if s["function"]["name"] in
-                  ("check_workers", "steer_worker", "stop_worker")]
+                  ("check_workers", "steer_worker", "stop_worker",
+                   # And resuming, which for the coding agent is the one that
+                   # matters most: what it spawns are spawn_agents sub-agents,
+                   # and those used to be thrown away the moment they reported.
+                   # Following up meant spawning a fresh one and re-explaining
+                   # everything the last one had just worked out.
+                   "resume_agent")]
 
 
 TOOL_FUNCTIONS = {

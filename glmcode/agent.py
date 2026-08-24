@@ -6,6 +6,7 @@ AgentEvents sink (terminal: ui.ConsoleEvents, desktop app: gui.WebEvents).
 
 from __future__ import annotations
 
+from collections import OrderedDict
 import json
 import re
 import shutil
@@ -24,11 +25,12 @@ from .prompts import (ATTEMPT_TASK, BROWSER_AGENT_SYSTEM, BROWSER_AGENT_TASK,
                       COMPACT_PROMPT, CONTINUE_NUDGE, CONVERSATIONAL_SYSTEM,
                       FRESH_CRITIC_SYSTEM, GREEN_GIVEUP_NUDGE, GREEN_NUDGE,
                       REFINE_NUDGE, STEER_NUDGE_TEMPLATE, STEP_LIMIT_NUDGE,
-                      SUBAGENT_PREAMBLE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
+                      RESUME_PREAMBLE, SUBAGENT_PREAMBLE, VIEW_IMAGE_PROMPT, VISION_ANALYSIS_PROMPT,
                       WRAP_UP_NUDGE, blind_critique_prompt, build_system_prompt,
                       conversational_project_context, detect_check_command,
                       fresh_review_nudge, is_critic_approval, verify_nudge)
 from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
+                    RESUME_AGENT_TOOL,
                     BROWSER_TAB_SCHEMAS, WORKER_SCHEMAS,
                     CHECK_WORKERS_TOOL, COMPACT_CONTEXT_TOOL,
                     CONTROL_CHROME_TOOL, CONVERSATIONAL_READONLY_SCHEMAS,
@@ -49,6 +51,11 @@ VERIFICATION_TOOLS = {"run_command", "run_powershell", "run_background", "run_te
 EDIT_TOOLS = {"write_file", "edit_file", "replace_in_files"}
 
 MAX_SUBAGENTS = 6
+# How many FINISHED sub-agents stay resumable. Each is holding its whole
+# conversation, so this is a memory bound, not a policy: a long chat that
+# spawned thirty of them would otherwise keep thirty histories alive for the
+# rest of the session. Enough to cover "carry on with that one" for a while.
+MAX_RESUMABLE = 8
 # Safety cap on auto-continue-on-truncation rounds (see _call_model_until_done).
 MAX_CONTINUATIONS = 3
 # "Make it green": how many times the bounded test-fix loop will re-run the
@@ -269,6 +276,14 @@ class Agent:
         # specific running sub-agent's Agent instance to steer it directly.
         self._active_subagents: dict[str, "Agent"] = {}
         self._active_subagents_lock = threading.Lock()
+        # Sub-agents that have FINISHED and can still be picked back up
+        # (resume_agent). aid -> {"name", "agent", "sink"}. Bounded, because
+        # each one is holding its whole conversation: a long chat that spawned
+        # thirty of them would otherwise keep thirty histories alive for the
+        # rest of the session. The oldest is dropped, and asking for a dropped
+        # one says so rather than silently starting from nothing.
+        self._finished_agents: "OrderedDict[str, dict]" = OrderedDict()
+        self._finished_lock = threading.Lock()
         # Optional append-only conversation log (see transcript.py). Set by
         # the frontend after construction; None (all hooks no-op) in the CLI
         # and for sub-agents (their reports land in the parent's transcript
@@ -1772,6 +1787,9 @@ class Agent:
             output = self._worker_changes_tool(args.get("worker", ""))
         elif name == REVERT_WORKER_TOOL:
             output = self._revert_worker_tool(args.get("worker", ""))
+        elif name == RESUME_AGENT_TOOL:
+            output = self._resume_agent_tool(args.get("agent", ""),
+                                             args.get("task", ""))
         elif name == SUBAGENT_TOOL:
             if not self.allow_subagents:
                 raise ToolError("sub-agents cannot spawn further sub-agents")
@@ -2000,12 +2018,25 @@ class Agent:
         sub.model_override = self.model_override
         with self._active_subagents_lock:
             self._active_subagents[aid] = sub
+        return self._subagent_turn(
+            sub, sink, aid, name,
+            SUBAGENT_PREAMBLE.format(name=name, task=task))
+
+    def _subagent_turn(self, sub: "Agent", sink, aid: str, name: str,
+                       message: str) -> tuple[str, Usage]:
+        """Run one turn of a sub-agent and dig its report out. Shared with
+        resume_agent, which is the same thing with a different opening
+        message and a history already behind it."""
         try:
-            sub.run_turn({"role": "user",
-                          "content": SUBAGENT_PREAMBLE.format(name=name, task=task)})
+            sub.run_turn({"role": "user", "content": message})
         finally:
             with self._active_subagents_lock:
                 self._active_subagents.pop(aid, None)
+            # Kept so it can be picked back up. This is what makes
+            # resume_agent possible at all: the Agent used to be dropped the
+            # moment it reported, so a follow-up meant a fresh sub-agent that
+            # had to be told everything the last one had just worked out.
+            self._keep_for_resume(aid, name, sub, sink)
         report = _final_report_text(sub.messages)
         if report:
             return report, sub.session_usage
@@ -2088,6 +2119,120 @@ class Agent:
         return (f"Started background worker '{name}' (id {wid}). {where} "
                 f"Tell the user you've started, keep talking, and don't wait "
                 f"for it -- you'll be told when it finishes.")
+
+    def _keep_for_resume(self, aid: str, name: str, sub: "Agent", sink) -> None:
+        """Hold a finished sub-agent so resume_agent can pick it up."""
+        with self._finished_lock:
+            self._finished_agents.pop(aid, None)     # re-insert at the end
+            self._finished_agents[aid] = {"name": name, "agent": sub, "sink": sink}
+            while len(self._finished_agents) > MAX_RESUMABLE:
+                self._finished_agents.popitem(last=False)
+
+    def _resolve_finished(self, ident: str) -> str | None:
+        """Map a name or id to a finished sub-agent's aid.
+
+        Same rules as _resolve_worker, and for the same reasons: the fragment
+        direction only (a worker named 'fix' is contained in almost anything a
+        person would say), and ties go to the MOST RECENT, because "carry on
+        with the dark mode one" means the one just finished rather than its
+        namesake from earlier in the session.
+        """
+        ident = str(ident or "").strip().lower()
+        if not ident:
+            return None
+        with self._finished_lock:
+            rows = [(aid, rec["name"]) for aid, rec in self._finished_agents.items()]
+        for aid, nm in reversed(rows):
+            if aid.lower() == ident:
+                return aid
+        for aid, nm in reversed(rows):
+            if (nm or "").lower() == ident:
+                return aid
+        for aid, nm in reversed(rows):
+            if nm and nm.lower() in ident:
+                return aid
+        return None
+
+    def _resume_agent_tool(self, ident: str, task: str) -> str:
+        """Give a finished sub-agent or worker more to do, in its own context."""
+        task = str(task or "").strip()
+        if not task:
+            raise ToolError("resume_agent needs a non-empty 'task'.")
+        # A running one is a different tool, and saying which is more use than
+        # "no agent matches" -- the model would otherwise spawn a duplicate of
+        # something already doing the work.
+        running = self._resolve_worker(ident)
+        if running is not None:
+            with self._workers_lock:
+                w = self._workers.get(running) or {}
+            if w.get("status") == "running":
+                raise ToolError(
+                    f"'{ident}' is still running. Use steer_worker to add to what "
+                    f"it is already doing; resume_agent is for one that has "
+                    f"finished.")
+        aid = self._resolve_finished(ident)
+        if aid is None:
+            raise ToolError(
+                f"No finished sub-agent or worker matches '{ident}'. Only the last "
+                f"{MAX_RESUMABLE} are kept, so an older one's context is gone -- "
+                f"spawn a fresh one with the background it needs. check_workers "
+                f"lists what is around.")
+        with self._finished_lock:
+            rec = self._finished_agents[aid]
+        sub, name, sink = rec["agent"], rec["name"], rec["sink"]
+        # The panel thread continues rather than starting a second one: the aid
+        # is unchanged, so every subagent_stream event appends where the first
+        # run left off, which is what "picked back up" should look like.
+        self._emit_subagent(aid, name, "running", mission=task[:280])
+        wid = aid if self._is_worker(aid) else ""
+        if wid:
+            with self._workers_lock:
+                w = self._workers.get(wid)
+                if w is not None:
+                    w["status"] = "running"
+            self.events.worker_update(wid, name, "started")
+        try:
+            report, usage = self._subagent_turn(
+                sub, sink, aid, name, RESUME_PREAMBLE.format(task=task))
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            self._emit_subagent(aid, name, "error", summary=err[:280])
+            if wid:
+                self._finish_worker_record(wid, name, status="error", error=err)
+            raise ToolError(f"'{name}' failed while being resumed: {err}")
+        if usage is not None:
+            self.session_usage.add(usage)
+        self._emit_subagent(aid, name, "done", summary=_first_line(report))
+        if wid:
+            self._finish_worker_record(wid, name, status="done", result=report)
+        return f"### {name} (resumed)\n{report}"
+
+    def _is_worker(self, aid: str) -> bool:
+        with self._workers_lock:
+            return aid in self._workers
+
+    def _finish_worker_record(self, wid: str, name: str, status: str,
+                              result: str = "", error: str = "") -> None:
+        """Close a worker's record out the way _run_worker does, so a resumed
+        worker ends up in the same shape as one that ran once."""
+        changes = self._worker_changed_files(wid)
+        with self._workers_lock:
+            w = self._workers.get(wid)
+            if w is None:
+                return
+            w["changes"] = changes
+            if w["status"] != "stopped":
+                w["status"] = status
+                if status == "done":
+                    w["result"] = result
+                else:
+                    w["error"] = error
+        ann = result
+        if status == "done" and changes:
+            ann = f"{result}\n\nFiles changed: {self._describe_changes(changes)}."
+        self.events.worker_update(wid, name, status,
+                                  summary=_first_line(result or error),
+                                  result=ann or error)
 
     def adopt_workers_of(self, other: "Agent") -> None:
         """Share one worker registry with another agent in the same chat.
