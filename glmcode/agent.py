@@ -506,6 +506,12 @@ class Agent:
 
     def request_cancel(self) -> None:
         self.cancel.set()
+        # A sub-agent blocked on a permission card is not watching self.cancel
+        # -- it is parked inside _worker_ask waiting on an Event, for up to
+        # five minutes. spawn_agents JOINS its threads, so without this a
+        # cancelled turn sits there until that timeout expires, with the app
+        # showing a stopped turn that has plainly not stopped.
+        self.deny_pending_worker_permissions("the turn was cancelled")
 
     # ------------------------------------------------------------------ #
     # Images
@@ -1961,11 +1967,23 @@ class Agent:
         # across concurrent requests; the rate limiter IS shared (see
         # _run_subagents) so all sub-agents' requests stay spaced out.
         client = ZaiClient(self.client.api_key, self.client.base_url, rate_limiter=limiter)
-        # In voice mode a worker's gated action is approved out loud (see
-        # _worker_ask) instead of auto-denied, so hands-free work isn't stuck in
-        # 'ask' mode. Non-conversational sub-agents keep the auto-deny default.
-        ask = (lambda title, preview, always: self._worker_ask(aid, title, preview, always)) \
-            if self.conversational else None
+        # A gated action inside a sub-agent is ASKED about, not auto-denied.
+        #
+        # It used to be asked about only in voice mode. Everywhere else the
+        # sink inherited AgentEvents, whose ask_permission refuses with "no
+        # frontend attached to approve this" -- a message written for the CLI,
+        # arriving in an app that has a perfectly good frontend attached. In
+        # the default 'ask' mode that denied every write_file, every edit_file
+        # and every run_command a spawned sub-agent tried, silently, with no
+        # prompt anywhere. spawn_agents could not change a single file unless
+        # the user was in 'yolo'. "It doesn't work" was exactly right.
+        #
+        # _worker_ask is per-request (rid) and blocks only the asking thread,
+        # so several sub-agents asking at once queue up rather than
+        # overwriting each other -- which is why it, and not the main agent's
+        # single-slot permission modal, is the mechanism here.
+        ask = lambda title, preview, always: self._worker_ask(  # noqa: E731
+            aid, title, preview, always, display=name)
         sink = _CaptureEvents(forward=self._emit_subagent_stream, aid=aid, ask=ask)
         sub = Agent(self.cfg, client, events=sink, allow_subagents=False,
                     workdir=self.workdir)
@@ -2037,6 +2055,13 @@ class Agent:
         with self._workers_lock:
             self._worker_seq += 1
             wid = f"wk{self._worker_seq}"
+            # The chat's two agents SHARE this registry (adopt_workers_of) and
+            # each keeps its own counter, so the number alone is not unique.
+            # Walk past anything already taken rather than overwriting a worker
+            # the other agent started.
+            while wid in self._workers:
+                self._worker_seq += 1
+                wid = f"wk{self._worker_seq}"
             name = str(name or "").strip()[:60] or f"worker-{self._worker_seq}"
             self._workers[wid] = {
                 "id": wid, "name": name, "task": task, "status": "running",
@@ -2063,6 +2088,45 @@ class Agent:
         return (f"Started background worker '{name}' (id {wid}). {where} "
                 f"Tell the user you've started, keep talking, and don't wait "
                 f"for it -- you'll be told when it finishes.")
+
+    def adopt_workers_of(self, other: "Agent") -> None:
+        """Share one worker registry with another agent in the same chat.
+
+        A chat has two agents -- the one you type to and the delegator you
+        speak to -- and each built its own registry. So a worker started by
+        voice was invisible to check_workers typed into the chat, and
+        steer_worker, stop_worker, worker_changes and revert_worker all
+        answered "no worker matches" for it. The reverse held too: dispatch by
+        typing, then ask out loud how it is going, and the delegator said
+        nothing had been dispatched. The RESULT crossed over (worker_reports),
+        which made this worse rather than better -- the coding agent was told a
+        worker had finished and then could not find it.
+
+        It is one chat and one set of workers, so it is one registry. Three
+        things travel with it and none of them are optional:
+
+        - **The live Agent objects** (`_active_subagents`). Steering and
+          stopping reach a worker THROUGH them, so sharing only the records
+          would make a worker visible from the other side and un-steerable --
+          a worse failure than not seeing it, because it looks like it worked.
+        - **Nothing else.** `messages`, `events` and the model stay separate:
+          they are what makes one of these a spoken conversation and the other
+          a written one.
+
+        `_worker_perms` is deliberately NOT shared, and sharing it was the
+        first version of this. Blocked permission requests are released in
+        bulk by two callers who each mean only their own: closing voice mode
+        denies the delegator's, and cancelling a turn denies the coding
+        agent's. Pooled, stopping a typed turn would silently deny a card a
+        spoken worker was waiting on, and closing the overlay would kill a
+        sub-agent the user was still watching in the panel. Answering ONE
+        request needs no pool either -- the frontend hands back an rid and
+        Api.resolve_worker_permission tries both agents for it.
+        """
+        self._workers = other._workers
+        self._workers_lock = other._workers_lock
+        self._active_subagents = other._active_subagents
+        self._active_subagents_lock = other._active_subagents_lock
 
     def _run_worker(self, wid: str, name: str, task: str, kind: str = "code") -> None:
         """Body of a background worker thread: run the mission to completion and
@@ -2331,19 +2395,29 @@ class Agent:
                 f"{f' and {len(reverted) - 12} more' if len(reverted) > 12 else ''}."
                 f"{note}")
 
-    def _worker_ask(self, wid: str, title: str, preview: str, always_label):
-        """Called ON A WORKER THREAD when that worker hits a permission-gated
-        action in voice mode. Surfaces the request to the user (spoken + an
-        overlay card) and BLOCKS until they answer -- so hands-free work isn't
-        stuck in 'ask' mode. Returns 'y' | 'a' | ('n', feedback)."""
+    def _worker_ask(self, wid: str, title: str, preview: str, always_label,
+                    display: str = ""):
+        """Called ON A SUB-AGENT'S OWN THREAD when it hits a permission-gated
+        action. Surfaces the request to the user and BLOCKS until they answer,
+        so work off to the side isn't stuck in 'ask' mode. Returns
+        'y' | 'a' | ('n', feedback).
+
+        `display` names the asker when it is not a dispatched worker: a
+        spawn_agents sub-agent has an id like "sa9f3c21-2" and no entry in the
+        worker registry, so looking the name up there would put that id on the
+        card."""
         with self._workers_lock:
-            name = self._workers.get(wid, {}).get("name", wid)
+            name = self._workers.get(wid, {}).get("name") or display or wid
         rid = uuid.uuid4().hex
         entry = {"event": threading.Event(), "answer": ("n", "")}
         with self._worker_perms_lock:
             self._worker_perms[rid] = entry
-        # Speak a short, plain-language version and show the full detail on-card.
-        spoken = f"The {name} task wants to {_spoken_permission(title)}. Should I let it?"
+        # Speak a short, plain-language version and show the full detail
+        # on-card -- but only in a spoken conversation. worker_permission
+        # queues the sentence for TTS, so sending one from a typed spawn would
+        # have the app start talking at someone who never opened voice mode.
+        spoken = (f"The {name} task wants to {_spoken_permission(title)}. Should I let it?"
+                  if self.conversational else "")
         try:
             self.events.worker_permission(rid, name, title, preview,
                                           spoken=spoken, always=always_label or "")

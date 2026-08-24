@@ -1183,6 +1183,12 @@ function handle(ev) {
     case "worker_update":
       noteWorker(ev);
       break;
+    /* A sub-agent or worker stopping to ask. It only ever reached the voice
+       dock before, so a spawn_agents sub-agent that hit a gated action in the
+       default 'ask' mode had nowhere to be answered from at all. */
+    case "worker_permission":
+      showWorkerPermission(ev);
+      break;
     case "steered": {
       const t = ensureTurn();
       t.wrap.appendChild(buildSteeredEl(ev.text || ""));
@@ -1948,24 +1954,62 @@ $("subagent-wrapup-btn").addEventListener("click", wrapupSubagent);
 
 /* ------------------------------------------------ permission sheet */
 
-let permId = null;
+/* One card, one queue, two sources.
+ *
+ * The main agent asks one question at a time -- it is a single thread and it
+ * blocks on the answer. Sub-agents do not: spawn_agents runs several at once
+ * and each blocks only itself, so two can be waiting together. This used to be
+ * a single slot (`permId = ev.id`), which meant the second request overwrote
+ * the first and the thread behind it sat until its five-minute timeout with
+ * nothing on screen to answer.
+ *
+ * Both kinds queue here now. They are answered through different backend
+ * calls -- a sub-agent's request is keyed by rid in the worker registry, the
+ * main agent's by id in the events sink -- so each entry carries which one it
+ * is rather than the card guessing. */
+let permCurrent = null;
+const permQueue = [];
+
 function showPermission(ev) {
-  permId = ev.id;
-  $("perm-title").textContent = ev.title;
-  $("perm-preview").innerHTML = colorDiff(ev.preview || "");
+  permQueue.push({ kind: "main", id: ev.id, title: ev.title,
+                   preview: ev.preview || "", always: ev.always || "" });
+  pumpPermission();
+}
+
+/* A gated action inside a sub-agent or a background worker. Same card: it is
+   the same question, and splitting it by who is asking would mean the answer
+   depends on which panel the user happens to have open. */
+function showWorkerPermission(ev) {
+  permQueue.push({ kind: "worker", id: ev.rid,
+                   title: ev.worker ? `${ev.worker}: ${ev.title}` : ev.title,
+                   preview: ev.preview || "", always: ev.always || "" });
+  pumpPermission();
+}
+
+function pumpPermission() {
+  if (permCurrent || !permQueue.length) return;
+  const p = permCurrent = permQueue.shift();
+  $("perm-title").textContent = p.title;
+  $("perm-preview").innerHTML = colorDiff(p.preview);
   $("perm-feedback").value = "";
-  $("perm-always").hidden = !ev.always;
-  if (ev.always) $("perm-always").textContent = cap(ev.always);
+  $("perm-always").hidden = !p.always;
+  if (p.always) $("perm-always").textContent = cap(p.always);
   $("perm-backdrop").hidden = false;
   $("perm-allow").focus();
 }
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 function answerPermission(ans) {
-  if (permId === null) return;
+  const p = permCurrent;
+  if (!p) return;
   const fb = $("perm-feedback").value.trim();
-  api().permission_response(permId, ans, fb);
-  permId = null;
+  try {
+    if (p.kind === "worker") api().resolve_worker_permission(p.id, ans, fb);
+    else api().permission_response(p.id, ans, fb);
+  } catch (e) { /* a dead bridge must not wedge the queue */ }
+  permCurrent = null;
   $("perm-backdrop").hidden = true;
+  // Straight on to the next one, if something else is waiting.
+  pumpPermission();
 }
 $("perm-allow").addEventListener("click", () => answerPermission("y"));
 $("perm-always").addEventListener("click", () => answerPermission("a"));
@@ -6450,12 +6494,29 @@ function handleVoiceEvent(ev) {
       }
       break;
     }
+    /* The inspector is the SAME panel whichever agent dispatched the work --
+       a worker's id is its sub-agent id, so there is nothing separate to
+       build. These two events were dropped on this route, which is why a
+       worker started by speaking opened an empty panel with a dead composer:
+       the thread was never created and its status was never recorded, so
+       steer and stop stayed disabled on the one worker you were most likely
+       to want to redirect.
+
+       Only the transcript ROW is skipped. A spoken dispatch has no turn in
+       the chat to hang one on, and the rail already shows it. */
+    case "subagent":
+      updateSubagentTabStatus(ev.id, ev.status);
+      noteBrowserAgent(ev);
+      break;
     case "subagent_stream": {
       // Live activity from a background worker's own thread.
       noteWorkerActivity(ev);
+      renderSubagentEvent(ev.id, ev);
       break;
     }
     case "worker_permission":
+      // In a spoken conversation this is answerable out loud, so it stays on
+      // the dock's card rather than opening a modal over the app.
       voice.permQ.push({ rid: ev.rid, worker: ev.worker, title: ev.title,
                          preview: ev.preview, always: ev.always });
       showNextPerm();
