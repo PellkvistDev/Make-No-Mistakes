@@ -1182,6 +1182,19 @@ function handle(ev) {
        the app at all. */
     case "worker_update":
       noteWorker(ev);
+      /* And its result is FILED, the same way a spoken worker's is.
+         announceQ is the voice route's; a worker dispatched by typing reached
+         nothing at all, so it finished on its own daemon thread and the agent
+         you were typing to was simply never told. The shared registry means
+         check_workers could find it if the model thought to look -- but being
+         told is what makes a follow-up question answerable without one.
+         record_worker_result queues it; _drain_worker_reports hands it over at
+         the top of the next turn, which is the one moment that history is not
+         being written by anyone else. */
+      if (ev.status === "done" || ev.status === "error" || ev.status === "stopped") {
+        try { api().record_worker_result(ev.name, ev.status, ev.result || ""); }
+        catch (e) { /* ignore */ }
+      }
       break;
     /* A sub-agent or worker stopping to ask. It only ever reached the voice
        dock before, so a spawn_agents sub-agent that hit a gated action in the

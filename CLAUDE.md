@@ -618,7 +618,17 @@ What made this worse rather than merely incomplete: the **result** already
 crossed over (`worker_reports`). So the coding agent was told a worker had
 finished and then could not find the worker it had just been told about.
 
-`Agent.adopt_workers_of` is the fix, called from `_ensure_convo`. Three notes:
+The REPORT had the mirror of this bug, on the other side. `voice.announceQ`
+is the voice route's, so a worker dispatched by typing finished on its own
+daemon thread and the agent you were typing to was simply never told — a
+shared registry means `check_workers` can find it, but being told is what
+makes a follow-up answerable without the model thinking to look. Both routes
+call `record_worker_result` now; a worker reports on the sink of whoever
+dispatched it, so there is exactly one route per worker and nothing is filed
+twice.
+
+`Agent.adopt_workers_of` is the fix for the registry, called from
+`_ensure_convo`. Three notes:
 
 - **The live Agent objects come with it** (`_active_subagents`). Steering and
   stopping reach a worker *through* them, so sharing only the records would
