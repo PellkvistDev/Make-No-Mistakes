@@ -1179,6 +1179,56 @@ the job is to make it honest, not to make it safe.
   over — reasonable in a sandbox, destructive in the window someone lives in.
   It is appended *after* `.format()`, so it is free to contain braces.
 
+## Swedish came back as HÃ¤r Ã¤r — one line of requests' documented behaviour
+
+Reported with a photograph: every non-ASCII character in a Gemini reply arrived
+as the Latin-1 reading of its own UTF-8 bytes, and got stored in the chat that
+way.
+
+`iter_lines(decode_unicode=True)` decodes using `resp.encoding`, and
+`resp.encoding` comes from the Content-Type header — where, for a `text/*` type
+carrying **no charset**, RFC 2616 says ISO-8859-1 and requests obeys it.
+Server-sent events carry no charset, because the WHATWG spec defines them as
+UTF-8. So a provider sending a bare `text/event-stream` was mangled and one
+sending `charset=utf-8` was not, which is why this looked like one model's
+problem rather than ours.
+
+`resp.encoding = "utf-8"` before the loop. Not a guess about a provider — it is
+what both specifications covering that stream already say it is (SSE is UTF-8;
+JSON is UTF-8 by RFC 8259).
+
+**The test drives real `requests` objects**, not a fake of the decode. The bug
+lives entirely in what requests does with a header, so a mock of the decoding
+step would only have agreed with whatever I believed it did. One test asserts
+the surprising half directly — that the same stream decodes correctly the
+moment a charset appears — because the whole fix rests on it.
+
+## Stop has to reach what the turn is waiting ON
+
+Reported: *"interrupting is not reliable, especially when it's using tools,
+they can't be interrupted."*
+
+`self.cancel` is a flag checked BETWEEN steps and BETWEEN tool calls. That
+stops a thinking turn instantly and does nothing at all for a turn blocked
+inside a tool — which is most of the time a turn is slow enough to want
+stopping. Three things a turn blocks on, and none of them watch a flag:
+
+- **A sub-agent.** `spawn_agents` and an inline `control_chrome` JOIN their
+  threads, and a sub-agent has its OWN `cancel` Event. Cancelling only the
+  coordinator left Stop waiting for up to `MAX_SUBAGENTS` missions to each run
+  to completion. It recurses, because a browser agent inside a worker is two
+  levels down, and one sub-agent raising must not spare the others.
+- **A shell command.** It is a process, and what stops a process is killing its
+  tree. The per-command Stop button could always do this; the button that stops
+  the TURN could not, so a turn stuck on a dev server ignored it.
+- **A permission card**, which is an Event with a five-minute timeout. Already
+  handled, now pinned.
+
+**`tools._call_token` is thread-local on purpose** — so parallel chats cannot
+see each other's — which is exactly why the GUI thread calling `request_cancel`
+cannot read it. The agent keeps its own copy on the instance, set beside the
+thread-local and cleared in the same `finally`.
+
 ## The shell tool is named after the platform, not after PowerShell
 
 `run_command` execs PowerShell on Windows and bash (falling back to `/bin/sh`)

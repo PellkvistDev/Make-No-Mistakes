@@ -46,6 +46,11 @@ def _agent(conversational=False):
     ag._worker_perms, ag._worker_perms_lock = {}, threading.Lock()
     ag._emit_lock = threading.Lock()
     ag._active_subagents, ag._active_subagents_lock = {}, threading.Lock()
+    # request_cancel reaches the tool the turn is blocked on, and reads this to
+    # do it. Set here rather than defended against in the agent: a real Agent
+    # always has it from __init__, and a getattr default would hide the day
+    # that stops being true.
+    ag._current_call_token = None
     ag.session_usage = types.SimpleNamespace(add=lambda u: None)
     ag.events = types.SimpleNamespace(worker_update=lambda *a, **k: None,
                                       subagent=lambda *a, **k: None,

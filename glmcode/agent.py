@@ -41,7 +41,7 @@ from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
                     SHOW_HTTP_CAT_TOOL, SHOW_IMAGE_TOOL, SPEAK_TOOL,
                     STEER_WORKER_TOOL, STOP_WORKER_TOOL, SUBAGENT_TOOL,
                     TOOL_SCHEMAS, VIEW_IMAGE_TOOL, WORKER_CHANGES_TOOL, ToolError,
-                    clean_todo_items, execute_tool, set_call_token, set_workdir)
+                    clean_todo_items, execute_tool, set_call_token, stop_foreground, set_workdir)
 
 # Tools whose output tells the model whether its changes actually work --
 # used by the verify-nudge (see _run_turn): a turn that edits files but never
@@ -276,6 +276,11 @@ class Agent:
         # specific running sub-agent's Agent instance to steer it directly.
         self._active_subagents: dict[str, "Agent"] = {}
         self._active_subagents_lock = threading.Lock()
+        # The tool call running right now, if any. tools._call_token is
+        # THREAD-LOCAL -- deliberately, so parallel chats cannot see each
+        # other's -- which means the GUI thread calling request_cancel cannot
+        # read it. This is the turn thread leaving it somewhere reachable.
+        self._current_call_token: str | None = None
         # Sub-agents that have FINISHED and can still be picked back up
         # (resume_agent). aid -> {"name", "agent", "sink"}. Bounded, because
         # each one is holding its whole conversation: a long chat that spawned
@@ -520,13 +525,44 @@ class Agent:
             self._chars_per_token = ratio
 
     def request_cancel(self) -> None:
+        """Stop this turn -- and everything it is currently waiting ON.
+
+        Setting the flag is only half of it. self.cancel is checked between
+        steps and between tool calls, so it stops a turn that is THINKING at
+        once and does nothing at all for a turn that is blocked inside a tool.
+        Reported as exactly that: "interrupting is not reliable, especially
+        when it's using tools, they can't be interrupted."
+
+        Three things a turn actually blocks on, and none of them watch a flag:
+        """
         self.cancel.set()
-        # A sub-agent blocked on a permission card is not watching self.cancel
-        # -- it is parked inside _worker_ask waiting on an Event, for up to
-        # five minutes. spawn_agents JOINS its threads, so without this a
-        # cancelled turn sits there until that timeout expires, with the app
+        # A sub-agent parked on a permission card is waiting on an Event, for
+        # up to five minutes. spawn_agents JOINS its threads, so without this
+        # a cancelled turn sits there until that timeout expires, with the app
         # showing a stopped turn that has plainly not stopped.
         self.deny_pending_worker_permissions("the turn was cancelled")
+        # Sub-agents have their OWN cancel Event. spawn_agents and an inline
+        # control_chrome both join, so cancelling only the coordinator left
+        # Stop waiting for up to MAX_SUBAGENTS missions to each run to
+        # completion -- minutes, with the button already pressed. Recursive:
+        # a sub-agent's own blocked command is a level further down.
+        with self._active_subagents_lock:
+            subs = list(self._active_subagents.values())
+        for sub in subs:
+            try:
+                sub.request_cancel()
+            except Exception:
+                pass
+        # A shell command is not watching an Event either -- it is a process,
+        # and the thing that stops it is killing its tree. This is the same
+        # reach the per-command Stop button has; it just did not happen when
+        # you pressed the one that stops the turn.
+        token = self._current_call_token
+        if token:
+            try:
+                stop_foreground(token)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ #
     # Images
@@ -1716,6 +1752,7 @@ class Agent:
                 self._turn_verified = True
 
             set_call_token(run_token)
+            self._current_call_token = run_token
             try:
                 output = self._run_tool(name, args, assistant_idx)
                 if name in EDIT_TOOLS:
@@ -1728,6 +1765,7 @@ class Agent:
                 self._tool_reply(tc, f"ERROR: unexpected {type(e).__name__}: {e}",
                                  error=True, name=name, args=args)
             finally:
+                self._current_call_token = None
                 set_call_token(None)
 
             if name == "todo_write":
