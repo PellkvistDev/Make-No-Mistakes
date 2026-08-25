@@ -443,6 +443,19 @@ class ZaiClient:
                 raise ApiError(resp.status_code, msg,
                                retry_after=_retry_hint(resp, msg))
 
+            # Server-sent events are UTF-8 BY DEFINITION (WHATWG), and the
+            # JSON inside them is UTF-8 by RFC 8259. requests does not know
+            # that: with decode_unicode=True it decodes using resp.encoding,
+            # and for a text/* content type carrying no charset it falls back
+            # to ISO-8859-1 (RFC 2616). Providers that send a bare
+            # "text/event-stream" -- Google is one -- therefore had every
+            # non-ASCII character mangled on the way in: "Har ar en jamforelse"
+            # arrived as the Latin-1 reading of its own UTF-8 bytes, and that
+            # is what got stored in the chat and sent back on the next turn.
+            #
+            # Forcing it is not a guess about this provider; it is what the two
+            # specifications covering this stream both say it is.
+            resp.encoding = "utf-8"
             for raw in resp.iter_lines(decode_unicode=True):
                 if cancel is not None and cancel.is_set():
                     raise Cancelled()
