@@ -2900,7 +2900,7 @@ class Agent:
             if name == "browser_new_tab":
                 return session.open_tab(args.get("url", ""))
             if name == "browser_read":
-                return session.read_text()
+                return session.read_text(offset=int(args.get("offset") or 0))
             if name == "browser_wait":
                 return session.wait(args.get("seconds", 2.0))
             if name == "browser_screenshot":

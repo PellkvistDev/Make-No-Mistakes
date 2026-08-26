@@ -1639,6 +1639,41 @@ the whole instruction block hanging off the end. Both halves now come from one
 whichever side the framing sits on. The prefix was already derived rather than
 written out twice — the suffix is what the reordering caught out.
 
+## Naming what is missing is not the same as offering it
+
+Reported: *"when the browser agent reads a long page, it gets 'truncated, x
+chars total' at the end. Can the agent read the rest somehow? And can it
+scroll?"*
+
+No, and yes — and they are answers to **different questions**, which is the
+part worth writing down.
+
+`browser_read` stopped at 6000 characters and said `[truncated, N chars
+total]`. It named exactly how much was missing while the tool took **no
+arguments at all**, so there was no way to reach it even in principle. That
+produces something worse than a missing answer: the model reads the first
+part, does not find the thing, and reports that the page does not contain it.
+`read_file` had the identical defect and was fixed the same way — cut on a line
+boundary, say how much is left, and name the offset to continue from.
+
+**Scrolling is not the fix for that, and the prompt now says so in both
+directions.** `inner_text("body")` returns the WHOLE document's text whatever
+is scrolled into view, so paging is what gets you the rest. A model that
+reaches for PageDown to read more is spending turns on nothing.
+
+**Scrolling does matter, for the other thing**, and it already worked: a page
+that loads more of itself as you go. It is `browser_key` with PageDown /
+PageUp / End / Home, and both backends implement it deliberately — the
+extension has to, because a synthetic key event scrolls nothing on its own and
+`page.js` calls `scrollBy` for exactly those four. The old description listed
+PageDown among *"a key like Enter, Escape, PageDown, Tab"*, which never says
+that this IS how you scroll. A capability the model does not know it has is not
+a capability.
+
+The extension route needed no change: `ExtensionPage.inner_text` already
+fetches up to 200k characters and the paging happens on the Python side, so one
+implementation serves both.
+
 ## A small model driving a page is a bad model, not a broken feature
 
 "The browser agent is completely incapable — it just clicks and screenshots

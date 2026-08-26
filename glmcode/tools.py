@@ -3118,16 +3118,29 @@ BROWSER_AGENT_SCHEMAS = [
     ),
     _schema(
         "browser_key",
-        "Press a single keyboard key on the page (e.g. 'Enter', 'Escape', 'PageDown', "
-        "'Tab'). Returns the resulting snapshot.",
-        {"key": {"type": "string", "description": "Key name, e.g. 'Enter' or 'Escape'"}},
+        "Press a single keyboard key on the page. Also how you SCROLL: 'PageDown' and "
+        "'PageUp' move by about a screen, 'End' jumps to the bottom and 'Home' to the top. "
+        "Scroll when a page loads more as you go (infinite feeds, 'load more' lists) or "
+        "when you need to see something further down -- not to read more text, since "
+        "browser_read already returns the whole page. Returns the resulting snapshot.",
+        {"key": {"type": "string",
+                 "description": "Key name: 'Enter', 'Escape', 'Tab', 'Backspace', "
+                                "'ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', "
+                                "'Home', 'End'."}},
         ["key"],
     ),
     _schema(
         "browser_read",
-        "Read the visible text content of the current page (truncated if very long). Use "
-        "this to actually extract information; the snapshot only lists clickable elements.",
-        {},
+        "Read the visible text of the current page. Use this to actually extract "
+        "information; the snapshot only lists clickable elements. A long page comes back "
+        "in parts -- when the result ends by naming an offset, call this again with that "
+        "offset to get the next part, and keep going until you have what you came for or "
+        "the page runs out. Do not conclude something is absent from a page you have only "
+        "read the first part of. This reads the WHOLE page whatever is scrolled into view, "
+        "so paging is what gets you the rest, not scrolling.",
+        {"offset": {"type": "integer",
+                    "description": "Character to start from. Omit for the beginning; pass "
+                                   "the offset the previous result named to continue."}},
         [],
     ),
     _schema(

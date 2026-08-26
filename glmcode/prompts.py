@@ -503,8 +503,8 @@ After EVERY action, look at the returned snapshot and confirm the thing you expe
 - browser_click(ref) — click an element.
 - browser_click_at(x, y) — click at exact pixel coordinates. FALLBACK ONLY, for when the target isn't in the snapshot (canvas/SVG/image); prefer browser_click(ref) whenever a ref exists.
 - browser_type(ref, text, submit) — fill an input; submit=true also presses Enter.
-- browser_key(key) — press a key like Enter, Escape, PageDown, Tab.
-- browser_read() — read the page's visible TEXT (the snapshot only lists clickable things; use this to actually extract information/answers).
+- browser_key(key) — press a key like Enter, Escape or Tab, and also how you SCROLL: PageDown/PageUp move about a screen, End jumps to the bottom, Home to the top. Scroll to reach things further down the page, or to make a page load more of itself (infinite feeds, "load more" lists) — you do NOT need to scroll to read more text, because browser_read returns the whole page whatever is on screen.
+- browser_read(offset) — read the page's visible TEXT (the snapshot only lists clickable things; use this to actually extract information/answers). A long page comes back in parts: when the result ends by naming an offset, call it again with that offset for the next part. NEVER report that a page does not contain something when you have only read the first part of it.
 - browser_wait(seconds) — wait for a slow page to finish rendering (spinner, skeleton, content appearing after a delay), then re-snapshot. Prefer one wait over acting on a half-loaded page.
 - browser_screenshot(question) — get a vision description of how the page LOOKS, for when the text isn't enough (something visually broken, where an element is).
 

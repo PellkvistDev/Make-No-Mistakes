@@ -339,12 +339,25 @@ def test_unknown_ref_gives_a_helpful_error():
     sess.close()
 
 
-def test_read_text_truncates():
+def test_read_text_is_capped_and_says_how_to_go_on():
+    """The cap is the point and is unchanged -- 10,000 characters of page must
+    not arrive in one tool result.
+
+    What changed is what the message does about it. It used to read
+    "[truncated, N chars total]": it named exactly how much was missing while
+    the tool took no arguments at all, so there was no way to reach it even in
+    principle. The model would read the first part, not find the thing, and
+    report that the page did not contain it."""
     sess, page, _ = make_session()
     sess.navigate("example.com")
     page.body_text = "x" * 10_000
     out = sess.read_text(max_chars=500)
-    assert "truncated" in out and out.count("x") <= 520
+    assert out.count("x") <= 520
+    assert "offset=" in out, "capped with no way to continue"
+
+    off = int(out.split("offset=")[1].split()[0].rstrip("]").rstrip("."))
+    assert 0 < off <= 520
+    assert "x" in sess.read_text(max_chars=500, offset=off)
     sess.close()
 
 
