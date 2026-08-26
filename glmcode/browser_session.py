@@ -317,8 +317,8 @@ class BrowserSession:
     def press(self, key: str) -> str:
         return self._call("press", key=key)
 
-    def read_text(self, max_chars: int = 6000) -> str:
-        return self._call("read_text", max_chars=max_chars)
+    def read_text(self, max_chars: int = 6000, offset: int = 0) -> str:
+        return self._call("read_text", max_chars=max_chars, offset=offset)
 
     def screenshot(self, path) -> str:
         return self._call("screenshot", path=str(path))
@@ -606,15 +606,46 @@ class BrowserSession:
         self._settle()
         return self._op_snapshot()
 
-    def _op_read_text(self, max_chars: int) -> str:
+    def _op_read_text(self, max_chars: int, offset: int = 0) -> str:
+        """The page's visible text, in windows the model can walk.
+
+        It used to stop at max_chars and say "[truncated, N chars total]" --
+        naming exactly how much was missing while offering no way to reach it,
+        because the tool took no arguments at all. That is the same mistake
+        read_file made, and it produces a worse answer than a missing one: the
+        model reads a truncated page, does not find the thing, and reports that
+        the page does not contain it.
+
+        Note for anyone tempted to fix this with scrolling: inner_text("body")
+        returns the WHOLE document's text whatever the scroll position, so
+        paging is the answer here and scrolling is not. (Scrolling matters for
+        a different thing -- content a page only loads once you get there.)
+        """
         try:
             txt = self._page.inner_text("body")
         except Exception as e:
             raise BrowserError(f"Could not read page text: {e}")
         txt = txt or ""
-        if len(txt) > max_chars:
-            txt = txt[:max_chars] + f"\n... [truncated, {len(txt)} chars total]"
-        return f"URL: {self._url()}\n\n{txt}"
+        total = len(txt)
+        start = max(0, min(int(offset or 0), total))
+        chunk = txt[start:start + max_chars]
+        end = start + len(chunk)
+        if end < total:
+            # Cut on a line boundary so the model is never handed half a
+            # sentence -- but only if that does not throw away most of the
+            # window, which it would on a page with very long lines.
+            nl = chunk.rfind("\n")
+            if nl > max_chars // 2:
+                chunk = chunk[:nl]
+                end = start + nl
+        head = f"URL: {self._url()}"
+        if start:
+            head += f"\n[characters {start}-{end} of {total}]"
+        out = f"{head}\n\n{chunk}"
+        if end < total:
+            out += (f"\n\n... [{total - end} of {total} characters not shown. "
+                    f"Call browser_read again with offset={end} for the next part.]")
+        return out
 
     def _op_screenshot(self, path: str) -> str:
         p = Path(path)
