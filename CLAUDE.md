@@ -395,8 +395,10 @@ its whole vocabulary:
 - `glmcode/gui/github_api.py` — cloning and connecting a project, the token,
   the clone root, push and pull, and reviewing a pull request: everything that
   speaks `githubsync` about the chat's own repository.
+- `glmcode/gui/checkup_api.py` — "is any of this actually working": the one
+  panel that asks every other subject at once.
 
-All three follow the same rules.
+All four follow the same rules.
 
 - **A mixin, not a collaborator object.** These methods reach all over the
   instance (`self._cfg`, `self._chats`, `self._active`, `self._store`,
@@ -458,6 +460,17 @@ them broke four pairing tests: they monkeypatch `gui_app.qrcode_util.qr_svg`,
 which needs the name to still resolve there. Re-exported with `# noqa: F401`,
 same as `WebEvents` and the rest. The test failing is the good outcome —
 check what reaches a name through `gui.app` before deleting it.
+
+**The checkup seam was forced by the size guard, and that is not a
+contradiction.** `test_app_py_actually_got_smaller` exists to stop `Api`
+reaccumulating, and nine new methods landing on it is precisely the
+reaccumulation it watches for — the failure is the signal to ask *which
+subject is this*, not a licence to move code until a number drops. The answer
+was a real one: a check, a status and a fix are its own vocabulary, and it
+shares almost nothing with the rest of `Api`. That it CALLS `sync_env`,
+`_open_sync_store`, `ci_status` and `_active_repo_coords` across three other
+mixins is not a smell — one instance holding all of them is what a mixin is
+for, the same as `sync_env` reaching `self._gh_token()`.
 
 The next seams, when it is worth it, are the same shape: a subject with its own
 vocabulary. Do not split by size.
@@ -657,6 +670,61 @@ number of ways the chats can ever be read again.
   mistakes a read failure for missing"* — which is exactly what it was, because
   `get` answers both with `None`. Regenerating that keypair silently
   invalidates every push subscription already out there.
+
+## Nothing said so — which is what "Check my setup" is for
+
+Every expensive bug in this app has had the same shape: something was off, or
+half-configured, or quietly damaged, and **nothing anywhere said so**. A chat
+list that came up empty. An extension reporting Connected while every command
+timed out. A credential blob that would not decrypt, found out about by storing
+one credential and losing the rest.
+
+Each of those has a panel. Each panel is somewhere you only go once you already
+suspect that thing. `Api.self_check` is the one place that asks all of them
+without being asked about any of them in particular.
+
+Three rules, and the third is what the feature is for:
+
+1. **A check says what to DO.** "Sync is broken" is a dead end; the fix belongs
+   in the same row. `tests/desktop_ui/test_setup_check.py` fails if a `warn` or
+   `fail` row has no `fix`.
+2. **One check failing must not stop the others.** A diagnostic that dies half
+   way through is worse than none, because the rows it did print look like the
+   whole answer. Each runs independently and an unexpected error becomes that
+   check's own `unknown` row — with its id named in the runner's table rather
+   than derived from the method name, so the one row that matters most is not
+   the one that comes back unlabelled.
+3. **A check that could not run reports `unknown`, never `ok`.** Reporting
+   "fine" for something untested is the mistake behind half the sections in
+   this file, and it would be a poor thing for the diagnostic itself to make.
+   Sync distinguishes damaged (offer the rebuild) from unreachable (say so and
+   pass no judgement on the data), because collapsing those two is what cost
+   the chat list in the first place.
+
+**It found a real one immediately, on the machine running the tests.**
+`import keyring` proves the package is installed, not that anything is behind
+it — and `keyring` installs happily where there is no OS credential store: a
+headless Linux box, a container, any desktop without gnome-keyring or kwallet.
+`_best_backend` selected it on the strength of the import, and then:
+
+- Settings reported the backend as `keyring`, and **secure**;
+- `get` swallowed `NoKeyringError` and answered `None` for every credential, so
+  the GitHub token read as "not set" however many times it was entered;
+- `set` raised out of the Settings button with nothing shown;
+- and `EncryptedFileBackend`, which exists for exactly that machine, was never
+  reached.
+
+`KeyringBackend.__init__` now does one read of a name that does not exist. It
+costs nothing, it is a read so it leaves no stray entry, and it is the
+difference between working and appearing to.
+
+**The stripe was not drawn, and only a photograph said so.** The first
+stylesheet used `border: 1px solid var(--line)`, and `--line` is not a token
+here. An undefined custom property makes the whole shorthand invalid at
+computed-value time, so `border-style` stays `none` and the width computes to
+`0px` — every colour correct, nothing rendered. All eight tests passed, because
+a class name is not a picture. The test now asserts the **computed** border
+width, which is the only form of that assertion worth having.
 
 ## The history is a tree; rewinding is only one way down it
 

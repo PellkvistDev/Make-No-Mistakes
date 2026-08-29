@@ -77,9 +77,27 @@ class KeyringBackend(_Backend):
     """OS credential store via the `keyring` package."""
     name = "keyring"
 
+    # Nothing is ever stored under this. The read is the whole point.
+    _PROBE = "mnm-backend-probe"
+
     def __init__(self) -> None:
         import keyring  # noqa: F401  (import here so absence -> unavailable)
         self._keyring = keyring
+        # The package importing proves nothing. `keyring` installs happily on a
+        # machine with no OS credential store behind it -- a headless Linux box,
+        # a container, any desktop without gnome-keyring or kwallet -- and then
+        # raises NoKeyringError on every actual call.
+        #
+        # Selecting it anyway was silent and total: Settings reported "keyring"
+        # and secure, `get` swallowed the error and answered None for every
+        # credential, and `set` raised out of the Settings button with nothing
+        # shown. So the GitHub token, the API keys and the sync passphrase could
+        # not be stored at all, and the encrypted-file fallback that exists for
+        # exactly this machine was never reached.
+        #
+        # One read of a name that does not exist, once, at startup. It costs
+        # nothing and it is the difference between working and appearing to.
+        self._keyring.get_password(_SERVICE, self._PROBE)
 
     def get(self, account: str) -> str | None:
         return self._keyring.get_password(_SERVICE, account)

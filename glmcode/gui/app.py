@@ -43,6 +43,7 @@ from .. import usage as usage_mod
 from ..notify import APP_NAME, notify
 from ..prompts import EXECUTE_PLAN_MESSAGE, PLAN_MODE_PREAMBLE, TITLE_PROMPT
 from ..sessions import SessionStore, new_id, to_display
+from .checkup_api import CheckupApi
 from .devices_api import DeviceApi
 # Re-exported, not merely used: the event sink and these two helpers were
 # defined here until the Api class started coming apart, and `gui.app.X` is
@@ -204,7 +205,7 @@ class ChatState:
         self.voice_turns_lock = threading.Lock()
 
 
-class Api(DeviceApi, GitHubApi, VoiceApi):
+class Api(CheckupApi, DeviceApi, GitHubApi, VoiceApi):
     """Methods callable from JS via window.pywebview.api.*"""
 
     def __init__(self):
