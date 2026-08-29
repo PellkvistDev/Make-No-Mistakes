@@ -47,7 +47,7 @@ _SAFE_COMMANDS = frozenset({
     "cmp", "sort", "uniq", "cut", "column", "fold", "expand", "look",
     # info / environment
     "whoami", "hostname", "uname", "id", "groups", "date", "cal", "uptime",
-    "env", "printenv", "history", "which", "where", "whereis", "command",
+    "printenv", "history", "which", "where", "whereis",
     "file", "stat", "du", "df", "basename", "dirname", "realpath", "readlink",
     "wc", "ps", "top", "free", "lsof", "ifconfig", "ipconfig", "arch",
     # PowerShell read-only cmdlets / aliases
@@ -85,6 +85,99 @@ _GIT_READONLY = frozenset({
 })
 _GIT_LIST_ONLY = frozenset({"branch", "tag", "remote", "config", "reflog", "notes"})
 
+# `env` and `command` are not commands; they are ways of STARTING one, and
+# they were in the safe list, so `env rm -rf build` and `command rm x` were
+# both classified as reading. That is not a narrow miss: this classifier is
+# what plan mode enforces itself with -- a hard deny that is supposed to hold
+# "regardless of ask/autoedit/yolo mode or session allowlists" -- so anything
+# it lets through writes files during a turn that promised only to explore.
+#
+# Refusing them outright would be wrong too: `env NODE_ENV=x npm ls` is an
+# ordinary thing to write and reads exactly as much as `npm ls` does. So the
+# prefix is stripped and what is left is classified on its own merits.
+_PREFIX_COMMANDS = {"env", "command", "nice", "nohup", "stdbuf"}
+
+# Flags these prefixes take, and whether the flag consumes the next token.
+_PREFIX_FLAGS = {
+    "env": {"-i": False, "--ignore-environment": False, "-0": False,
+            "--null": False, "-u": True, "--unset": True},
+    "command": {"-p": False},
+    "nice": {"-n": True},
+    "nohup": {},
+    "stdbuf": {"-i": True, "-o": True, "-e": True},
+}
+
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
+
+# Commands in the safe list that can be made to WRITE by their arguments.
+# Everything else there has no output operand at all.
+#   sort -o FILE / --output=FILE
+#   uniq [input [OUTPUT]]
+#   xxd  [options] [infile [OUTFILE]]
+# `value_flags` are the flags that take a separate value, so the value is not
+# miscounted as the output operand.
+_WRITE_CAPABLE = {
+    "sort": {"write_flags": {"-o", "--output"}, "value_flags": {"-k", "-t", "-S", "-T", "--field-separator"},
+             "max_operands": None},
+    "uniq": {"write_flags": set(), "value_flags": {"-f", "-s", "-w", "--skip-fields",
+                                                   "--skip-chars", "--check-chars"},
+             "max_operands": 1},
+    "xxd": {"write_flags": set(), "value_flags": {"-c", "-g", "-l", "-o", "-s"},
+            "max_operands": 1},
+}
+
+
+def _strip_prefix_command(cmd: str, toks: list) -> list | None:
+    """What `env`/`command`/... would actually run, or None if unreadable.
+
+    An empty list back means the prefix ran nothing -- `env` alone prints the
+    environment -- which is a read. Anything unrecognised gives None, because
+    a flag whose meaning we do not know may itself carry a command (`env -S`
+    takes one as a string).
+    """
+    flags = _PREFIX_FLAGS.get(cmd, {})
+    i = 0
+    while i < len(toks):
+        t = toks[i]
+        if t == "--":
+            i += 1
+            break
+        if _ASSIGNMENT.match(t) and cmd == "env":
+            i += 1
+            continue
+        if t.startswith("-"):
+            base = t.split("=", 1)[0]
+            if base not in flags:
+                return None
+            i += 2 if (flags[base] and "=" not in t) else 1
+            continue
+        break
+    return toks[i:]
+
+
+def _write_capable_ok(cmd: str, rest: list) -> bool:
+    """For a safe command that CAN write, whether these arguments make it."""
+    spec = _WRITE_CAPABLE[cmd]
+    operands = 0
+    i = 0
+    while i < len(rest):
+        t = rest[i]
+        base = t.split("=", 1)[0]
+        if base in spec["write_flags"]:
+            return False
+        if t.startswith("-") and len(t) > 1:
+            # A joined short form -- `sort -owiped.txt` names an output too.
+            if any(t.startswith(f) and len(t) > len(f)
+                   for f in spec["write_flags"] if len(f) == 2):
+                return False
+            i += 2 if base in spec["value_flags"] and "=" not in t else 1
+            continue
+        operands += 1
+        i += 1
+    cap = spec["max_operands"]
+    return cap is None or operands <= cap
+
+
 _SEGMENT_SPLIT = re.compile(r"&&|\|\||[|;]")
 _FORBIDDEN_SEG = ("<", ">", "`", "&", "|", "$(", "${", "@(", "$(")
 
@@ -95,7 +188,7 @@ def _cmd_basename(tok: str) -> str:
     return tok.lower()
 
 
-def _segment_readonly(seg: str) -> bool:
+def _segment_readonly(seg: str, depth: int = 0) -> bool:
     toks = seg.split()
     if not toks:
         return False
@@ -105,6 +198,24 @@ def _segment_readonly(seg: str) -> bool:
     # else. Well-behaved tools print and exit, ignoring any real work.
     if len(rest) == 1 and rest[0].lower() in ("--version", "--help", "-version"):
         return True
+    if cmd in _PREFIX_COMMANDS:
+        # `command -v foo` / `-V` look a name up and print it; they are the
+        # opposite of the case above -- these flags stop it running anything.
+        if cmd == "command" and any(t in ("-v", "-V") for t in rest):
+            return True
+        # Bounded: `env env env ...` is legal and must not recurse forever.
+        if depth >= 2:
+            return False
+        inner = _strip_prefix_command(cmd, rest)
+        if inner is None:
+            return False
+        if not inner:
+            # `env` on its own prints the environment; the others are a usage
+            # error with nothing to run. Neither is a way to do anything.
+            return cmd == "env"
+        return _segment_readonly(" ".join(inner), depth + 1)
+    if cmd in _WRITE_CAPABLE:
+        return _write_capable_ok(cmd, rest)
     if cmd in _SAFE_COMMANDS:
         return True
     if cmd == "git":
