@@ -40,6 +40,14 @@ def _lock_down(path: Path) -> None:
         pass
 
 
+class SecretsUnreadable(Exception):
+    """The stored secrets exist and could not be read.
+
+    Distinct from "there are none" precisely so a write cannot proceed on the
+    second answer while the first is true.
+    """
+
+
 class _Backend:
     name = "none"
 
@@ -111,16 +119,34 @@ class EncryptedFileBackend(_Backend):
         return key
 
     def _read(self) -> dict:
+        """Everything stored, or {} when nothing is stored yet.
+
+        An unreadable blob RAISES rather than reading as empty, and that
+        distinction is the whole point of this method. Every secret lives in
+        one file -- the GitHub token, the sync passphrase, the push keys, the
+        API keys -- and `set` is a read-modify-write over it. So "treat as
+        empty" was fine for a read (the user re-enters the token, which is
+        what the old comment said) and destructive for a write: storing ONE
+        credential wrote an empty blob over all the others.
+
+        The sync passphrase makes that permanent. It is generated, never
+        invented, and its only copies are this store and a paired phone -- so
+        losing it here silently halves the number of ways the chats can ever
+        be read again.
+        """
         if not self._blob_path.exists():
             return {}
         try:
             raw = self._fernet.decrypt(self._blob_path.read_bytes())
             data = json.loads(raw.decode("utf-8"))
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            # Corrupt or key-mismatch: treat as empty rather than crash. The
-            # user just re-enters the token; nothing else depends on it.
-            return {}
+        except Exception as e:
+            raise SecretsUnreadable(
+                f"Your saved credentials at {self._blob_path} could not be read "
+                f"({type(e).__name__}). Nothing was changed. If the key file "
+                f"beside it is gone they cannot be recovered, and deleting that "
+                f"file lets you start over."
+            ) from e
+        return data if isinstance(data, dict) else {}
 
     def _write(self, data: dict) -> None:
         token = self._fernet.encrypt(json.dumps(data).encode("utf-8"))
@@ -161,19 +187,41 @@ class SecretStore:
         return self._backend.name == "keyring"
 
     def get(self, account: str) -> str | None:
+        """The secret, or None -- including when the store cannot be read.
+
+        A read that fails costs the user re-entering one credential, which is
+        why this stays quiet. A WRITE that fails must not: see set().
+        """
         try:
             return self._backend.get(account)
         except Exception:
             return None
 
+    def read(self, account: str) -> str | None:
+        """Like get(), but a failure RAISES instead of reading as "not stored".
+
+        For the callers where those two answers lead somewhere different. The
+        VAPID keypair is the example: it is generated once and the push service
+        pins every subscription to it, so "there isn't one" means make one and
+        "I couldn't tell" must mean do nothing at all.
+        """
+        return self._backend.get(account)
+
     def set(self, account: str, secret: str) -> None:
+        """Store one secret. Raises SecretsUnreadable rather than writing over
+        credentials it could not read -- every secret shares one blob in the
+        encrypted-file backend, so proceeding would delete the rest."""
         self._backend.set(account, secret)
 
     def delete(self, account: str) -> None:
         try:
             self._backend.delete(account)
+        except SecretsUnreadable:
+            # Not "already gone" -- the others are still in there, and the
+            # caller has just been told this succeeded. Say so instead.
+            raise
         except Exception:
-            pass
+            pass  # already gone, or a backend that has nothing to remove
 
 
 def _best_backend() -> _Backend:

@@ -617,6 +617,47 @@ things were getting through it.
 `command -v` goes the other way and is allowed: that flag is what stops it
 running anything.
 
+## "I could not find out" is not "there is nothing to worry about"
+
+The same shape as the sync index, in two more places. Both are about losing
+work, and both were found by asking what a failure path RETURNS rather than
+whether it crashes.
+
+**`_repo_state` answered any exception with `{}`.** The phone reads the repo
+over the GitHub API, so uncommitted work on the desktop is invisible to it and
+this field is the only thing that warns — *"editing these files risks
+committing over that work"*. An empty dict produces no warning at all, and
+`SyncStore.save` **merges**, so the empty dict is *present* and overwrites the
+last true answer. One git hiccup therefore silenced the warning until the next
+successful read, on the failure the field exists to prevent.
+
+It returns `None` for "could not find out" now, and `session_to_chat` omits the
+key — absent means "I have nothing to say about this" everywhere else in that
+store. `{}` is kept for the case that is genuinely *known* to be nothing to
+warn about (no cwd, or no GitHub remote), because publishing it is what clears
+a warning that no longer applies.
+
+**Every secret shares one blob, and `set` is a read-modify-write over it.**
+`_read` answered an unreadable file with `{}`, and the comment beside it —
+*"the user just re-enters the token; nothing else depends on it"* — was true of
+a read and false of a write: storing one credential wrote an empty blob over
+the GitHub token, the API keys, the push keypair and the sync passphrase.
+
+The passphrase is the expensive one. It is generated rather than chosen, and
+its only copies are this store and a paired phone, so a silent wipe halves the
+number of ways the chats can ever be read again.
+
+- **`get` stays quiet, `set` and `delete` do not.** Re-entering one token costs
+  a minute; the others are not recoverable by re-entering anything. `delete`
+  swallows failures because "already gone" is its normal case — that is not
+  this case, and the user has just been told it succeeded.
+- **`SecretStore.read` is the strict twin of `get`**, for callers where the two
+  answers lead somewhere different. `webpush_keys` is the example, and its own
+  docstring already said *"this must never be a 'create if missing' that
+  mistakes a read failure for missing"* — which is exactly what it was, because
+  `get` answers both with `None`. Regenerating that keypair silently
+  invalidates every push subscription already out there.
+
 ## The history is a tree; rewinding is only one way down it
 
 `backup.py` commits a snapshot of the work tree before **every** user turn, and

@@ -524,8 +524,24 @@ def test_session_to_chat_publishes_the_desktop_repo_state():
     assert chat["repo_state"] == {"branch": "feature-x", "dirty": True, "ahead": 2, "at": 123}
 
 
-def test_session_to_chat_without_repo_state_stays_empty():
+def test_a_repo_state_nobody_could_read_is_left_out_entirely():
+    """Changed deliberately: this used to publish {}.
+
+    save() MERGES, so an empty dict is PRESENT and overwrites the last true
+    answer -- and what it overwrites it with is "the desktop has nothing
+    uncommitted", which is the one thing the field exists to be able to say
+    otherwise. A caller that could not find out has nothing to say, and
+    absent is how this store says that everywhere else.
+    """
     chat = syncstore.session_to_chat({"id": "s1", "messages": [], "cwd": "/tmp/p"})
+    assert "repo_state" not in chat
+
+
+def test_a_known_absence_is_still_published():
+    """The other half, and why None could not simply be reused for it: a
+    project with no GitHub remote is KNOWN to have nothing to warn about, and
+    publishing {} is what clears a warning left over from when it did."""
+    chat = syncstore.session_to_chat({"id": "s1", "messages": [], "cwd": "/tmp/p"}, {})
     assert chat["repo_state"] == {}
 
 
