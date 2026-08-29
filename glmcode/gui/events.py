@@ -350,8 +350,11 @@ class WebEvents(AgentEvents):
     def tool_call(self, name, args, call_id=""):
         self.emit("tool_call", name=name, args=args, call_id=call_id)
 
-    def tool_result(self, name, content, is_error=False):
-        self.emit("tool_result", name=name, content=content[:12000], error=is_error)
+    def tool_result(self, name, content, is_error=False, call_id=""):
+        # call_id so the page pairs a result with the chip that call made,
+        # instead of with whichever chip it happened to build last.
+        self.emit("tool_result", name=name, content=content[:12000],
+                  error=is_error, call_id=call_id)
 
     def todos(self, items):
         self.emit("todos", items=items)

@@ -256,6 +256,18 @@ class StateRepo:
         return self._call("DELETE", f"/repos/{self.owner}/{self.repo}/contents/{path}",
                           {"message": message, "sha": sha, "branch": self.branch})
 
+    def list_dir(self, path: str) -> list[dict]:
+        """Names and shas of the files in one directory, or [] if there is no
+        such directory. Used only to rebuild the index -- normal operation
+        never enumerates, which is exactly why losing the index used to be
+        permanent."""
+        try:
+            d = self._call("GET",
+                           f"/repos/{self.owner}/{self.repo}/contents/{path}?ref={self.branch}")
+        except GitHubError:
+            return []
+        return [e for e in d if isinstance(e, dict)] if isinstance(d, list) else []
+
     def branch_sha(self) -> str | None:
         try:
             r = self._call("GET",
@@ -276,6 +288,47 @@ class StateRepo:
         self._call("POST", f"/repos/{self.owner}/{self.repo}/git/refs",
                   {"ref": f"refs/heads/{self.branch}", "sha": commit["sha"]})
         return commit["sha"]
+
+
+def _missing(e: GitHubError) -> bool:
+    """Whether a failed read means the file genuinely is not there.
+
+    Only a status we can read AND that is 404 counts as absent. A 500, a
+    timeout, an unreachable network (status 0) mean "there may well be a file
+    here and we did not get it", which is a different answer entirely -- see
+    ``SyncStore._read_index``. A status of None is a fake API in a test, or an
+    older path that raises without one; those are treated as absent, which is
+    what they have always meant.
+    """
+    st = getattr(e, "status", None)
+    return st is None or st == 404
+
+
+def _index_row(chat: dict) -> dict:
+    """The summary the index carries for one chat.
+
+    Built in one place because ``save`` and ``rebuild_index`` both produce it,
+    and a rebuild that dropped a field would quietly downgrade every row in the
+    store to whatever the rebuild happened to know about.
+    """
+    return {
+        "id": chat.get("id") or "",
+        "title": chat.get("title") or "Untitled",
+        "updated": int(chat.get("updated") or 0),
+        "preview": chat.get("preview") or "",
+        "project": chat.get("project") or "",
+        # Just the full_name, not the whole repo object: the index is read in
+        # one piece on every list, so it stays small. Empty means the chat has
+        # no GitHub repo, which is what lets the phone say so in the list
+        # instead of only finding out once you've tapped it.
+        "repo": ((chat.get("repo") or {}).get("full_name") or ""),
+        "device": chat.get("device") or "",
+        # So a machine can find turns left unfinished without decrypting every
+        # chat in the store. The index is a cache -- an older client that saves
+        # without this field drops it from the row while the chat body keeps it
+        # -- so it is a shortlist to load from, never the decision.
+        "interrupted": bool(chat.get("interrupted")),
+    }
 
 
 def _read_json(repo: StateRepo, path: str) -> tuple[dict | None, str | None]:
@@ -408,15 +461,45 @@ class SyncStore:
         return len(subs)
 
     def _read_index(self) -> tuple[dict, str | None]:
-        obj, sha = _read_json(self.repo, "index.json")
-        if not obj:
-            return {"v": 1, "chats": [], "deleted": []}, None
+        """The index, or an empty one if there genuinely isn't one yet.
+
+        There are THREE outcomes here and this used to collapse them into two,
+        which cost more than it looks:
+
+        - Not there. A first device against a fresh store. Empty index, no sha.
+        - There, and we could not fetch it -- GitHub down, no network. Answering
+          "you have no chats" to that is a lie the user acts on, and it is the
+          most common of the three.
+        - There, and unreadable. This one was destructive: it returned an empty
+          index carrying the REAL sha, so the next save wrote that empty index
+          straight over the good one. Nothing enumerates ``chats/`` in normal
+          operation, so every other chat became unreachable on both devices at
+          once -- ciphertext still sitting there, with nothing left that knew
+          the ids. ``rebuild_index`` exists because of this, but it can only
+          help if the rows are still there to rebuild FROM.
+
+        The index is a cache and the bodies are the truth, so refusing to
+        proceed costs one failed sync; guessing cost the whole list.
+        """
+        try:
+            text, sha = self.repo.get_file("index.json")
+        except GitHubError as e:
+            if _missing(e):
+                return {"v": 1, "chats": [], "deleted": []}, None
+            raise SyncError(f"Couldn't read the chat index: {e}") from e
+        try:
+            obj = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            raise SyncError("The chat index is damaged. Your chats are still "
+                            "stored; rebuilding the index will find them again.")
         try:
             data = aes_decrypt(obj, self.key)
-            data.setdefault("deleted", [])   # indexes written before tombstones
-            return data, sha
         except SyncError:
-            return {"v": 1, "chats": [], "deleted": []}, sha
+            raise SyncError("The chat index couldn't be decrypted. Your chats are "
+                            "still stored; rebuilding the index will find the ones "
+                            "this key can read.")
+        data.setdefault("deleted", [])   # indexes written before tombstones
+        return data, sha
 
     def _write_index(self, chats: list, sha: str | None,
                      deleted: list | None = None) -> None:
@@ -480,24 +563,55 @@ class SyncStore:
                            f"Save session {chat['id']}", sha)
         data, sha = self._read_index()
         chats = [c for c in (data.get("chats") or []) if c.get("id") != chat["id"]]
-        chats.append({"id": chat["id"], "title": chat.get("title") or "Untitled",
-                      "updated": chat["updated"], "preview": chat.get("preview") or "",
-                      "project": chat.get("project") or "",
-                      # Just the full_name, not the whole repo object: the index
-                      # is read in one piece on every list, so it stays small.
-                      # Empty means the chat has no GitHub repo, which is what
-                      # lets the phone say so in the list instead of only
-                      # finding out once you've tapped it.
-                      "repo": ((chat.get("repo") or {}).get("full_name") or ""),
-                      "device": chat.get("device") or "",
-                      # So a machine can find turns left unfinished without
-                      # decrypting every chat in the store. The index is a
-                      # cache -- an older client that saves without this field
-                      # drops it from the row while the chat body keeps it --
-                      # so it is a shortlist to load from, never the decision.
-                      "interrupted": bool(chat.get("interrupted"))})
+        # From the MERGED body, not the incoming write. A device that sends no
+        # `repo` (or no title) is saying nothing about it, and building the row
+        # from the write alone blanked that column in the list while the body
+        # kept it -- the same bug the merge above exists to prevent, left
+        # half-fixed one field further out.
+        chats.append(_index_row(merged))
         self._write_index(chats, sha, _tombstones(data))
         return chat["updated"]
+
+    def rebuild_index(self) -> dict:
+        """Rebuild the index from the chat bodies. Returns {found, unreadable}.
+
+        The index is a cache and the bodies are the truth -- that is stated all
+        over this file, and it was not true of the store, because nothing could
+        turn the bodies back into a list. A damaged or wrongly-overwritten
+        index left readable ciphertext that no device could name.
+
+        - **A chat is only dropped when its body says so.** Rows are rebuilt
+          from what is actually stored; a body that will not decrypt is counted
+          and LEFT ALONE, never deleted, since "this key can't read it" is not
+          "it isn't wanted".
+        - **Tombstones are preserved when the old index can still be read**,
+          and only then. Losing them would let a chat deleted on another device
+          come back on the next save -- so a rebuild after total loss reports
+          what it did rather than pretending the delete history survived.
+        - **The lock files are skipped**: `chats/<id>.lock.json` sits in the
+          same directory and is not a chat.
+        """
+        try:
+            old, _ = self._read_index()
+        except SyncError:
+            old = {}                       # unreadable: that is why we are here
+        found, unreadable = [], 0
+        for entry in self.repo.list_dir("chats"):
+            name = entry.get("name") or ""
+            if not name.endswith(".json") or name.endswith(".lock.json"):
+                continue
+            chat_id = name[:-len(".json")]
+            try:
+                chat = self.load(chat_id)
+            except (SyncError, GitHubError):
+                unreadable += 1
+                continue
+            chat.setdefault("id", chat_id)
+            found.append(_index_row(chat))
+        found.sort(key=lambda r: r.get("updated") or 0, reverse=True)
+        _, sha = _read_json(self.repo, "index.json")
+        self._write_index(found, sha, _prune_tombstones(_tombstones(old)))
+        return {"found": len(found), "unreadable": unreadable}
 
     def remove(self, chat_id: str) -> None:
         path = f"chats/{chat_id}.json"

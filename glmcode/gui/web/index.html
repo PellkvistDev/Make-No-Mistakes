@@ -1072,6 +1072,19 @@
             <button id="sync-pass-forget" class="btn btn-danger-ghost">Turn off</button>
           </div>
         </div>
+        <!-- The chat list is one small file naming every chat; each chat is a
+             separate file beside it. Damage that one file and every chat is
+             still stored and none of them can be found, because nothing
+             enumerates them in normal use. Shown only when the list actually
+             fails to load, and only for a failure that repairing can fix -- a
+             rebuild while offline would write an empty list over a good one. -->
+        <div class="row" id="sync-repair-row" hidden>
+          <div class="row-text"><label>Your synced chats couldn't be listed</label>
+            <span class="row-sub" id="sync-repair-why"></span></div>
+          <div class="row-actions">
+            <button id="sync-repair" class="btn btn-primary">Rebuild the list</button>
+          </div>
+        </div>
         <!-- Shown, not hidden. Nobody memorises a generated key, so the only
              copies are this machine's credential store and any paired phone.
              Lose both and the chats stay ciphertext forever, which is worth

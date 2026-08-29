@@ -488,9 +488,14 @@ const STOPPABLE_TOOLS = new Set(["run_command", "run_powershell", "run_tests", "
 function buildToolEl(name, args, callId) {
   const el = document.createElement("div");
   el.className = "tool running";
+  // On EVERY chip, not just the stoppable ones: it is what the result is
+  // matched against. It used to be set only where Stop needed it, and the
+  // result was paired with "the chip built last" -- which is right until
+  // something emits a result with no call of its own, and then writes one
+  // tool's error into another tool's box under that tool's name.
+  if (callId) el.dataset.callId = callId;
   let stopBtn = "";
   if (callId && STOPPABLE_TOOLS.has(name)) {
-    el.dataset.callId = callId;
     stopBtn = `<button class="tool-stop" title="Stop this command" aria-label="Stop this command">Stop</button>`;
   }
   el.innerHTML =
@@ -529,6 +534,17 @@ function diffStat(text) {
     else if (l.startsWith("-") && !l.startsWith("---")) del++;
   }
   return [add, del];
+}
+
+// The chip a result belongs to: the one whose call carried this id, falling
+// back to the last one built when there is no id to go on (an older backend,
+// or a replayed event). Never searches outside this turn's own wrap.
+function toolElFor(turn, callId) {
+  if (turn && callId) {
+    const match = turn.wrap.querySelector(`.tool[data-call-id="${CSS.escape(callId)}"]`);
+    if (match) return match;
+  }
+  return turn ? turn.lastTool : null;
 }
 
 function finishToolEl(el, content, isError) {
@@ -1211,7 +1227,7 @@ function handle(ev) {
     }
     case "tool_result": {
       const t = current;
-      const el = t && t.lastTool;
+      const el = toolElFor(t, ev.call_id || "");
       if (!el) break;
       if (SILENT_TOOLS.has(ev.name) && !ev.error) {
         // The real result is a "show_image" event (already rendered, or
@@ -1834,7 +1850,7 @@ function renderSubagentEvent(aid, ev) {
       break;
     }
     case "tool_result": {
-      const el = t.lastTool;
+      const el = toolElFor(t, ev.call_id || "");
       if (!el) break;
       if (SILENT_TOOLS.has(ev.name) && !ev.is_error) {
         el.remove();
@@ -4747,6 +4763,8 @@ $("sync-code-copy").addEventListener("click", () => {
     .then(() => toast("Recovery code copied.", "info", 3000))
     .catch(() => toast("Couldn't copy — select the code and copy it manually.", "error", 4000));
 });
+$("sync-repair").addEventListener("click", (e) => rebuildSyncIndex(e.currentTarget));
+
 $("sync-pass-forget").addEventListener("click", async () => {
   if (!confirm("Turn off shared chats on this computer? Your chats stay on GitHub (still " +
                "encrypted). You'll need the recovery code to read them here again — show and " +
@@ -5227,11 +5245,34 @@ let syncChats = null;   // null = not fetched yet this session; [] = fetched, no
 // Silent on failure (sync not set up, offline, etc.) -- this is a background
 // enrichment of the list, not a user-initiated action worth a toast for.
 async function refreshSyncChatsBackground() {
+  let res = null;
   try {
-    const res = await api().sync_list_chats();
+    res = await api().sync_list_chats();
     syncChats = (res && !res.error && res.chats) || [];
   } catch (e) { syncChats = syncChats || []; }
+  // Still silent in the list itself -- but a failure that repairing can fix
+  // has to be SOMEWHERE, or the only symptom is synced chats quietly never
+  // appearing, which reads as sync being off rather than as damage. Settings
+  // is where someone goes to look, so the offer waits for them there.
+  showSyncRepair(res && res.error && res.can_rebuild ? res.error : "");
   renderSidebar();
+}
+
+function showSyncRepair(why) {
+  $("sync-repair-row").hidden = !why;
+  $("sync-repair-why").textContent = why || "";
+}
+
+async function rebuildSyncIndex(btn) {
+  const res = await ghAction(btn, () => api().sync_rebuild_index());
+  if (!res) return;
+  const n = res.found || 0;
+  const lost = res.unreadable || 0;
+  toast(`Rebuilt the list: ${n} chat${n === 1 ? "" : "s"} found` +
+        (lost ? `, ${lost} this computer's key can't read (left alone).` : "."),
+        "info", 6000);
+  showSyncRepair("");
+  refreshSyncChatsBackground();
 }
 
 // Coming back to the window: if the phone moved the open chat on while we were

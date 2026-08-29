@@ -163,8 +163,13 @@ class _CaptureEvents(AgentEvents):
     def tool_call(self, name: str, args: dict, call_id: str = "") -> None:
         self._forward(self._aid, "tool_call", name=name, args=args, call_id=call_id)
 
-    def tool_result(self, name: str, content: str, is_error: bool = False) -> None:
-        self._forward(self._aid, "tool_result", name=name, content=content, is_error=is_error)
+    def tool_result(self, name: str, content: str, is_error: bool = False,
+                    call_id: str = "") -> None:
+        # The id the matching tool_call carried. A frontend that pairs a result
+        # with "the chip I made last" is guessing, and guessed wrong the moment
+        # anything emitted a result without a call of its own.
+        self._forward(self._aid, "tool_result", name=name, content=content,
+                      is_error=is_error, call_id=call_id)
 
     def steered(self, text: str) -> None:
         self._forward(self._aid, "steered", text=text)
@@ -1721,9 +1726,23 @@ class Agent:
                 if not isinstance(args, dict):
                     raise ValueError("arguments must be a JSON object")
             except (json.JSONDecodeError, ValueError) as e:
+                # Announced BEFORE the reply, even though there is nothing to
+                # run. Every other path pairs a tool_call with a tool_result,
+                # and the live UI attaches a result to the chip it made last:
+                # a result with no call of its own landed on the PREVIOUS
+                # tool's chip, overwriting a finished (often successful)
+                # output with this error, under that tool's name. Which is
+                # what "the browser_new_tab chip is showing a run_command
+                # error" was. The call itself also showed up nowhere at all.
+                #
+                # Reloading the chat fixed it, which is what made it so hard
+                # to report: sessions.to_display pairs by tool_call_id and was
+                # always right. Only the live stream guessed.
+                self.events.tool_call(name, {}, call_id=tc.get("id", ""))
                 self._tool_reply(tc, f"ERROR: could not parse tool arguments: {e}. "
                                      f"Raw arguments were: {raw_args[:500]}",
-                                 error=True, name=name, args={})
+                                 error=True, name=name, args={},
+                                 call_id=tc.get("id", ""))
                 # Replace the unparseable arguments in the stored history.
                 # Telling the model is not enough: the broken call stays in
                 # the assistant message, goes back out on every following
@@ -1749,7 +1768,8 @@ class Agent:
                 if decision.feedback:
                     msg += f" User says: {decision.feedback}"
                 msg += " Do not retry it as-is; adjust your approach."
-                self._tool_reply(tc, msg, error=True, name=name, args=args)
+                self._tool_reply(tc, msg, error=True, name=name, args=args,
+                                 call_id=run_token)
                 continue
 
             # Verify-nudge bookkeeping: attempting a verification tool counts
@@ -1765,12 +1785,13 @@ class Agent:
                 if name in EDIT_TOOLS:
                     self._turn_wrote_files = True
                     self._refine_pass_changed = True  # a review pass that edits keeps Max going
-                self._tool_reply(tc, output, name=name, args=args)
+                self._tool_reply(tc, output, name=name, args=args, call_id=run_token)
             except ToolError as e:
-                self._tool_reply(tc, f"ERROR: {e}", error=True, name=name, args=args)
+                self._tool_reply(tc, f"ERROR: {e}", error=True, name=name, args=args,
+                                 call_id=run_token)
             except Exception as e:
                 self._tool_reply(tc, f"ERROR: unexpected {type(e).__name__}: {e}",
-                                 error=True, name=name, args=args)
+                                 error=True, name=name, args=args, call_id=run_token)
             finally:
                 self._current_call_token = None
                 set_call_token(None)
@@ -1885,8 +1906,9 @@ class Agent:
         return output
 
     def _tool_reply(self, tc: dict, content: str, error: bool = False,
-                    name: str = "", args: dict | None = None) -> None:
-        self.events.tool_result(name, content, is_error=error)
+                    name: str = "", args: dict | None = None,
+                    call_id: str = "") -> None:
+        self.events.tool_result(name, content, is_error=error, call_id=call_id)
         if self.transcript:
             self.transcript.tool_result(name, content, is_error=error)
         self.messages.append({
