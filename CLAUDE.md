@@ -462,6 +462,36 @@ check what reaches a name through `gui.app` before deleting it.
 The next seams, when it is worth it, are the same shape: a subject with its own
 vocabulary. Do not split by size.
 
+## An undo you cannot undo is not a safety net
+
+Found by asking which failures are EXPENSIVE rather than which are visible.
+Every report so far has been about something you can see; a papercut costs a
+minute and losing an afternoon's work costs the project. Two defects, both in
+the file whose entire job is not losing work.
+
+**`revert_to` destroyed work that was in no commit at all.** Snapshots are
+taken BEFORE a user turn, so everything the newest turn produced — and
+anything edited by hand since — existed only on disk. `reset --hard` plus
+`clean -fd` then threw it away with nothing holding it: edit-and-resend a
+message from five turns ago and those five turns were gone for good. It
+snapshots first now, and the label says what the point is, because it shows up
+in Settings' restore list beside the per-turn ones.
+
+**The history only ever moves forward.** `reset --hard` was the obvious way to
+put the files back and it rewinds the branch pointer, which orphans every
+commit after the target — including the safety snapshot taken one line above.
+The first version of this fix kept a copy `list_snapshots` could no longer see,
+and its own test caught it. A restore-point log that deletes restore points is
+not one. `read-tree` + `checkout-index` + `clean` do to the FILES exactly what
+`reset --hard` does, and nothing to the branch.
+
+**Path containment was a string prefix.** `"/home/you/proj"` prefixes
+`"/home/you/proj-evil"`, so a sibling directory satisfied the check — on the
+two functions here whose job includes deleting files. The comment beside one of
+them already said *"a check that only holds because of where the caller got its
+input is not a check"*; it simply was not true of itself. `is_relative_to`
+walks components and does not.
+
 ## The history is a tree; rewinding is only one way down it
 
 `backup.py` commits a snapshot of the work tree before **every** user turn, and
