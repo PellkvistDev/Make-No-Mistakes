@@ -1,0 +1,727 @@
+/* Make No Mistakes — mobile. Dark, premium, phone-first. No external assets.
+ *
+ * Surfaces are translucent "liquid glass": a semi-transparent tint + a heavy
+ * backdrop blur + saturation, so a custom wallpaper shows through (softly
+ * blurred) instead of being hidden behind opaque panels. The background image
+ * is NOT darkened — the glass provides text contrast, not a dimming scrim. */
+:root {
+  --bg: #0b0d10;
+  --text: #f2f4f8;
+  --muted: #aeb6c4;
+  --accent: #7aa2ff;
+  --accent-dim: #3b4f80;
+  --danger: #ff6b6b;
+  --ok: #58d68d;
+  --radius: 16px;
+  --radius-sm: 11px;
+  /* glass system */
+  --glass: rgba(30, 34, 44, 0.36);
+  --glass-strong: rgba(20, 23, 30, 0.62);
+  --glass-brd: rgba(255, 255, 255, 0.16);
+  --glass-hi: inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  --blur: saturate(170%) blur(26px);
+  --blur-strong: saturate(180%) blur(34px);
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+}
+/* The safe-area insets, routed through variables instead of being read from
+   env() at each use site. Two reasons. Every layout bug at the top and bottom
+   of this app has been inset-dependent, and env() reports 0 in every headless
+   browser — so nothing about them could be tested, and each fix was guesswork
+   checked by screenshot. A test can override these. And it keeps the handful
+   of places that have to agree about an inset reading from one source. */
+:root {
+  --safe-t: env(safe-area-inset-top);
+  --safe-b: env(safe-area-inset-bottom);
+}
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body {
+  margin: 0; height: 100%;
+  background: var(--bg); color: var(--text);
+  font-family: var(--font); font-size: 16px; line-height: 1.5;
+  overscroll-behavior: none;
+}
+/* THE BOTTOM OF THE SCREEN, in an installed iOS PWA with a black-translucent
+   status bar. Two different things go wrong down there and they need two
+   different fixes — conflating them is how this got broken twice.
+   In this mode iOS keeps the layout viewport its normal height (screen minus
+   status bar) but positions it at the very top of the screen. The bottom
+   safe-area-inset-top pixels of the glass are therefore OUTSIDE the layout
+   viewport. Consequences:
+     1. A flat strip of --bg shows there, because nothing lays out that far
+        down. Only the canvas background reaches it, and only when <html> is
+        tall enough to have one — hence the min-height below.
+     2. position:fixed;inset:0 does NOT cover it. Fixed positioning resolves
+        against the layout viewport, which stops short. So the wallpaper ends
+        above the screen bottom even once the strip is no longer grey — that
+        is the separate #bg-layer rule further down.
+   The min-height is the old fix and it is correct; what was wrong with it was
+   that it also made the document SCROLLABLE by exactly that many pixels, and
+   iOS used them — sliding the page up (the band came back, same height, which
+   was the tell) and shoving the whole UI up whenever the composer was focused.
+   overflow:hidden keeps the height and takes away the scroll. */
+html {
+  overflow: hidden;
+  min-height: calc(100% + var(--safe-t));
+}
+/* html.kb-open used to live here, dropping that extra inset while a field was
+   focused so iOS had nothing to scroll. It is gone, because the device says it
+   is the only thing that moves on focus and moving is the bug now:
+
+     scrollY moved:     0px
+     visual top moved:  0px
+     html height moved: 59px      <- exactly --safe-t, i.e. this rule
+
+   Nothing scrolls any more, so there is nothing for it to prevent — but the
+   wallpaper is painted into this box (see applyBg), sized `cover`, so taking
+   59px off it re-solves the scale and the whole background jumps. That is the
+   flash. The height stays put now.
+   If the scroll it was guarding against comes back, the diagnostics will say
+   so in that same block, and the fix is to get the composer clear of the
+   keyboard BEFORE iOS decides to scroll — not to resize this box again. */
+/* Nothing in this app should ever scroll the document — the only scroller is
+   .messages. Pinning body as well means no amount of overflow can move it. */
+body { position: fixed; inset: 0; width: 100%; overflow: hidden; }
+/* Fill the whole screen (incl. both safe areas under black-translucent) by
+   pinning the app to the viewport exactly like #bg-layer — height:100% doesn't
+   cover the bottom inset in an installed iOS PWA, which left a dark band. */
+#app { position: fixed; inset: 0; z-index: 1; }
+.screen { height: 100%; display: flex; flex-direction: column; position: relative; }
+.screen[hidden] { display: none; }
+button, input, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; border: none; background: none; }
+/* class selectors (e.g. .send { display:grid }) outrank the UA [hidden] rule,
+   so make hidden win explicitly — otherwise send + stop both show. */
+[hidden] { display: none !important; }
+
+/* The wallpaper is painted by exactly ONE thing: the root canvas.
+   This layer stays for the plain-colour default and as a positioned slot, but
+   applyBg() deliberately leaves it empty whenever there is a wallpaper.
+   Why one painter: in an installed iOS PWA with a black-translucent status bar
+   the layout viewport is shorter than the screen, and a position:fixed element
+   cannot paint the strip of glass below it — pushing this layer's bottom past
+   the viewport was tried and did nothing. Only the canvas reaches down there.
+   So the canvas has to paint the strip, and if anything else painted the same
+   image over the viewport as well, the two boxes would scale `cover`
+   differently and meet in a visible line. That line was the "gradient ends
+   above the bottom of the screen" seam. One painter, one box, no seam that
+   two numbers have to be kept in agreement to avoid. */
+#bg-layer {
+  position: fixed; inset: 0; z-index: 0; pointer-events: none;
+  background-size: cover; background-position: center;
+}
+/* With a wallpaper up, body must not paint over the canvas — it is pinned to
+   the viewport, so its opaque --bg would hide the canvas everywhere except the
+   strip, which is precisely the two-painter split described above. */
+body.has-bg { background: transparent; }
+
+/* A reusable glass helper. */
+.glass, .dialog, .toast,
+.field input, .field select, .row input, .composer textarea,
+.repo-list li, .tool-head, button.ghost, .swatch.upload,
+.bubble.assistant, pre.code, pre.tool-out, .preview {
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+}
+
+/* ---------- light background: adapt for contrast ---------- */
+/* When the chosen wallpaper/colour is light, flip to dark text + light glass
+   so everything stays readable (JS adds body.light-bg). */
+body.light-bg {
+  --text: #12151b;
+  --muted: #495264;
+  --glass: rgba(255, 255, 255, 0.52);
+  --glass-strong: rgba(255, 255, 255, 0.76);
+  --glass-brd: rgba(0, 0, 0, 0.12);
+  --glass-hi: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+body.light-bg .brand {
+  background: linear-gradient(120deg, #1a2233, #3b62c4);
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+body.light-bg ::placeholder { color: rgba(0, 0, 0, 0.42); }
+body.light-bg .icon-btn { color: #12151b; }
+body.light-bg .icon-btn:active { background: rgba(0, 0, 0, 0.08); }
+body.light-bg .bubble.assistant, body.light-bg .tool-head { color: #12151b; }
+body.light-bg .tool-head { color: #495264; }
+body.light-bg pre.code, body.light-bg pre.tool-out, body.light-bg .preview {
+  background: rgba(255, 255, 255, 0.62); color: #12151b;
+}
+body.light-bg .toggle { background: rgba(0, 0, 0, 0.18); }
+body.light-bg .chip button { background: rgba(0, 0, 0, 0.1); color: #333; }
+body.light-bg .status { color: #274690; }
+body.light-bg .error { color: #b3261e; }
+/* bare-on-wallpaper text: swap the dark halo for a light one */
+body.light-bg .sub, body.light-bg .hint, body.light-bg .section-label,
+body.light-bg .bar-title, body.light-bg .field > span, body.light-bg .setting-label,
+body.light-bg .setting-hint, body.light-bg .new-repo h3, body.light-bg .bubble.system,
+body.light-bg .status, body.light-bg .auto-commit, body.light-bg .error {
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.7);
+}
+body.light-bg .bar {
+  background: linear-gradient(to bottom, rgba(244,246,250,.72), rgba(244,246,250,.3) 55%, transparent);
+}
+body.light-bg #composer-dock::before {
+  background: linear-gradient(to top, rgba(244,246,250,.66), rgba(244,246,250,.32) 55%, transparent);
+}
+
+/* ---------- panes / setup / unlock ---------- */
+.pane {
+  flex: 1; overflow-y: auto;
+  padding: max(28px, var(--safe-t)) 22px calc(28px + var(--safe-b));
+  display: flex; flex-direction: column; gap: 14px;
+  width: 100%; max-width: 520px; margin: 0 auto;
+}
+.pane.center { justify-content: center; }
+.pane.scroll { gap: 12px; }
+.brand {
+  font-size: 26px; font-weight: 700; letter-spacing: -0.02em; margin: 6px 0 0;
+  background: linear-gradient(120deg, #fff, var(--accent));
+  -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+}
+/* Bare-on-wallpaper text gets a soft shadow so it stays legible on any image. */
+.sub, .hint, .section-label, .bar-title, .field > span, .setting-label {
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.55);
+}
+.sub { color: var(--muted); margin: 0 0 6px; }
+.hint { color: var(--muted); font-size: 12.5px; margin: -4px 0 0; }
+.hint b { color: var(--text); font-weight: 600; }
+small.hint { display: block; margin-top: 5px; }
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field > span { font-size: 13px; color: var(--muted); }
+.field input, .field select, .row input {
+  background: var(--glass); border: 1px solid var(--glass-brd); color: var(--text);
+  box-shadow: var(--glass-hi); border-radius: var(--radius-sm); padding: 12px 13px; width: 100%;
+  transition: border-color .15s ease, box-shadow .15s ease;
+}
+::placeholder { color: rgba(255, 255, 255, 0.5); }
+.field input:focus, .field select:focus, .row input:focus {
+  outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122,162,255,.22), var(--glass-hi);
+}
+.pin-block { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+button.primary {
+  background: linear-gradient(180deg, var(--accent), #6690f0);
+  color: #0a0d14; font-weight: 650; border-radius: var(--radius-sm);
+  padding: 13px 16px; margin-top: 6px; box-shadow: 0 6px 18px rgba(60, 96, 190, 0.35);
+  transition: transform .12s ease, filter .12s ease;
+}
+button.primary:active { transform: translateY(1px); filter: brightness(1.05); }
+button.ghost {
+  background: var(--glass); border: 1px solid var(--glass-brd); color: var(--text);
+  box-shadow: var(--glass-hi); border-radius: var(--radius-sm); padding: 11px 14px;
+}
+button.ghost:active { background: var(--glass-strong); }
+button.link { color: var(--muted); text-decoration: underline; font-size: 13px; padding: 8px; }
+button.link.danger { color: var(--danger); }
+.error { color: #ff9d9d; font-size: 13.5px; margin: 4px 0 0; min-height: 1em; text-shadow: 0 1px 3px rgba(0,0,0,.55); }
+
+/* ---------- top bar ---------- */
+/* No box — just a soft gradient scrim that fades content passing under it and
+   keeps the title/status text legible over the wallpaper. */
+.bar {
+  display: flex; align-items: center; gap: 10px;
+  padding: max(10px, var(--safe-t)) 14px 16px;
+  background: linear-gradient(to bottom, rgba(6,8,12,.66) 0, rgba(6,8,12,.24) 55%, transparent 100%);
+  position: sticky; top: 0; z-index: 5;
+}
+.bar-title { font-weight: 600; font-size: 15px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon-btn { font-size: 18px; padding: 6px 8px; border-radius: 9px; color: var(--text); opacity: .9; }
+.icon-btn:active { background: rgba(255, 255, 255, 0.12); }
+#btn-back-repo { font-size: 26px; line-height: 1; padding: 2px 6px; }
+.chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.chk input { accent-color: var(--accent); width: 16px; height: 16px; }
+.auto-commit { white-space: nowrap; text-shadow: 0 1px 3px rgba(0,0,0,.55); }
+
+/* ---------- repo picker ---------- */
+.row { display: flex; gap: 8px; align-items: center; }
+.row input { flex: 1; }
+.repo-list { list-style: none; margin: 4px 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.repo-list li {
+  background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi);
+  border-radius: var(--radius-sm); padding: 14px 15px; font-size: 14.5px;
+  transition: border-color .12s, background .12s, transform .1s;
+}
+.repo-list li:active { background: var(--glass-strong); border-color: var(--accent); transform: scale(.99); }
+.repo-list li.muted, .muted { color: var(--muted); }
+/* chat-history rows: title + meta on the left, a delete button on the right */
+.repo-list li.chat-row { display: flex; align-items: center; gap: 8px; padding: 0; overflow: hidden; }
+.chat-row-main { flex: 1; min-width: 0; padding: 12px 4px 12px 15px; cursor: pointer; }
+.chat-row-title { font-size: 14.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-row-meta { font-size: 12px; color: var(--muted); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A chat whose project isn't a GitHub repo: readable here, but the agent has
+   nothing to act on, so it can't be continued from the phone. Dimmed and
+   labelled so it doesn't look like one that works. */
+.chat-row-local .chat-row-title, .chat-row-local .chat-row-meta { opacity: .62; }
+.chat-row-tag {
+  margin-right: 7px; padding: 1px 7px; border-radius: 999px;
+  font-size: 10.5px; font-weight: 600; letter-spacing: .02em;
+  vertical-align: 1px; color: var(--muted);
+  background: rgba(255,255,255,.09); border: 1px solid var(--glass-brd);
+}
+.chat-row-del { padding: 12px 15px; font-size: 16px; color: var(--muted); background: none; align-self: stretch; }
+.chat-row-del:active { color: var(--danger, #ff6b6b); background: rgba(255,255,255,.08); }
+.new-repo { margin-top: 4px; display: flex; flex-direction: column; gap: 10px; }
+.new-repo h3 { margin: 0; font-size: 14px; color: var(--muted); font-weight: 600; text-shadow: 0 1px 3px rgba(0,0,0,.55); }
+.repo-list-head { margin-top: 20px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,.12); display: flex; flex-direction: column; gap: 8px; }
+.section-label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+
+/* ---------- background picker ---------- */
+.bg-picker { display: flex; flex-wrap: wrap; gap: 10px; }
+.swatch {
+  width: 46px; height: 46px; border-radius: 12px; border: 2px solid var(--glass-brd);
+  cursor: pointer; position: relative; overflow: hidden; padding: 0;
+  display: grid; place-items: center; transition: border-color .12s, box-shadow .12s, transform .1s;
+}
+.swatch:active { transform: scale(.94); }
+.swatch.sel { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122,162,255,.3); }
+.swatch.color-pick { background: conic-gradient(from 210deg, #ff6b6b, #ffd166, #58d68d, #7aa2ff, #b48cff, #ff6b6b); }
+.swatch.color-pick input[type="color"] { position: absolute; inset: -4px; width: calc(100% + 8px); height: calc(100% + 8px); border: none; padding: 0; background: none; opacity: 0; cursor: pointer; }
+.swatch.upload { background: var(--glass); color: var(--text); font-size: 22px; line-height: 1; }
+.setting-block { margin: 2px 0 4px; }
+.setting-label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+.setting-hint { display: block; font-size: 12px; color: var(--muted); margin-top: 6px; }
+.settings-scroll { max-height: min(64vh, 560px); overflow-y: auto; display: flex; flex-direction: column; gap: 16px; padding-right: 2px; }
+.setting-input {
+  width: 100%; background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi);
+  color: var(--text); border-radius: var(--radius-sm); padding: 11px 13px;
+}
+.setting-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122,162,255,.2); }
+/* segmented control (thinking) */
+.seg { display: flex; gap: 4px; background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi); border-radius: 12px; padding: 4px; }
+.seg button { flex: 1; padding: 8px 4px; border-radius: 9px; color: var(--muted); font-size: 13px; font-weight: 600; transition: background .12s, color .12s; }
+.seg button.on { background: linear-gradient(180deg, var(--accent), #6690f0); color: #0a0d14; }
+/* toggle */
+.toggle-row { display: flex; align-items: center; gap: 14px; }
+.toggle-row > div { flex: 1; }
+.toggle-row .setting-label { margin-bottom: 2px; }
+.toggle { -webkit-appearance: none; appearance: none; flex: none; width: 46px; height: 28px; border-radius: 999px;
+  background: rgba(255,255,255,.16); border: 1px solid var(--glass-brd); position: relative; transition: background .15s; cursor: pointer; }
+.toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 22px; height: 22px; border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+.toggle:checked { background: var(--accent); }
+.toggle:checked::after { transform: translateX(18px); }
+
+/* ---------- messages ---------- */
+/* The scroll area fills the whole screen; the bar and composer overlay it, so
+   content scrolls behind their gradient scrims and fades. Top/bottom padding
+   (set in JS to match the real bar/dock heights) keeps content clear of them. */
+/* Pin the chat's bar / scroll area / composer to the viewport (fixed, like
+   #bg-layer) so they reliably fill the screen incl. both safe areas — and are
+   hidden with the screen when it isn't shown. */
+#screen-chat .bar { position: fixed; top: 0; left: 0; right: 0; }
+#screen-chat .messages {
+  position: fixed; inset: 0; overflow-y: auto;
+  padding: 16px 14px 8px;
+  /* Clearing the composer means clearing the dock AND the lift: this box is
+     fixed;inset:0, so it spans the part of the screen the keyboard covers.
+     In CSS rather than JS because it was JS, and JS only ran it on some of the
+     events that change --kb -- so a keyboard's worth of chat ended up sitting
+     under the composer, showing through iOS's translucent accessory bar in
+     slices. A calc cannot be out of date. */
+  padding-bottom: calc(var(--dock-h, 84px) + var(--kb, 0px) + 6px);
+  display: flex; flex-direction: column; gap: 10px;
+  -webkit-overflow-scrolling: touch;
+}
+/* --kb is how much of the screen the on-screen keyboard covers, measured from
+   visualViewport (see trackKeyboard). The document can't scroll any more, so
+   the dock has to lift itself over the keyboard rather than being shoved there
+   by the browser. --kb is 0 whenever the keyboard is down, which is also the
+   fallback if visualViewport is missing. */
+#composer-dock {
+  position: fixed; left: 0; right: 0; bottom: var(--kb, 0px); z-index: 5;
+  /* The home indicator is behind the keyboard while it's open, so its inset
+     stops applying — otherwise there's a dead gap above the keys. */
+  padding-bottom: max(0px, calc(var(--safe-b) - var(--kb, 0px)));
+}
+/* The scrim runs to the bottom of the SCREEN, not the bottom of the dock.
+   position:fixed rather than absolute is the whole point: as a child of the
+   dock it rode up with it, so while the keyboard was open the gradient stopped
+   at the top of iOS's accessory bar and simply ended, mid-screen. That bar is
+   translucent — app content shows through it — so what appeared behind it was
+   whatever chat happened to be there, sliced off at a hard horizontal line.
+   Pinning the scrim to the viewport puts the gradient behind the bar instead.
+
+   It used to stop at the top of the home-indicator inset too, on the theory
+   that leaving that band as pure wallpaper avoided "a bar at the very bottom".
+   That did the opposite: the scrim is darkest exactly where it was cut off, so
+   it ended in a hard line with brighter wallpaper below (a clean jump from
+   rgb(3,2,82) to rgb(4,5,50) about 33 CSS px up, when the screenshot was
+   measured). Same lesson, twice: a gradient that reaches the edge has no line.
+
+   The stops are in px from the bottom rather than percentages, so the fade is
+   the same height whatever --kb is. Otherwise opening the keyboard stretches a
+   55% midpoint over 400px and the tint washes out. */
+#composer-dock::before {
+  content: ""; position: fixed; left: 0; right: 0; bottom: 0; z-index: -1;
+  height: calc(var(--kb, 0px) + var(--dock-h, 84px) + 56px);
+  background: linear-gradient(to top,
+    rgba(6,8,12,.5) 0,
+    rgba(6,8,12,.5) calc(var(--kb, 0px) + 8px),
+    rgba(6,8,12,.28) calc(var(--kb, 0px) + var(--dock-h, 84px) * .6),
+    transparent 100%);
+  pointer-events: none;
+}
+.bubble { border-radius: var(--radius); padding: 11px 14px; max-width: 92%; word-wrap: break-word; animation: rise .18s ease; box-shadow: var(--glass-hi); }
+.bubble.user { align-self: flex-end; background: linear-gradient(180deg, rgba(64,90,158,.62), rgba(46,64,116,.58)); border: 1px solid rgba(120,150,230,.4); -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); }
+.bubble.assistant { align-self: flex-start; background: var(--glass); border: 1px solid var(--glass-brd); }
+.bubble.system { align-self: center; background: transparent; color: var(--muted); font-size: 13px; text-align: center; max-width: 100%; padding: 4px 8px; box-shadow: none; text-shadow: 0 1px 3px rgba(0,0,0,.55); }
+.bubble.error { align-self: flex-start; background: rgba(255,107,107,.16); border: 1px solid rgba(255,107,107,.4); color: #ffb3b3; }
+.para { white-space: pre-wrap; }
+.para + .para { margin-top: 8px; }
+pre.code, pre.tool-out, .preview {
+  background: rgba(8, 10, 14, 0.55); border: 1px solid var(--glass-brd); border-radius: var(--radius-sm);
+  padding: 10px 12px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px;
+  white-space: pre; margin: 8px 0 0;
+}
+
+/* ---------- rendered markdown ---------- */
+.mdh { font-weight: 700; line-height: 1.3; margin: 12px 0 4px; }
+.mdh:first-child { margin-top: 0; }
+.mdh1 { font-size: 17px; }
+.mdh2 { font-size: 15.5px; }
+.mdh3, .mdh4 { font-size: 14px; color: #dbe3f5; }
+.mdlist { margin: 6px 0; padding-left: 22px; }
+.mdlist li { margin: 3px 0; }
+.mdlist li::marker { color: var(--accent); }
+.mdquote {
+  margin: 8px 0; padding: 2px 0 2px 11px;
+  border-left: 3px solid var(--accent-dim); color: var(--muted);
+}
+.bubble code {
+  font-family: var(--mono); font-size: .88em; padding: 1px 5px; border-radius: 5px;
+  background: rgba(8,10,14,.5); border: 1px solid var(--glass-brd); word-break: break-word;
+}
+.bubble a { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.bubble strong { font-weight: 700; }
+.bubble em { font-style: italic; }
+
+/* code block with a language tag + copy button */
+.codewrap { margin: 8px 0 0; }
+.codebar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 5px 10px; font-size: 11px; font-family: var(--mono); color: var(--muted);
+  background: rgba(8,10,14,.62); border: 1px solid var(--glass-brd); border-bottom: none;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
+}
+.codewrap pre.code { margin: 0; border-radius: 0 0 var(--radius-sm) var(--radius-sm); }
+.code-copy, .bubble-copy {
+  font-size: 11px; font-weight: 600; color: var(--muted); padding: 3px 9px;
+  border-radius: 999px; border: 1px solid var(--glass-brd); background: var(--glass);
+  transition: color .12s, border-color .12s;
+}
+.code-copy:active, .bubble-copy:active { transform: scale(.95); }
+.code-copy.ok, .bubble-copy.ok { color: #8fe3a6; border-color: rgba(143,227,166,.5); }
+.bubble-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+
+/* streaming: a soft caret trailing the last line while tokens still arrive */
+.bubble.streaming > .para:last-child::after,
+.bubble.streaming > .mdlist:last-child li:last-child::after {
+  content: ""; display: inline-block; width: 7px; height: 1em;
+  margin-left: 2px; vertical-align: -2px; border-radius: 1px;
+  background: var(--accent); animation: caret 1s steps(2) infinite;
+}
+@keyframes caret { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+
+/* ---------- context meter ---------- */
+/* Sits above the composer: how full the model's context is, and a way to
+   summarise older history on demand rather than waiting for the automatic
+   pass. Kept quiet — it should be glanceable, not attention-grabbing. */
+.ctx-foot {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  width: 100%; max-width: 720px; margin: 0 auto; padding: 0 14px 2px;
+}
+.ctx-usage, .ctx-compact {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--muted); padding: 4px 8px; border-radius: 999px;
+  background: none; border: 1px solid transparent;
+  text-shadow: 0 1px 3px rgba(0,0,0,.55);
+}
+.ctx-compact {
+  border-color: var(--glass-brd); background: var(--glass);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+}
+.ctx-compact:active, .ctx-usage:active { transform: scale(.96); }
+.ctx-compact[disabled] { opacity: .45; }
+.token-donut { width: 14px; height: 14px; flex: none; }
+.token-donut .donut-bg { fill: none; stroke: rgba(255,255,255,.16); stroke-width: 3.5; }
+.token-donut .donut-segment {
+  fill: none; stroke: var(--accent); stroke-width: 3.5; stroke-linecap: round;
+  transition: stroke-dasharray .3s ease, stroke .3s ease;
+}
+#token-text { font-family: var(--mono); font-size: 11px; }
+/* Warm the ring as the context fills toward the automatic compaction point. */
+.ctx-foot.warn .donut-segment { stroke: #f5a623; }
+.ctx-foot.warn #token-text { color: #f5c877; }
+.ctx-foot.danger .donut-segment { stroke: #ff6b6b; }
+.ctx-foot.danger #token-text { color: #ffb3b3; }
+
+/* jump-to-latest pill, shown only when scrolled away from the live end */
+.to-bottom {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  /* --kb as well as the dock height: the pill floats just above the composer,
+     and the composer lifts over the keyboard. Without it the pill stays at the
+     bottom of the screen, behind the keys. */
+  bottom: calc(var(--dock-h, 84px) + var(--kb, 0px) + 10px); z-index: 4;
+  width: 38px; height: 38px; border-radius: 999px; font-size: 17px; line-height: 1;
+  color: #dbe3f5; background: var(--glass-strong); border: 1px solid var(--glass-brd);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  box-shadow: 0 6px 18px rgba(0,0,0,.4), var(--glass-hi);
+  animation: rise .18s ease;
+}
+.to-bottom:active { transform: translateX(-50%) scale(.93); }
+
+/* tool lines */
+.tool-line { align-self: stretch; max-width: 720px; width: 100%; margin: 0 auto; }
+.tool-head {
+  font-family: var(--mono); font-size: 12.5px; color: var(--muted);
+  padding: 7px 11px; background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi);
+  border-radius: var(--radius-sm); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tool-line.running .tool-head { border-color: var(--accent-dim); color: var(--accent); }
+.tool-out { display: none; }
+.tool-line.open .tool-out { display: block; }
+
+.status { align-self: flex-start; color: #cdd8ff; font-size: 13px; padding: 2px 8px; text-shadow: 0 1px 3px rgba(0,0,0,.55); animation: pulse 1.3s ease-in-out infinite; }
+
+@keyframes rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@keyframes pulse { 0%,100% { opacity: .55; } 50% { opacity: 1; } }
+
+/* ---------- composer ---------- */
+/* No box: the input pill + buttons float on the dock's gradient scrim. */
+.composer {
+  display: flex; gap: 8px; align-items: flex-end;
+  padding: 8px 12px 12px; background: none;
+  width: 100%; max-width: 720px; margin: 0 auto;
+}
+.composer textarea {
+  flex: 1; resize: none; background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi);
+  color: var(--text); border-radius: 20px; padding: 11px 15px; max-height: 160px; line-height: 1.4;
+}
+.composer textarea:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(122,162,255,.18); }
+.composer textarea:disabled { opacity: .6; }
+.send {
+  width: 42px; height: 42px; flex: none; border-radius: 50%;
+  background: linear-gradient(180deg, var(--accent), #6690f0); color: #0a0d14;
+  font-size: 15px; display: grid; place-items: center; box-shadow: 0 4px 14px rgba(60,96,190,.4);
+  transition: transform .12s ease, filter .12s;
+}
+.send:active { transform: scale(.94); }
+.send.stop { background: linear-gradient(180deg, #ff8a8a, var(--danger)); }
+.send:disabled { opacity: .5; }
+
+/* ---------- attach files ---------- */
+.attach-btn {
+  width: 42px; height: 42px; flex: none; border-radius: 50%; font-size: 22px; line-height: 1;
+  background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi);
+  color: var(--text); display: grid; place-items: center;
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+}
+.attach-btn:active { transform: scale(.94); }
+.attach-chips {
+  display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 14px 0;
+  width: 100%; max-width: 720px; margin: 0 auto;
+}
+/* Setting the gap under the composer, from the device. Sits at the top of the
+   dock so it rides up with it and stays visible while the keyboard is up —
+   which is the only time the bar it is measuring against exists. */
+.kb-calibrate {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 6px 14px; width: 100%; max-width: 720px; margin: 0 auto;
+}
+.kb-calibrate[hidden] { display: none; }
+.kb-calibrate button {
+  min-width: 44px; height: 34px; border-radius: 999px;
+  font-size: 17px; line-height: 1; color: #dbe3f5;
+  background: var(--glass-strong); border: 1px solid var(--glass-brd);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  box-shadow: var(--glass-hi);
+}
+.kb-calibrate .kb-cal-done { font-size: 13px; padding: 0 14px; }
+.kb-calibrate #kb-cal-val {
+  min-width: 56px; text-align: center; font-size: 13px; color: var(--text);
+  font-family: var(--mono);
+}
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%;
+  background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur);
+  border-radius: 999px; padding: 5px 6px 5px 11px; font-size: 12.5px; font-family: var(--mono);
+}
+.chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip button { width: 18px; height: 18px; flex: none; border-radius: 50%; color: var(--muted); background: rgba(255,255,255,.1); font-size: 12px; line-height: 1; display: grid; place-items: center; }
+.filepick-list { max-height: min(48vh, 420px); overflow-y: auto; margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
+.filepick-list .fp-item { padding: 11px 12px; border-radius: var(--radius-sm); font-family: var(--mono); font-size: 13px;
+  border: 1px solid transparent; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.filepick-list .fp-item:active { background: var(--glass); border-color: var(--glass-brd); }
+.filepick-list .fp-item.picked { background: var(--glass); border-color: var(--accent); }
+.filepick-list .fp-item.picked::before { content: "✓ "; color: var(--accent); }
+
+/* ---------- plan approval bar ---------- */
+.approve-bar {
+  align-self: stretch; max-width: 720px; width: 100%; margin: 4px auto 0;
+  display: flex; gap: 10px; animation: rise .18s ease;
+}
+.approve-bar button { flex: 1; border-radius: var(--radius-sm); padding: 12px; font-weight: 650; }
+.approve-bar .primary { background: linear-gradient(180deg, var(--accent), #6690f0); color: #0a0d14; }
+.approve-bar .ghost { background: var(--glass); border: 1px solid var(--glass-brd); box-shadow: var(--glass-hi); color: var(--text);
+  -webkit-backdrop-filter: var(--blur); backdrop-filter: var(--blur); }
+
+/* ---------- sheets / dialogs ---------- */
+.backdrop {
+  position: fixed; inset: 0; background: rgba(0,0,0,.4);
+  display: grid; place-items: end center; z-index: 40; animation: fade .15s ease;
+  padding: 0 0 var(--safe-b);
+}
+.backdrop[hidden] { display: none; }
+.dialog {
+  background: var(--glass-strong); -webkit-backdrop-filter: var(--blur-strong); backdrop-filter: var(--blur-strong);
+  border: 1px solid var(--glass-brd); border-bottom: none; box-shadow: var(--glass-hi), 0 -12px 40px rgba(0,0,0,.4);
+  border-radius: 22px 22px 0 0; width: 100%; max-width: 720px;
+  padding: 18px 18px calc(18px + var(--safe-b)); animation: rise .2s ease;
+  /* A grid item's default min-width is min-content, not 0, so a dialog holding
+     an unwrappable line -- a long file path, or a <pre> of committed content --
+     grew as wide as that line instead of scrolling it. On a phone that pushed
+     the confirm button clean off the right edge, so the sheet couldn't be
+     accepted at all. Let it shrink; the offenders below scroll or wrap. */
+  min-width: 0;
+}
+.dialog h3 { margin: 0 0 8px; font-size: 16px; }
+.mono { font-family: var(--mono); font-size: 13px; color: var(--accent); word-break: break-all; }
+/* overflow:auto only scrolls once the box is allowed to be narrower than its
+   content -- without min-width it just reports a huge min-content width and
+   widens everything above it. */
+.preview { max-height: 40vh; overflow: auto; margin-top: 10px; min-width: 0; }
+.dialog-actions { display: flex; gap: 10px; margin-top: 14px; }
+/* Same rule for flex items: min-width:auto would keep a long button label from
+   ever shrinking, which is the other way the actions row overflowed. */
+.dialog-actions button { flex: 1; min-width: 0; }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
+/* ---------- toast ---------- */
+.toast {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(78px + var(--kb, 0px) + max(0px, calc(var(--safe-b) - var(--kb, 0px))));
+  background: var(--glass-strong); -webkit-backdrop-filter: var(--blur-strong); backdrop-filter: var(--blur-strong);
+  border: 1px solid var(--glass-brd); color: var(--text);
+  padding: 9px 15px; border-radius: 999px; font-size: 13px; z-index: 50;
+  box-shadow: var(--glass-hi), 0 8px 24px rgba(0,0,0,.4); animation: rise .2s ease;
+}
+.toast[hidden] { display: none; }
+
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; } }
+
+/* ---------- pairing scanner ---------- */
+/* Scanning happens inside the app rather than by following a QR link: on iOS a
+   home-screen app has storage separate from the browser, so keys paired in
+   Safari never reach the installed app. */
+.scan-cta {
+  width: 100%; display: flex; align-items: center; justify-content: center; gap: 8px;
+  margin: 2px 0 6px;
+}
+.scan-or {
+  text-align: center; margin: 0 0 4px; opacity: .75;
+}
+.scan-backdrop {
+  position: fixed; inset: 0; z-index: 90; background: #000;
+  display: flex; align-items: center; justify-content: center;
+}
+.scan-backdrop[hidden] { display: none; }
+#scan-video {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; background: #000;
+}
+/* A window onto the middle of the frame, so people know where to aim. */
+.scan-frame {
+  position: relative; width: min(72vw, 320px); aspect-ratio: 1;
+  border: 2px solid rgba(255,255,255,.9); border-radius: 18px;
+  box-shadow: 0 0 0 100vmax rgba(0,0,0,.45);
+}
+.scan-bar {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  padding: 18px 18px calc(18px + var(--safe-b));
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  background: linear-gradient(to top, rgba(0,0,0,.75), transparent);
+}
+#scan-status {
+  margin: 0; text-align: center; color: #fff; font-size: 14px;
+  text-shadow: 0 1px 4px rgba(0,0,0,.8); max-width: 30ch;
+}
+.scan-bar .ghost { color: #fff; border-color: rgba(255,255,255,.4); }
+
+/* A steering message waiting to go in at the next step: present, but visibly
+   not yet part of the conversation. */
+.bubble.user.queued { opacity: .6; border-style: dashed; }
+.bubble.user.queued::after {
+  content: "queued"; display: block; margin-top: 4px;
+  font-size: 11px; letter-spacing: .04em; opacity: .8;
+}
+
+/* Diagnostics: the numbers this phone reports about its own screen. Small,
+   monospaced, and left alone by the theme — it is meant to be read off a
+   screenshot, not to look nice. */
+.diag {
+  white-space: pre; font-size: 11.5px; line-height: 1.45;
+  padding: 9px 11px; margin-bottom: 8px; border-radius: var(--radius-sm);
+  background: rgba(8, 10, 14, 0.55); border: 1px solid var(--glass-brd);
+  color: var(--text); overflow-x: auto;
+}
+
+/* ---- talking to it ----------------------------------------------------- */
+/* Deliberately a full sheet rather than a bar: a voice session is the whole
+   interaction while it lasts, and leaving the composer reachable underneath
+   invites typing at something that is listening. */
+.voice-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(8, 10, 16, 0.92);
+  display: flex; align-items: center; justify-content: center;
+  padding: calc(env(safe-area-inset-top) + 24px) 20px
+           calc(env(safe-area-inset-bottom) + 24px);
+}
+.voice-backdrop[hidden] { display: none; }
+.voice-sheet { width: 100%; max-width: 420px; text-align: center; }
+.voice-orb {
+  width: 116px; height: 116px; margin: 0 auto 22px; border-radius: 50%;
+  background: radial-gradient(circle at 50% 40%, #7aa2ff 0%, #3d5bd0 62%, #22306b 100%);
+  box-shadow: 0 0 40px rgba(122, 162, 255, 0.35);
+}
+/* Motion, not colour, carries the state: the orb is the only thing to look at
+   and the phone is often at arm's length or in a pocket. */
+.voice-orb.thinking { animation: voice-pulse 1.5s ease-in-out infinite; }
+.voice-orb.speaking { animation: voice-pulse 0.7s ease-in-out infinite; }
+@keyframes voice-pulse {
+  0%, 100% { transform: scale(1); opacity: 0.85; }
+  50% { transform: scale(1.07); opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .voice-orb.thinking, .voice-orb.speaking { animation: none; opacity: 1; }
+}
+.voice-status { font-size: 15px; color: var(--text, #e8ecf5); margin-bottom: 10px; }
+.voice-caption {
+  min-height: 3.4em; font-size: 15px; line-height: 1.45;
+  color: var(--muted, #9aa4bd); overflow-y: auto; max-height: 40vh;
+}
+.voice-actions { display: flex; gap: 10px; justify-content: center; margin-top: 22px; }
+.voice-actions .btn { min-width: 104px; }
+.voice-btn { font-size: 17px; }
+/* Present but not usable. Hiding it entirely was the old behaviour, and a
+   feature that ships and then makes itself invisible cannot be told apart
+   from one that never arrived. */
+.voice-btn.unavailable { opacity: 0.35; }
+
+/* ---- which API, at setup ---------------------------------------------- */
+/* Chips rather than a dropdown: there are three, the choice decides what the
+   rest of the screen asks for, and a closed <select> hides the fact that
+   there is a choice at all -- which is how the phone spent this long looking
+   like a z.ai-only app. */
+.api-presets { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 4px; }
+.api-preset {
+  flex: 0 0 auto; padding: 9px 14px; border-radius: 999px;
+  border: 1px solid var(--stroke, #2a3347); background: rgba(255, 255, 255, 0.04);
+  color: var(--text, #e8ecf5); font-size: 14px; font-weight: 600;
+  /* 44px is the smallest thing a thumb hits reliably. */
+  min-height: 44px;
+}
+.api-preset.on {
+  border-color: var(--accent, #7aa2ff); color: var(--accent, #7aa2ff);
+  background: rgba(122, 162, 255, 0.12);
+}

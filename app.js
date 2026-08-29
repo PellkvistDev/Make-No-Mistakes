@@ -1,0 +1,4069 @@
+/* Make No Mistakes — mobile browser glue.
+ *
+ * This is the only DOM-touching layer. All crypto, GitHub, model, and agent
+ * logic lives in agent-core.js (AgentCore), which is unit-tested in Node.
+ *
+ * SECURITY posture enforced here:
+ *  - The vault (keys) is persisted only as ciphertext; the decrypted secrets
+ *    live in memory while unlocked. The conversation is persisted encrypted
+ *    under the vault key. "Keep me signed in" (opt-in) remembers the key.
+ *  - The app auto-locks after a configurable idle timeout (not on every
+ *    backgrounding); it saves the session when hidden.
+ *  - Every write is routed through a modal confirm dialog by default.
+ */
+(function () {
+  "use strict";
+  const AC = window.AgentCore;
+  const $ = (id) => document.getElementById(id);
+  const VAULT_KEY = "mnm.vault.v1";
+  const SESSION_KEY = "mnm.session.v1";  // encrypted conversation (under the vault key)
+  const KEEPKEY_KEY = "mnm.key.v1";      // remembered key for "keep me signed in"
+  const SYNCPASS_KEY = "mnm.syncpass.v1"; // sync passphrase, encrypted under the vault key
+  const DEVICEID_KEY = "mnm.deviceid.v1"; // random id identifying this phone for cross-device locks
+  const DEVICE_LABEL = "phone";
+
+  // In-memory session (cleared on lock). Secrets/keys never persisted unless
+  // "keep me signed in" is on; the conversation is persisted encrypted.
+  let session = null; // { secrets, cryptoKey, pin, vaultSalt, gh, model, repo, messages, transcript }
+  let currentRun = null; // { stop }
+  let stopFlag = false;  // shared stop signal (main turn + sub-agents)
+  let composing = false; // true while building a message (may call the vision model)
+
+  // ---------------------------------------------------------------- screens
+  const SCREENS = ["screen-setup", "screen-unlock", "screen-repo", "screen-chats", "screen-chat"];
+  function show(id) {
+    for (const s of SCREENS) $(s).hidden = s !== id;
+    if (id === "screen-chat") {
+      requestAnimationFrame(fitMessages);
+      // Here rather than only when Settings opens: whether talking is possible
+      // depends on which APIs are configured, and pairing can add one at any
+      // time -- including on the launch that first reaches this screen.
+      refreshVoiceButton();
+    }
+  }
+  // Pad the scroll area so content clears the (overlaid) top bar and bottom dock,
+  // which vary with the safe areas, the growing textarea, and attachment chips.
+  /** How far the message list is from its own bottom, in px. */
+  function distanceFromBottom() {
+    const msgs = $("messages");
+    return msgs ? msgs.scrollHeight - msgs.scrollTop - msgs.clientHeight : 0;
+  }
+
+  // `wasNear` lets the caller decide from a measurement taken EARLIER. The
+  // keyboard needs that: --kb grows this list's bottom padding by the height of
+  // the keyboard, so by the time this runs, someone sitting at the very bottom
+  // measures as ~344px away from it and the check below says "not near". The
+  // result was the last message sliding out of view exactly when you tapped the
+  // composer to reply to it.
+  function fitMessages(wasNear) {
+    const bar = document.querySelector("#screen-chat .bar");
+    const dock = $("composer-dock");
+    const msgs = $("messages");
+    if (!bar || !dock || !msgs || $("screen-chat").hidden) return;
+    const near = wasNear === undefined ? distanceFromBottom() < 80 : wasNear;
+    msgs.style.paddingTop = (bar.offsetHeight + 6) + "px";
+    // The bottom padding is NOT set here. It is a calc in the stylesheet over
+    // --dock-h and --kb, so it cannot fall out of step with the keyboard on an
+    // event this function does not run on — which is how a keyboard's worth of
+    // chat came to sit under the composer.
+    // --dock-h is published for it, and for the jump-to-latest pill: the dock
+    // grows with the textarea and the attachment chips.
+    $("screen-chat").style.setProperty("--dock-h", dock.offsetHeight + "px");
+    if (near) msgs.scrollTop = msgs.scrollHeight;
+  }
+  window.addEventListener("resize", fitMessages);
+  window.addEventListener("orientationchange", () => setTimeout(fitMessages, 200));
+
+  // How much of the screen the on-screen keyboard covers, published as --kb so
+  // the composer can lift itself over it.
+  //
+  // The document is locked (html/body are fixed and overflow:hidden), which is
+  // what stops iOS shoving the whole UI — wallpaper and all — up off the
+  // screen to reveal the focused field. The cost of locking it is that nothing
+  // moves out of the keyboard's way on its own any more, so measure it here
+  // instead. visualViewport is the only thing that reports this: on iOS the
+  // layout viewport does not change when the keyboard opens, only the visual
+  // one shrinks.
+  // <html> is deliberately taller than the viewport (see style.css: it is what
+  // lets the canvas background paint the strip of screen below the shifted
+  // layout viewport in an installed iOS PWA). That height is scrollable, and
+  // overflow:hidden on the root does NOT reliably stop it — Chromium still
+  // honours a programmatic scroll, and iOS scrolls the document by itself to
+  // reveal a focused field. Either way the whole UI slides up. So put it back.
+  function pinDocument() {
+    if (window.scrollY || document.documentElement.scrollTop) window.scrollTo(0, 0);
+  }
+  window.addEventListener("scroll", pinDocument, { passive: true });
+
+  // WHAT ACTUALLY MOVES WHEN A FIELD IS FOCUSED.
+  //
+  // The flash on focus — the UI shoved up and snapped back — was attributed
+  // twice to a mechanism nothing had measured. So this samples instead, and on
+  // an iPhone 15 Pro it answered: scrollY 0, visual top 0, html height 59 —
+  // exactly --safe-t, i.e. the rule that shrank <html> on focus. That rule is
+  // gone (see style.css) and the sampler stays, because it is the only thing
+  // that can tell whether removing it traded the flash for a scroll.
+  //
+  // So measure. There are only three candidates, and they need different
+  // fixes, so telling them apart is the whole job:
+  //   scrollY — the document scrolled. A scroll listener can undo this.
+  //   vv top  — iOS shifted the VISUAL viewport instead, which it does to
+  //             reveal a focused field when the document cannot scroll. No
+  //             scroll handler touches this one.
+  //   html Δh — <html>'s own box changed size, which rescales anything painted
+  //             into it.
+  // Sample from focusin across the keyboard animation and keep the largest of
+  // each. Reported in Settings next to the keyboard numbers.
+  let focusShove = null;
+  function watchFocusShove() {
+    const vv = window.visualViewport;
+    const t0 = performance.now();
+    const startH = document.documentElement.getBoundingClientRect().height;
+    const seen = { at: new Date().toLocaleTimeString(), scrollY: 0, vvTop: 0, htmlD: 0 };
+    const tick = () => {
+      seen.scrollY = Math.max(seen.scrollY,
+        window.scrollY || document.documentElement.scrollTop || 0);
+      if (vv) seen.vvTop = Math.max(seen.vvTop, vv.offsetTop || 0);
+      seen.htmlD = Math.max(seen.htmlD,
+        Math.abs(document.documentElement.getBoundingClientRect().height - startH));
+      if (performance.now() - t0 < 700) requestAnimationFrame(tick);
+      else focusShove = seen;
+    };
+    requestAnimationFrame(tick);
+  }
+
+  // No kb-open class any more, and so no focusout to take it off again: the
+  // document's height is left alone. pinDocument stays, as the backstop it
+  // always was — focusin fires before the keyboard animates in, which is when
+  // iOS would try to scroll if it were going to.
+  const TYPES = /^(input|textarea|select)$/i;
+  document.addEventListener("focusin", (e) => {
+    if (e.target && TYPES.test(e.target.tagName)) {
+      watchFocusShove();
+      pinDocument();
+    }
+  });
+
+  // The box a position:fixed element is actually laid out in. #app is
+  // position:fixed;inset:0, so its rect IS that containing block. Reported in
+  // diagnostics next to the named properties: if they ever disagree on a real
+  // device, that difference is the answer, and no desktop browser will show it.
+  function fixedBoxHeight() {
+    const app = document.getElementById("app");
+    const h = app ? app.getBoundingClientRect().height : 0;
+    return h || window.innerHeight || document.documentElement.clientHeight || 0;
+  }
+
+  // Every number that describes the keyboard, read at this instant.
+  function geometry() {
+    const vv = window.visualViewport;
+    const cs = getComputedStyle(document.documentElement);
+    const dock = document.getElementById("composer-dock");
+    const num = (v) => (v == null ? "?" : String(Math.round(v)));
+    // Which field this recording is about. Without it a reading is ambiguous:
+    // one came back with the dock's rect at 0/0 -- a zero rect means the
+    // element was not rendered at that instant -- and there was no way to tell
+    // whether the keyboard had been raised by the composer or by something in
+    // a sheet on top of it. A number you cannot attribute answers nothing.
+    const focused = document.activeElement;
+    const who = !focused || focused === document.body
+      ? "nothing"
+      : (focused.id || focused.tagName.toLowerCase()) +
+        (dock && dock.contains(focused) ? " (the composer)" : " (not the composer)");
+    return [
+      ["focused", who],
+      ["fixed box h", num(fixedBoxHeight())],
+      ["html h", num(document.documentElement.clientHeight)],
+      ["inner h", num(window.innerHeight)],
+      ["visual h", vv ? num(vv.height) : "no visualViewport"],
+      ["visual top", vv ? num(vv.offsetTop) : "-"],
+      ["--kb", cs.getPropertyValue("--kb").trim() || "0px"],
+      // Part of --kb whenever the keyboard is up, and the only part of it that
+      // is a stored choice rather than a measurement.
+      ["accessory allowance", accessoryAllowance() + "px"],
+      ["--safe-t", cs.getPropertyValue("--safe-t").trim() || "0px"],
+      ["--safe-b", cs.getPropertyValue("--safe-b").trim() || "0px"],
+      ["dock bottom", num(dock && dock.getBoundingClientRect().bottom)],
+      ["dock top", num(dock && dock.getBoundingClientRect().top)],
+    ];
+  }
+
+  // ...and a copy of them from while the keyboard was actually up. A live
+  // readout in Settings cannot answer this: opening Settings takes focus off
+  // the composer, the keyboard drops, and every interesting value reverts
+  // before it can be read. So record at the moment the keyboard covers the
+  // screen and keep the last recording to read afterwards.
+  let kbPeak = null;
+
+  // How much room to leave for iOS's form accessory bar, on top of what the
+  // keyboard hides.
+  //
+  // No web API reports this bar -- not its height, not even its presence. It has
+  // now been guessed twice and shipped twice: 44px, which was reported as
+  // leaving the composer in mid-air, and 0, which leaves it hidden behind the
+  // bar. Guessing a third number and waiting for a screenshot is the same move
+  // again, so instead the number lives here, the device can change it, and the
+  // only moment it can be judged -- while the keyboard is actually up -- is when
+  // the control to change it is on screen. See the calibration strip.
+  //
+  // 44 is the documented height of the bar and so the default, but nothing here
+  // depends on that being right.
+  const KB_BAR_KEY = "mnm.kb.bar";
+  const KB_BAR_DEFAULT = 44;
+  const KB_BAR_MAX = 120;
+  function accessoryAllowance() {
+    const raw = localStorage.getItem(KB_BAR_KEY);
+    if (raw === null) return KB_BAR_DEFAULT;
+    const n = parseInt(raw, 10);
+    // A stored NaN would propagate into --kb and collapse the dock, so an
+    // unreadable value falls back rather than being trusted.
+    if (!Number.isFinite(n)) return KB_BAR_DEFAULT;
+    return Math.min(KB_BAR_MAX, Math.max(0, n));
+  }
+  function setAccessoryAllowance(px) {
+    const n = Math.min(KB_BAR_MAX, Math.max(0, Math.round(px)));
+    try { localStorage.setItem(KB_BAR_KEY, String(n)); } catch { /* private mode */ }
+    // Re-measure immediately: the keyboard is up while this is being adjusted,
+    // and visualViewport will not fire again on its own, so without this the
+    // composer would not move until the next time the keyboard changed size.
+    applyKeyboard();
+    paintCalibration();
+    return n;
+  }
+
+  // Assigned by trackKeyboard. Hoisted because the calibration control has to
+  // force a re-measure and would otherwise have no way to reach it.
+  let applyKeyboard = () => {};
+
+  function trackKeyboard() {
+    const vv = window.visualViewport;
+    if (!vv) return;                       // --kb stays 0; layout is unchanged
+    const apply = () => {
+      // Measured BEFORE --kb changes anything. Opening the keyboard adds its
+      // own height to the message list's bottom padding, which moves the
+      // bottom away from you; asking "were you at the bottom?" afterwards
+      // always answers no. See fitMessages.
+      const wasNear = distanceFromBottom() < 80;
+      // How much of the screen is hidden = (where the layout viewport ends)
+      // minus (where the visible area ends). The dock is position:fixed, so it
+      // is laid out against the LAYOUT viewport, and that is the reference this
+      // subtraction needs.
+      //
+      // window.innerHeight alone was wrong: in an installed iOS PWA it tracks
+      // the visual viewport, so it shrinks with the keyboard and the difference
+      // comes out ~0 — the dock never lifted at all. That was hidden until now
+      // because iOS was scrolling the whole document up to reveal the focused
+      // field, which put the composer on screen by accident; removing that
+      // shove is what exposed it.
+      //
+      // Taking the larger of the two references is right whichever one this
+      // engine keeps stable, and needs no per-platform guess.
+      //
+      // This subtraction says how much of the LAYOUT viewport is not visible.
+      // It does not say where iOS paints the form accessory bar (the prev/next
+      // chevrons and Done), and that is a separate question with a separate
+      // answer.
+      //
+      // An earlier version added 44px for that bar and it was taken out again,
+      // on this reasoning: the phone reported an 852px screen, a 59px top inset
+      // and a 449px visible viewport, so 852 - 449 - 59 = 344px hidden, "which
+      // is the keys AND that bar together". That inference does not hold. The
+      // accessory bar is a native view drawn OVER the web view; it does not
+      // shrink visualViewport at all. So 344 is what the keyboard hides, and
+      // the bar is painted across the bottom of the 449 that remains.
+      //
+      // Which is why the check used to confirm it -- "dock bottom 449 == visual
+      // h 449, flush" -- was measuring the wrong invariant. Sitting exactly at
+      // the bottom of the visible area is sitting underneath the bar. That is
+      // the reported symptom: the composer hidden behind the row with the
+      // checkmark, with --kb apparently correct.
+      const layoutH = Math.max(document.documentElement.clientHeight || 0,
+                               window.innerHeight || 0);
+      let covered = Math.max(0, layoutH - vv.height - vv.offsetTop);
+      // Ignore small deltas so a browser's collapsing address bar doesn't read
+      // as a keyboard.
+      if (covered <= 80) covered = 0;
+      // The bar's height is not reported by anything, and the two failures so
+      // far were a hardcoded 44 that looked too high and a 0 that is too low.
+      // So it is a stored number the device itself can settle, rather than a
+      // third guess shipped for a screenshot. See accessoryAllowance.
+      if (covered > 0) covered += accessoryAllowance();
+      document.documentElement.style.setProperty("--kb", covered + "px");
+      pinDocument();     // opening the keyboard is when iOS tries to scroll
+      fitMessages(wasNear);
+      // Read after the layout above, so the dock's rect reflects this --kb.
+      if (covered > 0) {
+        kbPeak = {
+          at: new Date().toLocaleTimeString(),
+          rows: geometry(),
+        };
+      }
+    };
+    applyKeyboard = apply;
+    vv.addEventListener("resize", apply);
+    vv.addEventListener("scroll", apply);
+    apply();
+  }
+  trackKeyboard();
+
+  // ------------------------------------------------------------- vault I/O
+  function loadVault() {
+    try { return JSON.parse(localStorage.getItem(VAULT_KEY) || "null"); }
+    catch { return null; }
+  }
+  function storeVault(blob) { localStorage.setItem(VAULT_KEY, JSON.stringify(blob)); }
+  function clearVault() { localStorage.removeItem(VAULT_KEY); }
+
+  // ------------------------------------------------------------- auto-lock
+  // Auto-lock is time-based and configurable (0 = never). We deliberately do
+  // NOT lock the moment the app is backgrounded — a quick trip to the Home
+  // Screen shouldn't kick you out. We save the session on hide (in case iOS
+  // discards the page) and, on return, lock only if we've been idle too long.
+  let idleTimer = null;
+  let lastActive = Date.now();
+  function autolockMs() {
+    const m = parseInt(pref("mnm.autolock", "15"), 10);   // minutes; 0/NaN = never
+    return (isNaN(m) || m <= 0) ? 0 : m * 60000;
+  }
+  function armIdle() {
+    lastActive = Date.now();
+    clearTimeout(idleTimer);
+    const ms = autolockMs();
+    if (session && ms) idleTimer = setTimeout(lock, ms);
+  }
+  function lock() {
+    if (currentRun) { try { currentRun.stop(); } catch {} currentRun = null; }
+    session = null;
+    clearTimeout(idleTimer);
+    $("in-unlock-pin").value = "";
+    show("screen-unlock");
+  }
+  // A light heartbeat, so a chat open on both devices notices the other within
+  // ~30s rather than only when you switch back to the app. One small index read
+  // per tick, skipped while hidden or mid-turn, so it barely costs anything.
+  const LIVE_POLL_MS = 30000;
+  setInterval(() => {
+    if (document.hidden || currentRun || composing) return;
+    refreshOpenChatFromSync();
+  }, LIVE_POLL_MS);
+
+  document.addEventListener("visibilitychange", async () => {
+    if (document.hidden) {
+      // The usual way this happens is starting a turn and THEN leaving, so
+      // sampling document.hidden once at the start would miss almost every
+      // real case.
+      if (currentRun) hiddenDuringRun = true;
+      if (session) persistSession();
+      return;
+    }
+    const ms = autolockMs();
+    if (session && ms && Date.now() - lastActive > ms) { lock(); return; }
+    armIdle();
+    // The screen lock is dropped whenever the page is hidden and does not come
+    // back on its own, so a turn still running needs a fresh one.
+    if (currentRun) keepScreenAwake();
+    // Back in the foreground and still unlocked: see if the desktop moved on.
+    // AWAITED, and before the resume below. The desktop may have finished this
+    // very turn while the phone was away, and starting it again here would run
+    // it twice -- two sets of tool calls, two commits, and each device holding
+    // a history the other has never seen.
+    if (session) await refreshOpenChatFromSync();
+    resumeInterruptedTurn();
+  });
+  ["pointerdown", "keydown"].forEach((ev) => document.addEventListener(ev, armIdle, { passive: true }));
+
+  // ---------------------------------------------------------------- toast
+  let toastTimer = null;
+  function toast(msg) {
+    const t = $("toast");
+    t.textContent = msg; t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { t.hidden = true; }, 2600);
+  }
+
+  // Build a model client that shows a status while the free model is rate-limited.
+  function onModelRetry(attempt, waitMs) {
+    setStatus("model busy — retrying in " + Math.round(waitMs / 1000) + "s… (" + attempt + "/3)");
+  }
+  function newModel(modelName) {
+    // The chosen provider, falling back to what pairing set up. Both the key
+    // and the URL come from the same entry -- taking the key from one provider
+    // and the URL from another is how a key reaches an endpoint that never
+    // issued it.
+    const p = currentProvider();
+    const apiKey = (p && p.key) || session.secrets.modelKey;
+    const baseUrl = (p && p.baseUrl) || session.secrets.baseUrl;
+    return AC.makeModel({ apiKey, model: modelName, baseUrl, onRetry: onModelRetry });
+  }
+
+  // ================================================================ SETUP
+  // Which API, chosen first, because it decides the endpoint, the model names
+  // and where the key comes from. Drawn from the shared catalogue rather than
+  // written into the markup, so the phone cannot drift from the desktop about
+  // what exists (tests/test_phone_presets.py pins the two).
+  let setupPresetKey = "";
+
+  function renderSetupPresets() {
+    const box = $("setup-presets");
+    if (!box) return;
+    box.innerHTML = "";
+    for (const p of AC.SETUP_PRESETS) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "api-preset" + (p.key === setupPresetKey ? " on" : "");
+      b.textContent = p.label;
+      b.addEventListener("click", () => chooseSetupPreset(p.key));
+      box.appendChild(b);
+    }
+  }
+
+  function chooseSetupPreset(key) {
+    const p = AC.setupPreset(key);
+    if (!p) return;
+    setupPresetKey = key;
+    const custom = key === "custom";
+    $("setup-preset-note").textContent = p.note || "";
+    // Typed in by hand: the endpoint and the model are the whole point, so
+    // they become fields rather than a menu of things this app happens to know.
+    $("setup-url-field").hidden = !custom;
+    $("in-model-pick").hidden = custom;
+    $("in-model").hidden = !custom;
+    if (custom) {
+      // Cleared, not left as a starting point. Switching away from a preset
+      // used to keep its URL in the now-visible box, so you could type your
+      // own model while still pointing at the preset's endpoint -- and the
+      // screen looked like it was asking you to fill in something it had
+      // already decided.
+      $("in-base-url").value = "";
+      $("in-model").value = "";
+    } else {
+      $("in-base-url").value = p.baseUrl;
+      $("in-model-pick").innerHTML = p.models
+        .map((m) => `<option${m === p.model ? " selected" : ""}>${m}</option>`).join("");
+    }
+    const link = $("setup-key-link");
+    // Hidden rather than left pointing nowhere: "get one at the provider's
+    // console" is not help when the app does not know which console.
+    link.parentElement.hidden = !p.keyUrl;
+    if (p.keyUrl) {
+      link.href = p.keyUrl;
+      link.textContent = p.label;
+    }
+    renderSetupPresets();
+  }
+
+  // What the model box actually holds, whichever of the two is showing.
+  function setupModelValue() {
+    return (setupPresetKey === "custom"
+      ? $("in-model").value : $("in-model-pick").value || "").trim();
+  }
+
+  $("btn-save-setup").addEventListener("click", async () => {
+    const err = $("setup-error"); err.textContent = "";
+    const modelKey = $("in-model-key").value.trim();
+    const model = setupModelValue();
+    const baseUrl = $("in-base-url").value.trim().replace(/\/+$/, "");
+    const githubToken = $("in-gh-token").value.trim();
+    const pin = $("in-pin").value, pin2 = $("in-pin2").value;
+    if (!modelKey || !githubToken) return (err.textContent = "Model key and GitHub token are both required.");
+    // Said here rather than failing on the first message with an error about
+    // the key, which is what an empty endpoint produces.
+    if (!baseUrl) return (err.textContent = "Pick an API, or paste a base URL.");
+    if (!model) return (err.textContent = "Pick or type a model.");
+    if (pin.length < 4) return (err.textContent = "PIN must be at least 4 characters.");
+    if (pin !== pin2) return (err.textContent = "PINs don't match.");
+    try {
+      const secrets = { modelKey, model, baseUrl, githubToken };
+      const blob = await AC.encryptVault(secrets, pin);
+      storeVault(blob);
+      // The choice made on this screen, recorded where the app reads it back
+      // from. It used to go only into the vault, which the model resolver
+      // consulted LAST -- so on a phone that was also paired, the desktop
+      // provider's first model replaced it before the first message.
+      localStorage.setItem("mnm.model", model);
+      clearSession();  // a fresh setup starts a fresh session
+      const salt = AC._b64.b64ToBytes(blob.salt);
+      const key = await AC.deriveKey(pin, salt, keepSignedIn());
+      await finishUnlock(secrets, key, pin, salt);
+    } catch (e) { err.textContent = e.message || String(e); }
+  });
+
+  // ================================================================ UNLOCK
+  $("btn-unlock").addEventListener("click", doUnlock);
+  $("in-unlock-pin").addEventListener("keydown", (e) => { if (e.key === "Enter") doUnlock(); });
+  async function doUnlock() {
+    const err = $("unlock-error"); err.textContent = "";
+    const pin = $("in-unlock-pin").value;
+    const blob = loadVault();
+    if (!blob) return show("screen-setup");
+    try {
+      const secrets = await AC.decryptVault(blob, pin);   // verifies the PIN
+      const salt = AC._b64.b64ToBytes(blob.salt);
+      const key = await AC.deriveKey(pin, salt, keepSignedIn());
+      await finishUnlock(secrets, key, pin, salt);
+    } catch (e) { err.textContent = "Wrong PIN."; }
+  }
+  $("btn-reset").addEventListener("click", () => {
+    if (confirm("Erase your encrypted keys and saved session from this device? You'll re-enter your keys.")) {
+      clearVault(); clearSession(); localStorage.removeItem(KEEPKEY_KEY); session = null; show("screen-setup");
+    }
+  });
+
+  // Finish unlocking: cache the key, honour "keep me signed in", and resume the
+  // saved conversation if there is one. Otherwise: sync users land on the chat
+  // hub (every chat, every repo — the phone's equivalent of the desktop
+  // sidebar); without sync there's no hub to show, so it's the repo picker.
+  async function finishUnlock(secrets, key, pin, salt) {
+    session = { secrets, cryptoKey: key, pin: pin || null, vaultSalt: salt || null };
+    // A pairing that arrived while this device was locked. Applied now that
+    // there is a vault key to re-seal with, and before the session model is
+    // built below so it picks up whatever key just arrived.
+    if (pendingPairToken) {
+      const token = pendingPairToken;
+      pendingPairToken = "";
+      try { await applyPairToken(token); } catch (e) { /* said in there */ }
+    }
+    session.model = newModel(getModelName());
+    armIdle();
+    if (keepSignedIn()) { try { localStorage.setItem(KEEPKEY_KEY, await AC.exportRawKey(key)); } catch {} }
+    else localStorage.removeItem(KEEPKEY_KEY);
+    // A passphrase that came over from the desktop can only be stored now: it
+    // is kept encrypted under the vault key, which didn't exist until the PIN
+    // was set. Doing it here is what makes "install the app" and "share your
+    // chats" one act instead of two.
+    if (pendingSyncPass) {
+      try {
+        await storeSyncPass(pendingSyncPass);
+        localStorage.setItem("mnm.sync", "1");
+        toast("Your chats will sync with your computer.");
+      } catch (e) { toast("Couldn't turn on sync — set the passphrase in Settings."); }
+      pendingSyncPass = "";
+    }
+    if (await tryRestoreSession()) return;
+    if (syncOn() && hasSyncPass()) await enterChatList();
+    else await enterRepoPicker();
+  }
+
+  // ------------------------------------------------------- session persistence
+  function keepSignedIn() { return pref("mnm.keepsignedin", "0") === "1"; }
+  function clearSession() { localStorage.removeItem(SESSION_KEY); }
+  // Drop bulky image data URLs from saved history (keep the flow, not the bytes).
+  function stripImages(messages) {
+    return messages.map((m) => Array.isArray(m.content)
+      ? Object.assign({}, m, { content: m.content.map((c) => c.type === "image_url" ? { type: "text", text: "[image omitted from saved history]" } : c) })
+      : m);
+  }
+  async function persistSession() {
+    if (!session || !session.repo || !session.cryptoKey) return;
+    // session.repo is still whatever was connected before a read-only chat was
+    // opened, so the guard above doesn't catch this: persisting here would
+    // write the read-only chat's empty message list over the restorable one.
+    if (session.readOnly) return;
+    try {
+      const blob = await AC.aesEncrypt({
+        repo: session.repo, baseSystem: session.baseSystem,
+        chatId: session.chatId || null, chatTitle: session.chatTitle || "",
+        messages: stripImages(session.messages || []), transcript: session.transcript || [],
+        pending: session.pending || [],
+        // Carried so a turn cut off by the app being killed outright -- not
+        // merely backgrounded -- is still picked up on the next launch.
+        interrupted: !!session.interrupted,
+        // Where this chat started, so review_changes still has something to
+        // diff against after the app has been killed -- which on a phone is
+        // the ordinary way a chat ends, not an unusual one.
+        baseRef: session.baseRef || null,
+      }, session.cryptoKey);
+      localStorage.setItem(SESSION_KEY, JSON.stringify(blob));
+    } catch (e) { /* quota / crypto — skip silently */ }
+  }
+  async function tryRestoreSession() {
+    const raw = localStorage.getItem(SESSION_KEY);
+    if (!raw) return false;
+    let data;
+    try { data = await AC.aesDecrypt(JSON.parse(raw), session.cryptoKey); }
+    catch { return false; }
+    if (!data || !data.repo || !Array.isArray(data.messages)) return false;
+    const r = data.repo;
+    connectRepo(r.owner, r.repo, r.branch, r.full_name, r.default_branch);
+    if (data.baseSystem) session.baseSystem = data.baseSystem;
+    session.chatId = data.chatId || newChatId();
+    session.chatTitle = data.chatTitle || "";
+    session.messages = data.messages;
+    session.transcript = data.transcript || [];
+    session.pending = data.pending || [];
+    session.interrupted = !!data.interrupted;
+    // Restored rather than re-taken: re-taking it would silently move the
+    // starting point to wherever the branch is NOW, so everything committed
+    // before the app was killed would stop showing up in review_changes.
+    // A chat saved by a build that did not record one starts recording here,
+    // and then says "from now on" rather than claiming a base it does not
+    // have. AFTER chatId is set, because markBaseRef checks on the way back
+    // that it is still the same chat.
+    session.baseRef = data.baseRef || null;
+    if (!session.baseRef) markBaseRef();
+    renderRepoLabel();
+    $("messages").innerHTML = "";
+    for (const b of session.transcript) addBubble(b.role, b.text, false);
+    addBubble("system", "Resumed your session in " + r.full_name + ".", false);
+    show("screen-chat");
+    // After the screen is up, so the turn's output has somewhere to land.
+    resumeInterruptedTurn();
+    return true;
+  }
+
+  // ================================================================ REPO PICKER
+  // Reached either as the first screen after unlock (sync off — nothing else to
+  // show) or via "＋ New chat" from the hub (sync on — picking/creating a repo
+  // here always starts a FRESH chat; existing ones are resumed from the hub).
+  let repoCache = [];
+  async function enterRepoPicker() {
+    show("screen-repo");
+    $("btn-repo-back").hidden = !(syncOn() && hasSyncPass());
+    $("repo-error").textContent = "";
+    $("repo-whoami").textContent = "Loading account…";
+    const tmpGh = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+    try {
+      const me = await tmpGh.me();
+      $("repo-whoami").textContent = "Signed in as " + me.login;
+      session.login = me.login;
+    } catch (e) {
+      $("repo-whoami").textContent = "";
+      $("repo-error").textContent = "GitHub token rejected: " + friendlyGhError(e, "auth");
+      return;
+    }
+    await refreshRepos();
+  }
+  async function refreshRepos() {
+    const tmpGh = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+    try {
+      repoCache = await tmpGh.listRepos();
+      renderRepos();
+    } catch (e) { $("repo-error").textContent = friendlyGhError(e, "list"); }
+  }
+  function renderRepos() {
+    const filter = $("in-repo-filter").value.toLowerCase();
+    const ul = $("repo-list"); ul.innerHTML = "";
+    for (const r of repoCache.filter((r) => r.full_name.toLowerCase().includes(filter))) {
+      const li = document.createElement("li");
+      li.textContent = r.full_name;
+      li.addEventListener("click", () => openRepo(r.full_name, r.default_branch || "main"));
+      ul.appendChild(li);
+    }
+    if (!ul.children.length) ul.innerHTML = "<li class='muted'>no matching repos</li>";
+  }
+  $("in-repo-filter").addEventListener("input", renderRepos);
+  $("btn-repo-refresh").addEventListener("click", refreshRepos);
+  $("btn-repo-lock").addEventListener("click", lock);
+  $("btn-repo-back").addEventListener("click", () => { if (!currentRun) enterChatList(); });
+  $("btn-create-repo").addEventListener("click", async () => {
+    const name = $("in-new-repo").value.trim();
+    if (!name) return;
+    $("repo-error").textContent = "";
+    const tmpGh = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+    try {
+      const created = await tmpGh.createRepo(name, $("in-new-private").checked);
+      openRepo(created.full_name, created.default_branch || "main");
+    } catch (e) { $("repo-error").textContent = friendlyGhError(e, "create"); }
+  });
+
+  // Turn raw GitHub API errors into something actionable on a phone.
+  function friendlyGhError(e, action) {
+    const m = (e && e.message) || String(e);
+    if (/not accessible by personal access token|Resource not accessible/i.test(m)) {
+      if (action === "create") {
+        return "Your token isn't allowed to create repos. In its GitHub settings give it " +
+          "Repository access: All repositories, and Permissions → Administration: Read and write " +
+          "(keep Contents: Read and write). Or create the repo on GitHub and open it from the list above.";
+      }
+      return "Your token doesn't have permission for that. Check its repository access and permissions in GitHub settings.";
+    }
+    if (/^GitHub 401/.test(m)) return "GitHub rejected the token (401). It may be expired — create a new fine-grained token.";
+    if (/^GitHub 404/.test(m)) return "Not found (404). The token may not have access to that repository.";
+    return m;
+  }
+
+  // Point this chat's GitHub client at a branch, and rebuild everything that
+  // hangs off it. Split out of connectRepo because switching branches MID-CHAT
+  // must not do what connecting a repo does: the conversation, the transcript
+  // and the notes left for the desktop all belong to the chat, not to the
+  // branch it happens to be committing to.
+  //
+  // The tools are rebuilt rather than re-pointed, and that is the whole reason
+  // this is not a one-line assignment: makeTools keeps a path -> contents cache,
+  // and a cache carried across a branch switch is the worst possible kind of
+  // wrong. Reads would SUCCEED and hand back the other branch's text.
+  function bindBranch(branch) {
+    const { owner, repo, full_name, default_branch } = session.repo;
+    session.repo = { owner, repo, branch, full_name,
+                     default_branch: default_branch || branch };
+    session.gh = AC.makeGitHub({ token: session.secrets.githubToken, owner, repo, branch });
+    session.baseSystem = AC.SYSTEM_PROMPT + "\n\nRepository: " + full_name + " (branch " + branch + ").";
+    if (session.messages && session.messages[0] && session.messages[0].role === "system") {
+      session.messages[0] = { role: "system", content: session.baseSystem };
+    }
+    // Where THIS branch started, so review_changes diffs against the branch
+    // point rather than against wherever the chat began on another branch.
+    session.baseRef = null;
+    markBaseRef();
+    const onCommit = (p) => { session.turnCommits = (session.turnCommits || 0) + 1; toast("committed " + p); haptic(18); };
+    // Passed as a getter rather than a value: it is resolved in the background
+    // (markBaseRef) and a chat is usable before it lands. Reading it at call
+    // time is what makes review_changes work on the first turn.
+    const baseRef = () => session.baseRef;
+    // Persisted immediately, not at the end of the turn: the branch is where
+    // every subsequent commit goes, and a reload that came back on the old one
+    // would carry on writing to it.
+    const switchBranch = async (name) => {
+      bindBranch(name);
+      toast("on " + name);
+      haptic(12);
+      addBubble("system", "🌿 Now working on branch " + name + ".", false);
+      await persistSession();
+    };
+    // Sub-agent tools have NO spawn (depth 1); the main tools add spawn_agent.
+    // Sub-agents get no branch tools either: one of them moving the chat onto
+    // another branch underneath the agent that dispatched it is not something
+    // that conversation could recover from.
+    session.subTools = AC.makeTools(session.gh, { confirmWrite, onCommit, viewImage, needsDesktop, baseRef });
+    session.tools = AC.makeTools(session.gh, {
+      confirmWrite, onCommit, spawn: runSubAgent, viewImage, needsDesktop, baseRef, switchBranch });
+    session.readTools = {};
+    for (const n of READ_TOOL_NAMES) session.readTools[n] = session.tools[n];
+    session.readTools.view_image = session.tools.view_image;   // let planning look at images too
+    renderRepoLabel();
+  }
+
+  // The header names the branch whenever it is not the repo's default, because
+  // on this device that is where every edit is being committed -- silently, as
+  // it is made. Three places used to write this label; they all call this now,
+  // or one of them shows the repo without the branch it is actually on.
+  function renderRepoLabel() {
+    const r = session.repo || {};
+    const def = r.default_branch || "";
+    $("chat-repo-name").textContent =
+      (r.full_name || "") + (r.branch && r.branch !== def ? " · " + r.branch : "");
+  }
+
+  // Wire up the GitHub client + tools for a repo (shared by open and resume).
+  function connectRepo(owner, repo, branch, fullName, defaultBranch) {
+    // `default_branch` travels with the repo record rather than sitting beside
+    // it, so a chat restored from local storage or pulled from sync still
+    // knows which branch is the default -- and can therefore say when it is
+    // somewhere else, which on this device is where every edit is landing.
+    // Defaulted to the branch being opened, which is what it is when a repo is
+    // picked from the list.
+    session.repo = { owner, repo, branch, full_name: fullName,
+                     default_branch: defaultBranch || branch };
+    session.turnCommits = 0;
+    session.images = {};   // name -> data URL, for view_image
+    session.compact = null;  // cached summary of trimmed turns, per conversation
+    session.toldCompact = false;
+    session.pending = [];    // work parked for the desktop, per conversation
+    session.carry = {};      // nothing to carry: this chat starts here
+    session.readOnly = false;
+    applyReadOnlyChrome(false);
+    session.transcript = [];
+    bindBranch(branch);
+    clearAttachments();
+  }
+
+  // Picking (or creating) a repo always starts a FRESH chat — resuming an
+  // existing one happens from the hub, never by re-picking its repo. The sync
+  // store is central (one repo, independent of the project), so it stays
+  // cached across this switch instead of being re-derived from GitHub again.
+  async function openRepo(fullName, branch) {
+    const [owner, repo] = fullName.split("/");
+    connectRepo(owner, repo, branch, fullName);
+    startNewChat();
+  }
+  // "Back" from an open chat: to the hub if sync can show one, else the repo
+  // picker (sync off has no hub — that IS the top-level screen).
+  $("btn-back-repo").addEventListener("click", () => {
+    if (currentRun) return;
+    if (syncOn() && hasSyncPass()) enterChatList(); else enterRepoPicker();
+  });
+  $("btn-chat-lock").addEventListener("click", lock);
+
+  // Where this chat started, so review_changes has something to diff against.
+  // Fired and not awaited: it is one API call, and holding up a new chat for a
+  // tool that may never be used is the wrong trade. The chat id is checked on
+  // the way back because the user can open a different chat in the meantime,
+  // and a starting point from the wrong conversation is worse than none.
+  function markBaseRef() {
+    const gh = session.gh, chat = session.chatId;
+    if (!gh) return;
+    gh.branchSha().then((sha) => {
+      if (sha && session.chatId === chat && !session.baseRef) session.baseRef = sha;
+    }).catch(() => {});
+  }
+
+  // Start a brand-new chat in the connected repo.
+  function startNewChat() {
+    session.chatId = newChatId();
+    session.chatTitle = "";
+    session.messages = [{ role: "system", content: session.baseSystem }];
+    session.transcript = [];
+    session.images = {};
+    session.compact = null;
+    session.toldCompact = false;
+    session.pending = [];
+    session.carry = {};      // a fresh chat owns all of its own fields
+    session.baseRef = null;
+    markBaseRef();
+    session.readOnly = false;
+    applyReadOnlyChrome(false);
+    clearAttachments();
+    renderRepoLabel();
+    $("messages").innerHTML = "";
+    addBubble("system", "Connected to " + session.repo.full_name + ". I can read, search, and edit files here — each edit is committed. I can't run code on the phone; that happens when your desktop syncs or via CI.");
+    show("screen-chat");
+    renderContextMeter();
+    persistSession();
+    // Don't sync an empty chat — the first real save happens after a turn, so
+    // the history list never fills with blank "New chat" entries.
+  }
+  function newChatId() {
+    try { if (crypto.randomUUID) return crypto.randomUUID(); } catch {}
+    return "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  }
+
+  // ================================================================ SESSION SYNC
+  // Opt-in cross-device sync. Chats live encrypted on the repo's orphan state
+  // branch (AgentCore.openSync / makeSyncStore), keyed by a SYNC PASSPHRASE that
+  // is separate from the PIN. The passphrase is stored on-device only as
+  // ciphertext under the vault key, so it survives launches (behind the PIN)
+  // without ever being written in plain text or sent to GitHub.
+  function syncOn() { return pref("mnm.sync", "0") === "1"; }
+  function hasSyncPass() { return !!localStorage.getItem(SYNCPASS_KEY); }
+  async function getSyncPass() {
+    const raw = localStorage.getItem(SYNCPASS_KEY);
+    if (!raw || !session || !session.cryptoKey) return null;
+    try { return await AC.aesDecrypt(JSON.parse(raw), session.cryptoKey); }
+    catch { return null; }
+  }
+  async function storeSyncPass(pass) {
+    const blob = await AC.aesEncrypt(pass, session.cryptoKey);
+    localStorage.setItem(SYNCPASS_KEY, JSON.stringify(blob));
+  }
+  // Open the ONE central sync store for a given passphrase. Independent of any
+  // connected repo — every chat, from every project, lives here. The single
+  // path both "unlock the store for use" and "verify a passphrase before
+  // saving it" go through, so there's exactly one place that can get the
+  // target repo wrong.
+  async function openCentralSync(passphrase) {
+    const api = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+    const { owner, repo } = await AC.ensureSyncRepo(api);
+    const syncGh = AC.makeGitHub({ token: session.secrets.githubToken,
+      owner, repo, branch: AC.SYNC_REPO_BRANCH });
+    return AC.openSync(syncGh, passphrase);
+  }
+  // Lazily open (and cache) the store using the saved passphrase.
+  async function ensureSyncStore() {
+    if (!syncOn() || !session) return null;
+    if (session.syncStore) return session.syncStore;
+    const pass = await getSyncPass();
+    if (!pass) return null;
+    const { store } = await openCentralSync(pass);
+    session.syncStore = store;
+    return store;
+  }
+  function deriveTitle() {
+    const firstUser = (session.transcript || []).find((b) => b.role === "user");
+    const t = ((firstUser && firstUser.text) || "").replace(/\n+/g, " ").trim();
+    return t ? t.slice(0, 48) : "New chat";
+  }
+  function lastPreview() {
+    const t = session.transcript || [];
+    const last = t[t.length - 1];
+    return ((last && last.text) || "").replace(/\n+/g, " ").trim().slice(0, 80);
+  }
+  // Persist the current chat to the sync store (best-effort; the local copy is
+  // always saved regardless, so an offline/rate-limited push loses nothing).
+  async function syncSave() {
+    if (!syncOn() || !session || !session.chatId) return;
+    // A read-only chat has no turns to save, and this payload would claim it
+    // for the phone and drop the fields the desktop owns. Notes left here go
+    // through parkNoteForDesktop, which writes only `pending`.
+    if (session.readOnly) return;
+    let store;
+    try { store = await ensureSyncStore(); } catch (e) { return; }
+    if (!store) return;
+    try {
+      session.chatTitle = session.chatTitle || deriveTitle();
+      // save() replaces the whole chat object, so anything this device does
+      // not send is destroyed. The desktop keeps its working directory, todos
+      // and model choice under `desktop`, and its checkout state under
+      // `repo_state`; none of that is the phone's to author, and dropping it
+      // meant a desktop chat lost its cwd the moment the phone answered in it.
+      // Carry the untouched fields back out exactly as they came in.
+      const carry = session.carry || {};
+      session.syncedAt = await store.save(Object.assign({}, carry, {
+        id: session.chatId, title: session.chatTitle, preview: lastPreview(),
+        repo: session.repo,
+        // The project label belongs to whoever owns the chat's repo. Only
+        // claim it when this chat has no label yet, so answering from the
+        // phone can't relabel a desktop chat to a repo name.
+        project: carry.project || (session.repo && session.repo.full_name) || "",
+        device: "phone",
+        pending: session.pending || [],
+        // Published, not just kept locally: this is what lets a machine that
+        // the OS cannot suspend finish a turn this one was stopped part-way
+        // through. Sent explicitly every time, because the store merges and an
+        // absent field means "nothing to say" -- omitting it once the turn had
+        // finished would leave the last True standing.
+        interrupted: !!session.interrupted,
+        base_ref: session.baseRef || carry.base_ref || "",
+        messages: stripImages(session.messages || []),
+        transcript: session.transcript || [],
+      }));
+    } catch (e) {
+      // Deleted on the other device while this one still had it open. Say so
+      // rather than retrying forever, and stop this chat re-uploading itself.
+      if (e && e.chatDeleted) {
+        session.chatId = null;
+        addBubble("system", "This chat was deleted on your other device. " +
+          "It won't be saved here — start a new one to keep going.", false);
+        return;
+      }
+      /* offline / rate-limited — keep the local copy */
+    }
+  }
+
+  // ---- catching up with the other device ----
+  // The point of sync is that you can put the phone down, keep working on the
+  // desktop, and pick the phone back up on the same conversation. So whenever
+  // the app comes back to the foreground, quietly check whether the open chat
+  // moved on elsewhere and adopt it. Never runs mid-turn, and never replaces
+  // local history with something shorter — losing a message you just sent would
+  // be far worse than being slightly behind.
+  async function refreshOpenChatFromSync() {
+    if (currentRun || composing) return;
+    if (!syncOn() || !session || !session.chatId) return;
+    if ($("screen-chat").hidden) return;
+    let store;
+    try { store = await ensureSyncStore(); } catch (e) { return; }
+    if (!store) return;
+    try {
+      const row = (await store.list()).find((c) => c.id === session.chatId);
+      if (!row || !row.updated || row.updated <= (session.syncedAt || 0)) return;
+      const data = await store.load(session.chatId);
+      if (!data || !Array.isArray(data.messages)) return;
+      session.syncedAt = row.updated;
+      // Taken before the length guard below. If another device finished the
+      // turn this phone abandoned, the news that it is no longer owed matters
+      // even when the history did not get longer -- otherwise the phone would
+      // resume a turn that has already been answered elsewhere.
+      if (Object.prototype.hasOwnProperty.call(data, "interrupted")) {
+        session.interrupted = !!data.interrupted;
+      }
+      if (data.messages.length <= (session.messages || []).length) return;
+      session.messages = data.messages;
+      session.transcript = data.transcript || [];
+      session.messages[0] = { role: "system", content: session.baseSystem };
+      session.messages = AC.applyHandoff(session.messages, data.device, DEVICE_LABEL);
+      $("messages").innerHTML = "";
+      noteDesktopWork(data.repo_state);
+      for (const b of session.transcript) addBubble(b.role, b.text, false);
+      addBubble("system", "Caught up with your " + (row.device || "other device") + ".", false);
+      scroll();
+      haptic(10);
+      persistSession();
+    } catch (e) { /* offline — keep what we have */ }
+  }
+
+  // ---- cross-device lock (same chat open on phone + desktop at once) ----
+  // A courtesy, not a guarantee: self-heals via TTL if a device disappears
+  // mid-turn, and never permanently blocks — see agent-core.js's
+  // DEVICE_LOCK_TTL_MS note and glmcode/syncstore.py for the desktop twin.
+  function deviceId() {
+    let id = localStorage.getItem(DEVICEID_KEY);
+    if (!id) {
+      try { id = crypto.randomUUID(); }
+      catch { id = "d" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10); }
+      localStorage.setItem(DEVICEID_KEY, id);
+    }
+    return id;
+  }
+  const chatLockHeartbeats = {}; // chatId -> setInterval id, for chats this device currently holds the lock on
+  function stopLockHeartbeat(chatId) {
+    const id = chatLockHeartbeats[chatId];
+    if (id) { clearInterval(id); delete chatLockHeartbeats[chatId]; }
+  }
+  function startLockHeartbeat(chatId, store) {
+    stopLockHeartbeat(chatId);
+    chatLockHeartbeats[chatId] = setInterval(async () => {
+      try {
+        const ok = await store.renewLock(chatId, deviceId(), DEVICE_LABEL);
+        if (!ok) { stopLockHeartbeat(chatId); addBubble("system", "Heads up: this chat is now also being used on another device."); }
+      } catch (e) { /* fail open — a transient error must not be misread as "preempted" */ }
+    }, AC.DEVICE_LOCK_HEARTBEAT_S * 1000);
+  }
+  // Returns null if the turn is free to proceed (sync off, no chat, lock
+  // acquired, or sync unreachable — fail open, since unreachable means the
+  // other device can't push either). Returns { locked, lockedBy, lockedSince }
+  // if another live device holds it and force wasn't set.
+  async function tryAcquireDeviceLock(chatId, force) {
+    if (!syncOn() || !chatId) return null;
+    let store;
+    try { store = await ensureSyncStore(); } catch (e) { return null; }
+    if (!store) return null;
+    try {
+      await store.acquireLock(chatId, deviceId(), DEVICE_LABEL, !!force);
+    } catch (e) {
+      if (e && e.lockedElsewhere) return { locked: true, lockedBy: e.deviceLabel, lockedSince: e.sinceMs };
+      return null;
+    }
+    startLockHeartbeat(chatId, store);
+    return null;
+  }
+  async function releaseDeviceLock(chatId) {
+    stopLockHeartbeat(chatId);
+    if (!syncOn() || !chatId) return;
+    let store;
+    try { store = await ensureSyncStore(); } catch (e) { return; }
+    if (!store) return;
+    try { await store.releaseLock(chatId, deviceId()); } catch (e) { /* best effort */ }
+  }
+  // The desktop publishes its git state with the chat. If it has work GitHub
+  // hasn't seen, both the user and the agent need to know: the files read here
+  // are older than that machine's, so editing them risks committing over it.
+  // Silent when GitHub really is the latest word, which is the common case.
+  function noteDesktopWork(repoState) {
+    const warn = AC.repoStateWarning(repoState, session.repo && session.repo.branch);
+    if (!warn) return;
+    session.messages.push({ role: "system", content: "[desktop-state] " + warn });
+    addBubble("system", "⚠︎ " + warn, false);
+  }
+
+  // Shows who holds the chat and lets the user override. Resolves true to
+  // retry with force=true, false to leave the composer restored and stop.
+  async function confirmLockOverride(lockResult) {
+    const mins = Math.max(1, Math.round((Date.now() - (lockResult.lockedSince || Date.now())) / 60000));
+    return confirm(
+      `This chat is active on ${lockResult.lockedBy} right now (started ${mins}m ago).\n\n` +
+      "Sending here too can overwrite what you're doing there. Send anyway?");
+  }
+
+  // ---- chat history screen ----
+  function relTime(ms) {
+    if (!ms) return "";
+    const s = Math.max(0, (Date.now() - ms) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+  async function enterChatList() {
+    show("screen-chats");
+    $("chats-error").textContent = "";
+    $("chats-list").innerHTML = "<li class='muted'>Loading…</li>";
+    let store;
+    try { store = await ensureSyncStore(); }
+    catch (e) {
+      $("chats-list").innerHTML = "";
+      $("chats-error").textContent = "Couldn't open sync: " + friendlyGhError(e, "list");
+      return;
+    }
+    if (!store) {
+      // Sync isn't actually configured (edge case: toggled off elsewhere).
+      // There's no hub to show without it — fall back to wherever makes sense.
+      if (session.repo) startNewChat(); else enterRepoPicker();
+      return;
+    }
+    let list;
+    try { list = await store.list(); }
+    catch (e) {
+      $("chats-list").innerHTML = "";
+      $("chats-error").textContent = friendlyGhError(e, "list");
+      // Only for damage. An unreachable GitHub says so in its own words and
+      // there is nothing to repair -- rebuilding then would read no chats and
+      // write that emptiness over a perfectly good list.
+      $("chats-repair").hidden = !/index/i.test((e && e.message) || "");
+      return;
+    }
+    $("chats-repair").hidden = true;
+    renderChatList(list);
+  }
+
+  // Rebuild the list from the chats themselves. Offered here as well as on the
+  // desktop because this is the device you are most likely to be holding when
+  // the list comes up empty.
+  async function repairChatList(btn) {
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = "Rebuilding…";
+    try {
+      const store = await ensureSyncStore();
+      const res = await store.rebuildIndex();
+      $("chats-error").textContent = res.unreadable
+        ? `Found ${res.found}. ${res.unreadable} couldn't be read with this key and were left alone.`
+        : "";
+      $("chats-repair").hidden = true;
+      renderChatList(await store.list());
+    } catch (e) {
+      $("chats-error").textContent = friendlyGhError(e, "list");
+    } finally { btn.disabled = false; btn.textContent = label; }
+  }
+  $("chats-repair").addEventListener("click", (e) => repairChatList(e.currentTarget));
+  function renderChatList(list) {
+    const ul = $("chats-list");
+    ul.innerHTML = "";
+    for (const c of list) {
+      const li = document.createElement("li");
+      li.className = "chat-row";
+      const main = document.createElement("div");
+      main.className = "chat-row-main";
+      const title = document.createElement("div");
+      title.className = "chat-row-title";
+      title.textContent = c.title || "Untitled";
+      const meta = document.createElement("div");
+      meta.className = "chat-row-meta";
+      // Show which project a chat belongs to — they all share one store now.
+      meta.textContent = [c.project, relTime(c.updated), c.preview]
+        .filter(Boolean).join(" · ");
+      main.append(title, meta);
+      // A chat whose project isn't a GitHub repo can be READ here but not
+      // continued: every tool on the phone goes through the GitHub API, and
+      // there is nothing for it to act on. Say so in the list rather than
+      // letting it look identical to a chat that works and only explaining
+      // after it's tapped.
+      if (!c.repo) {
+        li.classList.add("chat-row-local");
+        const tag = document.createElement("span");
+        tag.className = "chat-row-tag";
+        tag.textContent = "on your computer";
+        // First on the meta line, not inside the title: the title is a single
+        // ellipsised line, so a long one would truncate the label away —
+        // exactly on the chats where knowing matters most.
+        meta.prepend(tag);
+      }
+      main.addEventListener("click", () => openSyncChat(c.id));
+      const del = document.createElement("button");
+      del.className = "chat-row-del"; del.type = "button"; del.title = "Delete"; del.textContent = "🗑";
+      del.addEventListener("click", (e) => { e.stopPropagation(); deleteSyncChat(c.id, c.title); });
+      li.append(main, del);
+      ul.appendChild(li);
+    }
+    if (!list.length) ul.innerHTML = "<li class='muted'>No saved chats yet — start a new one.</li>";
+  }
+  async function openSyncChat(id) {
+    let data;
+    try {
+      const store = await ensureSyncStore();
+      data = await store.load(id);
+    } catch (e) { toast("Couldn't open that chat: " + friendlyGhError(e, "list")); return; }
+    if (!data || !Array.isArray(data.messages)) { toast("That chat looks empty."); return; }
+    // The store is shared across projects now, so a chat may belong to a repo
+    // other than the one currently open — follow it there rather than silently
+    // re-pointing the conversation at the wrong codebase.
+    // A chat belongs to a repository, and only to that one. Following it there
+    // is right; INHERITING whatever this phone had open is not.
+    //
+    // That is what used to happen when a chat arrived without a repo of its
+    // own (every desktop chat did, until the desktop started publishing one).
+    // The guard below only caught a phone with no repo at all — if one was
+    // left over from an earlier conversation, the chat silently adopted it,
+    // the agent read and committed into a codebase the conversation was never
+    // about, and the next save wrote that repo back to the shared store,
+    // relabelling the chat on every device. Refuse instead: an unanswerable
+    // question is not the phone's to guess at.
+    const r = data.repo;
+    if (r && r.full_name) {
+      if (!session.repo || r.full_name !== session.repo.full_name) {
+        connectRepo(r.owner, r.repo, r.branch || "main", r.full_name, r.default_branch);
+      }
+    } else {
+      // No repo: the agent has nothing to act on here, but the conversation is
+      // still worth reading, and work can still be left for the machine that
+      // CAN act. Opening it read-only is the whole reason it syncs at all.
+      openReadOnlyChat(data, id);
+      return;
+    }
+    if (!session.repo) { toast("That chat has no repository — open one first."); return; }
+    session.chatId = data.id || id;
+    session.chatTitle = data.title || "";
+    session.messages = data.messages;
+    session.transcript = data.transcript || [];
+    session.syncedAt = data.updated || 0;
+    session.pending = data.pending || [];
+    session.images = {};
+    session.compact = null;
+    session.toldCompact = false;
+    // Fields this device does not own, kept verbatim so saving from here
+    // doesn't destroy them (see syncSave).
+    // Everything this chat arrived with; syncSave overlays the parts the phone
+    // owns. See openReadOnlyChat for why this is not an enumerated list.
+    session.carry = Object.assign({}, data);
+    // A chat resumed on this phone keeps the starting point it was given, so
+    // the diff still spans work the desktop did. Only a chat that never had
+    // one starts recording here -- and then it says "from now on" rather than
+    // claiming a base it does not have.
+    session.baseRef = data.base_ref || null;
+    if (!session.baseRef) markBaseRef();
+    session.readOnly = false;
+    applyReadOnlyChrome(false);
+    session.messages[0] = { role: "system", content: session.baseSystem };  // rebind to this repo
+    // Picking up a chat the desktop was driving: mark the switch, or the model
+    // keeps imitating turns that used tools this phone doesn't have.
+    session.messages = AC.applyHandoff(session.messages, data.device, DEVICE_LABEL);
+    noteDesktopWork(data.repo_state);
+    clearAttachments();
+    renderRepoLabel();
+    $("messages").innerHTML = "";
+    for (const b of session.transcript) addBubble(b.role, b.text, false);
+    addBubble("system", "Resumed “" + (session.chatTitle || "chat") + "”.", false);
+    show("screen-chat");
+    renderContextMeter();
+    persistSession();
+  }
+  // ---- read-only: a chat whose project this phone can't reach ----
+  // It syncs, so it should be readable — looking up what you decided is most of
+  // what you want a phone for. And the one useful thing you CAN do without a
+  // repo is leave work for the machine that has one, which is the same pending
+  // queue the agent uses via needs_desktop.
+  function openReadOnlyChat(data, id) {
+    session.readOnly = true;
+    session.chatId = data.id || id;
+    session.chatTitle = data.title || "";
+    session.messages = [];             // nothing runs here; keep none of it live
+    session.transcript = data.transcript || [];
+    session.syncedAt = data.updated || 0;
+    session.pending = data.pending || [];
+    session.images = {};
+    session.compact = null;
+    // The WHOLE chat, not a list of fields to remember. An enumerated carry is
+    // one someone forgets to extend: the first version of this omitted
+    // `transcript`, so leaving a note blanked the conversation you were reading.
+    // Carrying everything and overlaying only what this device owns cannot have
+    // that failure mode, including for fields added later.
+    session.carry = Object.assign({}, data);
+    clearAttachments();
+    $("chat-repo-name").textContent = data.project || "on your computer";
+    $("messages").innerHTML = "";
+    for (const b of session.transcript) addBubble(b.role, b.text, false);
+    for (const p of session.pending) {
+      addBubble("system", "📌 For your computer: " + p.task, false);
+    }
+    addBubble("system",
+      "This chat is about a folder on your computer, so the agent can't work on it " +
+      "here. You can read it — and anything you send becomes a note waiting on your " +
+      "computer when you open the chat there.", false);
+    show("screen-chat");
+    applyReadOnlyChrome(true);
+    scroll();
+  }
+  // Read-only changes what the composer is FOR, rather than taking it away: an
+  // empty box you can't type in explains nothing.
+  function applyReadOnlyChrome(on) {
+    $("btn-attach").hidden = on;        // nothing to attach without a repo
+    $("ctx-foot").hidden = on;          // no context is being spent here
+    prompt.placeholder = on ? "Leave a note for your computer…" : "Message the agent…";
+    $("btn-send").title = on ? "Leave a note for your computer" : "Send";
+    document.getElementById("screen-chat").classList.toggle("read-only", on);
+  }
+  // A note left here goes into the same queue needs_desktop writes, so the
+  // desktop surfaces it the same way when the chat is opened there.
+  async function parkNoteForDesktop(text) {
+    session.pending = session.pending || [];
+    if (session.pending.some((p) => p.task.toLowerCase() === text.toLowerCase())) {
+      toast("Already waiting on your computer.");
+      return;
+    }
+    session.pending.push({ task: text, why: "left from your phone", created: Date.now() });
+    addBubble("system", "📌 For your computer: " + text, false);
+    haptic(12);
+    const store = await ensureSyncStore().catch(() => null);
+    if (!store) { toast("Saved here — it'll sync when you're back online."); return; }
+    try {
+      // Only `pending` is ours to change. Everything else goes back exactly as
+      // it came in — including `device`, so the desktop doesn't read this as
+      // the phone having driven the conversation.
+      const carry = session.carry || {};
+      session.syncedAt = await store.save(Object.assign({}, carry, {
+        id: session.chatId, pending: session.pending,
+      }));
+      toast("Waiting on your computer.");
+    } catch (e) {
+      toast(e && e.chatDeleted ? "That chat was deleted on your other device."
+                               : "Couldn't sync that note: " + friendlyGhError(e, "list"));
+    }
+  }
+  async function deleteSyncChat(id, title) {
+    if (!confirm("Delete “" + (title || "this chat") + "” from all your devices?")) return;
+    try {
+      const store = await ensureSyncStore();
+      await store.remove(id);
+      if (session.chatId === id) session.chatId = null;
+      await enterChatList();
+    } catch (e) { toast("Couldn't delete: " + friendlyGhError(e, "list")); }
+  }
+  // "+" always goes through the repo picker: starting something new means
+  // choosing (or creating) its project, which the hub itself doesn't do.
+  $("btn-chats-new").addEventListener("click", () => { if (!currentRun) enterRepoPicker(); });
+  $("btn-chats-lock").addEventListener("click", lock);
+
+  // ================================================================ CONFIRM DIALOG
+  function confirmWrite(kind, path, content) {
+    if (!confirmCommits()) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      $("confirm-title").textContent = (kind === "edit" ? "Commit edit?" : "Commit new file?");
+      $("confirm-path").textContent = path;
+      $("confirm-preview").textContent = String(content).slice(0, 4000);
+      $("confirm-backdrop").hidden = false;
+      const done = (val) => {
+        $("confirm-backdrop").hidden = true;
+        $("btn-confirm-yes").onclick = null; $("btn-confirm-no").onclick = null;
+        resolve(val);
+      };
+      $("btn-confirm-yes").onclick = () => done(true);
+      $("btn-confirm-no").onclick = () => done(false);
+    });
+  }
+
+  // ================================================================ CHAT
+  const composer = $("composer");
+  const prompt = $("in-prompt");
+  prompt.addEventListener("input", () => {
+    prompt.style.height = "auto";
+    prompt.style.height = Math.min(prompt.scrollHeight, 160) + "px";
+    fitMessages();
+  });
+  prompt.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); composer.requestSubmit(); }
+  });
+  composer.addEventListener("submit", (e) => {
+    e.preventDefault();
+    // Let go of the field. On iOS the keyboard — and the accessory bar iOS
+    // draws above it — stay up until something blurs, so sending with the
+    // return key left both sitting there and the only way out was the Done
+    // button on a bar that has nothing to do with this app. Sending is the end
+    // of the thought; the keyboard should go with it.
+    prompt.blur();
+    sendPrompt();
+  });
+  $("btn-stop").addEventListener("click", () => { if (currentRun) currentRun.stop(); });
+
+  // ---------------------------------------------------------- attachments
+  // Each item is one of:
+  //   { kind:"repo", path }            — a file already in the GitHub repo
+  //   { kind:"text", name, text }      — a text/code file uploaded from the phone
+  //   { kind:"image", name, dataUrl }  — an image uploaded from the phone (vision)
+  let attachments = [];
+  function clearAttachments() { attachments = []; renderChips(); }
+  function attLabel(a) { return a.path ? a.path.split("/").pop() : a.name; }
+  function renderChips() {
+    const box = $("attach-chips");
+    box.innerHTML = "";
+    box.hidden = attachments.length === 0;
+    attachments.forEach((a, i) => {
+      const chip = document.createElement("div");
+      chip.className = "chip";
+      const label = document.createElement("span");
+      label.textContent = (a.kind === "image" ? "🖼 " : "") + attLabel(a);
+      const x = document.createElement("button");
+      x.type = "button"; x.textContent = "✕";
+      x.onclick = () => { attachments.splice(i, 1); renderChips(); };
+      chip.append(label, x);
+      box.appendChild(chip);
+    });
+    fitMessages();
+  }
+  function attachmentNote() {
+    return attachments.length ? "\n\n📎 " + attachments.map(attLabel).join(", ") : "";
+  }
+  function isVisionModel(m) { return /v-flash|vision|4\.\dv/i.test(m || ""); }
+
+  // Build the message: text/code files are prepended as context; images become
+  // an OpenAI-style multimodal content array (for a vision model to see).
+  async function composeMessage(text) {
+    if (!attachments.length) return text;
+    const parts = [], images = [];
+    for (const a of attachments) {
+      if (a.kind === "repo") {
+        try { const f = await session.gh.getFile(a.path); parts.push("=== " + a.path + " ===\n" + f.text); }
+        catch { parts.push("=== " + a.path + " (couldn't read) ==="); }
+      } else if (a.kind === "text") {
+        parts.push("=== " + a.name + " ===\n" + a.text);
+      } else if (a.kind === "image") {
+        images.push(a);
+        session.images = session.images || {};
+        session.images[a.name] = a.dataUrl;   // make it viewable via view_image
+      }
+    }
+    const ctx = parts.length ? "Attached files for context:\n\n" + parts.join("\n\n") + "\n\n---\n\n" : "";
+    const body = ctx + (text || (images.length ? "" : "(see attached files)"));
+    if (!images.length) return body;
+    // A vision model sees the images directly.
+    if (isVisionModel(getModelName())) {
+      return [{ type: "text", text: body || "(describe the attached image)" }]
+        .concat(images.map((im) => ({ type: "image_url", image_url: { url: im.dataUrl } })));
+    }
+    // Text/coding model: describe each uploaded image NOW via the free vision
+    // model and inject the writeup, so the model gets the content directly and
+    // never mistakes the upload for a file in the repo.
+    const blocks = [];
+    for (const im of images) {
+      const d = await viewImage(im.name, text || "");
+      if (/^(Couldn't analyze|No attached image)/.test(d)) addBubble("error", d);
+      blocks.push('The user uploaded an image "' + im.name + '" (it is NOT a file in the repo — do not ' +
+        'look for it with read_file/glob). Here is what it shows, described by the vision model:\n' + d);
+    }
+    setStatus("");
+    return blocks.join("\n\n---\n\n") + "\n\n===\n\n" + (body || "(Act on the uploaded image described above.)");
+  }
+
+  $("btn-attach").addEventListener("click", openFilePicker);
+  // Started from a tap, and it has to stay that way: iOS will not let a page
+  // open the microphone or resume an AudioContext outside a user gesture, so
+  // the whole session is set up inside this handler.
+  $("btn-voice").addEventListener("click", startVoice);
+  $("voice-end").addEventListener("click", stopVoice);
+  $("voice-mute").addEventListener("click", () => {
+    voice.muted = !voice.muted;
+    $("voice-mute").setAttribute("aria-pressed", String(voice.muted));
+    $("voice-mute").textContent = voice.muted ? "Unmute" : "Mute";
+    // Tells the server to flush what it is holding rather than wait for more.
+    if (voice.muted) voiceSend(AC.liveAudioStreamEnd());
+    voiceSetStatus(voice.muted ? "Muted — it can't hear you." : "Listening — just talk.");
+  });
+  // The app being backgrounded ends the session, because iOS ends it anyway:
+  // web content gets no background execution, so the socket dies under us and
+  // the only choice is whether that looks deliberate. See CLAUDE.md.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden && voice.on) stopVoice();
+  });
+  $("filepick-done").addEventListener("click", () => { $("filepick-backdrop").hidden = true; });
+  $("filepick-backdrop").addEventListener("click", (e) => { if (e.target === $("filepick-backdrop")) $("filepick-backdrop").hidden = true; });
+  $("filepick-search").addEventListener("input", renderFileList);
+  $("filepick-upload").addEventListener("click", () => $("filepick-input").click());
+  $("filepick-input").addEventListener("change", () => handleUploads($("filepick-input")));
+
+  let fileTree = [];
+  async function openFilePicker() {
+    if (!session || !session.gh) return;
+    $("filepick-search").value = "";
+    $("filepick-list").innerHTML = "<div class='muted' style='padding:10px'>Loading…</div>";
+    $("filepick-backdrop").hidden = false;
+    try { fileTree = (await session.gh.tree()).map((e) => e.path); }
+    catch (e) { $("filepick-list").innerHTML = ""; toast(friendlyGhError(e, "list")); return; }
+    renderFileList();
+  }
+  function renderFileList() {
+    const q = $("filepick-search").value.toLowerCase();
+    const list = $("filepick-list");
+    list.innerHTML = "";
+    const matches = fileTree.filter((p) => p.toLowerCase().includes(q)).slice(0, 200);
+    if (!matches.length) { list.innerHTML = "<div class='muted' style='padding:10px'>no files</div>"; return; }
+    for (const p of matches) {
+      const item = document.createElement("div");
+      const picked = attachments.some((a) => a.kind === "repo" && a.path === p);
+      item.className = "fp-item" + (picked ? " picked" : "");
+      item.textContent = p;
+      item.onclick = () => {
+        const idx = attachments.findIndex((a) => a.kind === "repo" && a.path === p);
+        if (idx >= 0) attachments.splice(idx, 1); else attachments.push({ kind: "repo", path: p });
+        item.classList.toggle("picked");
+        renderChips();
+      };
+      list.appendChild(item);
+    }
+  }
+
+  // Local uploads from the phone: images are downscaled; other files read as text.
+  async function handleUploads(input) {
+    const files = [...(input.files || [])];
+    input.value = "";
+    for (const f of files) {
+      try {
+        if (f.type.startsWith("image/")) {
+          attachments.push({ kind: "image", name: f.name, dataUrl: await downscaleImage(f, 1024) });
+        } else {
+          const text = await f.text();
+          attachments.push({ kind: "text", name: f.name, text: text.slice(0, 100000) });
+        }
+      } catch { toast("Couldn't read " + f.name); }
+    }
+    renderChips();
+    $("filepick-backdrop").hidden = true;
+  }
+  function downscaleImage(file, max) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          let w = img.width, h = img.height;
+          const s = Math.min(1, max / Math.max(w, h));
+          w = Math.round(w * s); h = Math.round(h * s);
+          const c = document.createElement("canvas"); c.width = w; c.height = h;
+          c.getContext("2d").drawImage(img, 0, 0, w, h);
+          try { resolve(c.toDataURL("image/jpeg", 0.85)); } catch { resolve(reader.result); }
+        };
+        img.onerror = reject; img.src = reader.result;
+      };
+      reader.onerror = reject; reader.readAsDataURL(file);
+    });
+  }
+
+  // ---- live (streamed) assistant text ----
+  // The reply is re-rendered as real markdown while it arrives, throttled to a
+  // few times a second — so you read formatted prose as it lands instead of raw
+  // ## and ** that only resolve at the end. Partial syntax (an unclosed fence or
+  // **bold) simply renders as plain text until it completes.
+  const STREAM_RENDER_MS = 110;
+  let stream = null;   // { bubble, text, raf, lastRender }
+  function beginStream() {
+    const near = atBottom();
+    const bubble = document.createElement("div");
+    bubble.className = "bubble assistant streaming";
+    messages.appendChild(bubble);
+    if (near) scroll();
+    return { bubble, text: "", raf: 0, lastRender: 0 };
+  }
+  function paintStream() {
+    const near = atBottom();
+    while (stream.bubble.firstChild) stream.bubble.removeChild(stream.bubble.firstChild);
+    renderText(stream.bubble, stream.text);
+    if (near) scroll();
+    syncToBottomBtn();
+  }
+  function flushStream() {
+    if (!stream) return;
+    stream.raf = 0;
+    const now = (window.performance || Date).now();
+    // Too soon to repaint: keep a frame pending so the newest tokens still land.
+    if (now - stream.lastRender < STREAM_RENDER_MS) {
+      stream.raf = requestAnimationFrame(flushStream);
+      return;
+    }
+    stream.lastRender = now;
+    paintStream();
+  }
+  function streamAppend(text) {
+    if (!stream) stream = beginStream();
+    stream.text += text;
+    if (!stream.raf) stream.raf = requestAnimationFrame(flushStream);
+  }
+  // Settle the bubble on the final text and record it once. Passing the final
+  // text guards against a dropped last frame.
+  function endStream(finalText) {
+    if (!stream) return false;
+    const s = stream;
+    if (s.raf) cancelAnimationFrame(s.raf);
+    const text = (finalText != null && finalText !== "" ? finalText : s.text).trim();
+    if (!text) { s.bubble.remove(); stream = null; return true; }
+    stream.text = text;
+    paintStream();
+    stream = null;
+    s.bubble.classList.remove("streaming");
+    addBubbleActions(s.bubble, text);
+    refreshTailActions();
+    if (session) {
+      session.transcript = session.transcript || [];
+      session.transcript.push({ role: "assistant", text });
+    }
+    if (atBottom()) scroll();
+    return true;
+  }
+
+  // The GLM models carry ~200k. The headroom below that is for the reply and
+  // for the estimate being an estimate — but the estimate now calibrates itself
+  // against the exact prompt_tokens the API reports (see calibrateRatio), so it
+  // no longer has to be padded by guesswork the way a pure chars/N count does.
+  const CONTEXT_LIMIT_TOKENS = 185000;
+  // Trim before the model would refuse. Overshooting doesn't fail one turn, it
+  // fails every turn after it, so the automatic pass fires with room to spare.
+  const CONTEXT_BUDGET_TOKENS = 170000;
+
+  // chars-per-token, measured rather than assumed once the API prices a request.
+  let tokenRatio = AC.DEFAULT_CHARS_PER_TOKEN;
+  function noteUsage(sentMessages, usage) {
+    const r = AC.calibrateRatio(sentMessages, usage && usage.prompt_tokens);
+    if (r) tokenRatio = r;
+    renderContextMeter();
+  }
+  function contextTokens() {
+    if (!session || !session.messages) return 0;
+    return AC.estimateTokens(session.messages, tokenRatio);
+  }
+  function renderContextMeter() {
+    const foot = $("ctx-foot");
+    if (!foot) return;
+    const used = contextTokens();
+    const pct = Math.min(100, (used / CONTEXT_LIMIT_TOKENS) * 100);
+    $("token-segment").setAttribute("stroke-dasharray", pct.toFixed(1) + ", 100");
+    $("token-text").textContent = used < 1000
+      ? used + " tokens"
+      : (used / 1000).toFixed(used < 10000 ? 1 : 0) + "k / " +
+        Math.round(CONTEXT_LIMIT_TOKENS / 1000) + "k";
+    foot.classList.toggle("warn", pct >= 70 && pct < 90);
+    foot.classList.toggle("danger", pct >= 90);
+    $("btn-compact").disabled = !session || (session.messages || []).length < 4;
+  }
+  // Manual compaction: summarise everything but the most recent turns and
+  // replace them, so the user can reclaim room deliberately instead of waiting
+  // for the automatic pass. Unlike the automatic trim this DOES rewrite
+  // session.messages -- it's an explicit instruction, not a display concern.
+  async function compactNow() {
+    if (!session || currentRun || composing) return;
+    const msgs = session.messages || [];
+    if (msgs.length < 4) { toast("Nothing to compact yet."); return; }
+    // Keep roughly the last fifth of the conversation, and never nothing.
+    const keepBudget = Math.max(2000, Math.round(contextTokens() / 5));
+    const res = AC.trimHistory(msgs, keepBudget);
+    if (!res.droppedTurns) { toast("Nothing old enough to compact."); return; }
+    setRunning(true);
+    setStatus("compacting…");
+    try {
+      const summary = await compactSummary(res.dropped);
+      const next = res.messages.slice();
+      const at = next[0] && next[0].role === "system" ? 1 : 0;
+      next.splice(at, 0, { role: "system", content: "[compacted] " + summary });
+      session.messages = next;
+      session.compact = null;          // the summary is inline now, not a view
+      addBubble("system", "Compacted " + res.droppedTurns + " earlier turn" +
+        (res.droppedTurns === 1 ? "" : "s") + " into a summary.", false);
+      haptic(14);
+      persistSession();
+      syncSave();
+    } catch (e) {
+      toast("Couldn't compact: " + (e && e.message ? e.message : e));
+    } finally {
+      setStatus("");
+      setRunning(false);
+      renderContextMeter();
+    }
+  }
+
+  // A summary of the turns that no longer fit. Cached against how much has been
+  // dropped so a long chat doesn't pay for a summarisation call every turn.
+  async function compactSummary(dropped) {
+    const key = dropped.length;
+    if (session.compact && session.compact.key === key) return session.compact.text;
+    setStatus("compacting…");
+    let text = "";
+    try {
+      const r = await session.model.chat(
+        [{ role: "system", content: AC.COMPACT_PROMPT },
+         { role: "user", content: AC.historyDigest(dropped) }], undefined);
+      text = ((r && r.content) || "").trim();
+    } catch (e) { /* best effort — a failed summary must not block the turn */ }
+    if (!text) {
+      text = "Earlier turns were trimmed to fit the context window. " +
+             "Ask the user to re-state anything from them you need.";
+    }
+    session.compact = { key, text };
+    return text;
+  }
+
+  // What the model actually sees this turn. session.messages is left WHOLE:
+  // this phone's smaller context must not permanently delete history that the
+  // desktop — which syncs the same chat — still has room for.
+  async function modelView() {
+    const full = session.messages;
+    if (AC.estimateTokens(full) <= CONTEXT_BUDGET_TOKENS) return full;
+    const res = AC.trimHistory(full, CONTEXT_BUDGET_TOKENS);
+    if (!res.droppedTurns) return full;
+    const summary = await compactSummary(res.dropped);
+    const view = res.messages.slice();
+    const at = view[0] && view[0].role === "system" ? 1 : 0;
+    view.splice(at, 0, { role: "system", content: "[compacted] " + summary });
+    // Say it once per conversation, not on every re-summarisation.
+    if (!session.toldCompact) {
+      session.toldCompact = true;
+      addBubble("system", "Earlier turns no longer fit, so they're summarised from here on.", false);
+    }
+    return view;
+  }
+
+  async function runTurn(shouldStop, tools, toolSchemas) {
+    let liveTool = null;
+    const messages = await modelView();
+    const grewFrom = messages.length;
+    const out = await AC.runAgent({
+      model: session.model,
+      tools: tools || session.tools,
+      messages,
+      shouldStop,
+      takeSteer: () => { const t = steerQueued; steerQueued = ""; return t; },
+      toolSchemas,
+      stream: true,
+      onEvent: (ev) => {
+        armIdle();
+        if (ev.type === "thinking") setStatus("thinking…");
+        else if (ev.type === "delta") { setStatus("writing…"); streamAppend(ev.text); }
+        // Any tool call ends the streamed preamble that came before it.
+        else if (ev.type === "tool") { endStream(); liveTool = addTool(ev.name, ev.args); setStatus(ev.name + "…"); }
+        else if (ev.type === "tool_result") { if (liveTool) finishTool(liveTool, ev.out); }
+        else if (ev.type === "answer") {
+          setStatus("");
+          turnEnded = "answer";
+          if (!endStream(ev.text) && ev.text) addBubble("assistant", ev.text);
+          haptic(12);
+        }
+        else if (ev.type === "steered") { endStream(); steerAccepted(ev.text); setStatus("taking that in…"); }
+        else if (ev.type === "usage") noteUsage(ev.sent, ev.usage);
+        else if (ev.type === "error") {
+          setStatus(""); endStream(); turnEnded = "error";
+          // Suppressed while hidden: a request killed by the OS is not a fault
+          // worth reporting, and the resume on the way back says so instead.
+          if (!document.hidden) addBubble("error", ev.text);
+        }
+        else if (ev.type === "stopped") {
+          setStatus(""); endStream(); turnEnded = "stopped"; addBubble("system", "Stopped.");
+        }
+      },
+    });
+    // runAgent appends this turn onto the array it was handed. When that was a
+    // trimmed view rather than the real history, fold the new turn back in --
+    // otherwise the conversation would quietly stop growing.
+    if (messages !== session.messages) {
+      session.messages.push(...messages.slice(grewFrom));
+    }
+    return out;
+  }
+
+  const VISION_MODEL = "glm-4.6v-flash";  // free vision model, used by view_image
+
+  // view_image is always advertised: repo images are reachable in any chat, and
+  // even a vision model can't fetch one from GitHub by itself. (Uploads are the
+  // one case a vision model handles directly — they're already in its context.)
+  function visionSchemas(base) {
+    return base.concat([AC.VIEW_IMAGE_SCHEMA, AC.NEEDS_DESKTOP_SCHEMA]);
+  }
+  // Advertise spawn_agent on the main turn only when sub-agents are enabled.
+  // The branch tools ride along on the main turn and nowhere else: a sub-agent
+  // moving the chat onto another branch underneath the agent that dispatched
+  // it is not something that conversation could recover from, and a spoken
+  // "open a pull request" wants the same confirmation a written one gets.
+  function mainSchemas() {
+    let base = subagentsOn() ? AC.TOOL_SCHEMAS.concat([AC.SPAWN_SCHEMA]) : AC.TOOL_SCHEMAS;
+    // Guarded the same way WORKER_SCHEMAS is: a cached agent-core.js older
+    // than this file would make the spread throw and take the turn with it.
+    base = base.concat(AC.BRANCH_SCHEMAS || []);
+    return visionSchemas(base);
+  }
+
+  // needs_desktop: park something that needs a real machine. It rides along
+  // with the synced chat and is put in front of the desktop agent when the chat
+  // opens there, so "run the tests when you're back" survives the trip instead
+  // of scrolling away.
+  async function needsDesktop(task, why) {
+    if (!task) return "Nothing recorded — say what needs running.";
+    session.pending = session.pending || [];
+    // Don't stack the same ask twice if the agent repeats itself.
+    if (session.pending.some((p) => p.task.toLowerCase() === task.toLowerCase())) {
+      return "Already on the list for the desktop: " + task;
+    }
+    session.pending.push({ task, why: why || "", created: Date.now() });
+    addBubble("system", "📌 For your desktop: " + task, false);
+    haptic(10);
+    persistSession();
+    return "Noted for the desktop. It'll see this when the chat opens there. " +
+           "Carry on with anything you can do here.";
+  }
+
+  // Resolve an image that lives in the REPO to a data URL. getFile() decodes as
+  // UTF-8 and would mangle the bytes, so this goes through the binary-safe read.
+  // Accepts an exact path or a bare filename, which is matched against the tree.
+  async function repoImageDataUrl(name) {
+    if (!session || !session.gh) return null;
+    let path = name;
+    if (!AC.IMAGE_RE.test(path)) return null;
+    try {
+      const paths = (await session.gh.tree()).map((e) => e.path);
+      if (!paths.includes(path)) {
+        const lower = name.toLowerCase();
+        const hit = paths.find((p) => p.toLowerCase() === lower)
+          || paths.find((p) => p.toLowerCase().endsWith("/" + lower))
+          || paths.find((p) => AC.IMAGE_RE.test(p) && p.toLowerCase().includes(lower));
+        if (!hit) return null;
+        path = hit;
+      }
+    } catch (e) { /* tree unavailable — still try the path as given */ }
+    const { b64 } = await session.gh.getFileRaw(path);
+    if (!b64) return null;
+    return { url: "data:" + AC.imageMime(path) + ";base64," + b64, path };
+  }
+
+  // The view_image tool: send an image to the free vision model and return its
+  // written description, so a text model can act on it. Resolves attachments
+  // first, then falls back to image files in the repo — without that fallback
+  // the agent has no way at all to see a screenshot or mockup that's committed.
+  async function viewImage(name, question) {
+    const imgs = session.images || {};
+    const keys = Object.keys(imgs);
+    let url = imgs[name];
+    if (!url) {
+      const hit = keys.find((k) => k === name || k.endsWith(name) || name.endsWith(k) || k.includes(name));
+      url = hit ? imgs[hit] : null;
+    }
+    let label = name;
+    if (!url) {
+      try {
+        const found = await repoImageDataUrl(name);
+        if (found) { url = found.url; label = found.path; }
+      } catch (e) {
+        return "Couldn't read '" + name + "' from the repo: " + (e && e.message ? e.message : e);
+      }
+    }
+    // Only fall back to "the one attachment" when nothing else matched, so a
+    // wrong repo path doesn't silently describe an unrelated upload.
+    if (!url && keys.length === 1) { url = imgs[keys[0]]; label = keys[0]; }
+    if (!url) {
+      return "No image matches '" + name + "'. Attached: " + (keys.join(", ") || "none") +
+        ". For an image in the repo, pass its path (e.g. docs/shot.png) — use glob '**/*.png' to find it.";
+    }
+    if (label !== name) setStatus("looking at " + label + "…");
+    if (!session.visionModel) {
+      session.visionModel = newModel(VISION_MODEL);
+    }
+    const focus = (question && question.trim()) ? "Focus on: " + question.trim() : "Describe the image in detail.";
+    setStatus("looking with " + VISION_MODEL + "…");
+    try {
+      const resp = await session.visionModel.chat(
+        [{ role: "user", content: [{ type: "text", text: "You are a vision assistant. " + focus }, { type: "image_url", image_url: { url } }] }],
+        undefined);
+      return ((resp && resp.content) || "").trim() || "(the vision model returned no description)";
+    } catch (e) {
+      return "Couldn't analyze the image: " + (e && e.message ? e.message : e);
+    }
+  }
+
+  // A normal build turn, plus one Max self-review pass when it changed files.
+  async function runBuild(getStopped) {
+    session.messages[0].content = session.baseSystem + thinkingDirective(getThinking());
+    await runTurn(getStopped, session.tools, mainSchemas());
+    if (!getStopped() && getThinking() === "max" && session.turnCommits > 0) {
+      setStatus("reviewing…");
+      session.messages.push({ role: "user", content: REVIEW_NUDGE });
+      await runTurn(getStopped, session.tools, mainSchemas());
+    }
+  }
+
+  // A delegated sub-agent: its own history + tools (no spawn), reported inline.
+  async function runSubAgent(task, context) {
+    addBubble("system", "🧬 Sub-agent: " + task);
+    const messages = [
+      { role: "system", content: AC.SUBAGENT_PROMPT + "\n\nRepository: " + session.repo.full_name + " (branch " + session.repo.branch + ")." },
+      { role: "user", content: task + (context ? "\n\nContext: " + context : "") },
+    ];
+    let liveTool = null, report = "";
+    await AC.runAgent({
+      model: session.model, tools: session.subTools, messages,
+      toolSchemas: visionSchemas(AC.TOOL_SCHEMAS), maxSteps: 16, shouldStop: () => stopFlag,
+      onEvent: (ev) => {
+        armIdle();
+        if (ev.type === "tool") { liveTool = addTool("↳ " + ev.name, ev.args); setStatus("sub · " + ev.name + "…"); }
+        else if (ev.type === "tool_result") { if (liveTool) finishTool(liveTool, ev.out); }
+        else if (ev.type === "answer") { report = ev.text || ""; }
+        else if (ev.type === "error") { report = "Sub-agent error: " + ev.text; }
+      },
+    });
+    if (report) addBubble("assistant", "🧬 " + report);
+    return report || "(the sub-agent finished without a report)";
+  }
+
+  /* ---------------------------------------------------------------- workers
+   *
+   * Background workers, as the desktop's voice mode has them. A spoken session
+   * here used to get read tools and needs_desktop, so asking it to do work left
+   * a note for the computer instead of doing it. That is the right default for
+   * a device that cannot run in the background -- and the wrong thing to impose
+   * on someone who knows the trade and wants the work done anyway.
+   *
+   * The trade, stated once and honestly: this page IS the runtime. A worker is
+   * a floating promise in the tab, so it runs only while the app is open and
+   * foregrounded. iOS suspends a backgrounded tab and kills the fetch in
+   * flight, which is not something a PWA can prevent -- WebKit has never
+   * shipped Background Sync or Background Fetch. So a worker interrupted that
+   * way is REPORTED as interrupted rather than quietly abandoned, and picked up
+   * again when the app comes back if its history can be repaired. What is never
+   * done is claiming it finished.
+   *
+   * dispatch returns instantly and the work continues after the return. That is
+   * not a nicety: the Live API's function calling is synchronous, so a tool that
+   * awaited the work would hold the model silent for the whole of it.
+   */
+  const workers = {};        // id -> record
+  let workerSeq = 0;
+
+  function workerFind(ref) {
+    const key = String(ref || "").trim().toLowerCase();
+    if (!key) return null;
+    return workers[key]
+      || Object.values(workers).find((w) => (w.name || "").toLowerCase() === key)
+      || null;
+  }
+
+  function workerAge(w) {
+    const s = Math.round(((w.ended || Date.now()) - w.started) / 1000);
+    return s < 60 ? s + "s" : Math.round(s / 60) + "m";
+  }
+
+  function workerLine(w) {
+    const bits = [w.id + " (" + w.name + ")", w.state];
+    if (w.state === "running") bits.push("for " + workerAge(w));
+    else bits.push("after " + workerAge(w));
+    if (w.changes.length) bits.push(w.changes.length + " file(s) changed");
+    let s = bits.join(", ");
+    if (w.report) s += " — " + w.report;
+    return s;
+  }
+
+  /* Start one. Returns immediately; runAgent keeps going on its own. */
+  function dispatchWorker(name, task) {
+    if (!task) return "ERROR: a worker needs a task to do.";
+    if (!session || !session.gh) return "ERROR: no repository is open.";
+    workerSeq += 1;
+    const id = "wk" + workerSeq;
+    const w = {
+      id, name: (name || id).trim() || id, task,
+      state: "running", report: "", started: Date.now(), ended: 0,
+      steer: [], stop: false, changes: [], before: {},
+    };
+    workers[id] = w;
+    addBubble("system", "⚙️ " + w.id + " (" + w.name + "): " + task, false);
+    haptic(10);
+
+    // Its own tool set, so what it touches is recorded against it and a commit
+    // is not gated behind a modal nobody can see while the voice sheet is up.
+    const tools = AC.makeTools(session.gh, {
+      confirmWrite: async () => true,
+      onCommit: (p) => {
+        if (!w.changes.includes(p)) w.changes.push(p);
+        session.turnCommits = (session.turnCommits || 0) + 1;
+      },
+      viewImage, needsDesktop,
+      baseRef: () => session.baseRef,
+      beforeWrite: async (path) => {
+        // Snapshot once, for revert_worker. null means "did not exist".
+        if (Object.prototype.hasOwnProperty.call(w.before, path)) return;
+        try { w.before[path] = (await session.gh.getFile(path)).text; }
+        catch (e) { w.before[path] = null; }
+      },
+    });
+
+    // Kept on the record, not local to this call: resume_agent picks the
+    // worker back up with everything it already worked out, and both of these
+    // are that context. runAgent mutates `messages` in place, so the record
+    // holds the live history rather than a copy of its opening.
+    w.messages = [
+      { role: "system", content: AC.SUBAGENT_PROMPT + "\n\nRepository: "
+        + session.repo.full_name + " (branch " + session.repo.branch + ")." },
+      { role: "user", content: task },
+    ];
+    w.tools = tools;
+    runWorkerTurn(w);
+    return "Started " + w.id + " (" + w.name + "). It runs while this app is "
+      + "open — tell the user it is going, and carry on.";
+  }
+
+  /* One turn of a worker, from wherever its history currently stands.
+   *
+   * Deliberately NOT awaited by its callers. The caller is a Live function
+   * call and the model is stopped until the tool returns, so awaiting the work
+   * would hold the spoken conversation silent for the whole of it. */
+  function runWorkerTurn(w) {
+    const tools = w.tools;
+    const messages = w.messages;
+    AC.runAgent({
+      model: session.model, tools, messages,
+      toolSchemas: visionSchemas(AC.TOOL_SCHEMAS), maxSteps: 16,
+      shouldStop: () => w.stop || stopFlag,
+      takeSteer: () => w.steer.shift() || "",
+      onEvent: (ev) => {
+        armIdle();
+        if (ev.type === "answer") w.report = ev.text || "";
+        else if (ev.type === "error") { w.state = "failed"; w.report = ev.text || "error"; }
+      },
+    }).then(() => {
+      if (w.state === "running") w.state = w.stop ? "stopped" : "done";
+    }).catch((e) => {
+      w.state = "failed";
+      w.report = e && e.message ? e.message : String(e);
+    }).finally(() => {
+      w.ended = Date.now();
+      // The page dying mid-worker is the expected failure here, not a surprise,
+      // so it is named as itself rather than as a network error.
+      if (w.state === "failed" && document.hidden) {
+        w.state = "interrupted";
+        w.report = "the app was backgrounded while this was running, and the "
+          + "phone kills work in a hidden tab";
+      }
+      addBubble("system", "⚙️ " + workerLine(w), false);
+      persistSession();
+      syncSave().catch(() => {});
+    });
+  }
+
+  /* Pick a FINISHED worker back up with more to do.
+   *
+   * The point is the context: it still has the files it read and what it
+   * concluded, so a follow-up costs one message instead of a fresh worker that
+   * has to be told the whole background again. Shared with the desktop --
+   * same tool name, same argument names, same preamble (generated) -- because
+   * a chat syncs between the devices and carries the other one's calls in its
+   * own history. */
+  function resumeAgent(ref, task) {
+    if (!task) return "ERROR: resume_agent needs a task.";
+    const w = workerFind(ref);
+    if (!w) return "ERROR: no worker called " + ref + ".";
+    if (w.state === "running") {
+      return "ERROR: " + w.id + " is still running. Use steer_worker to add to "
+        + "what it is already doing; resume_agent is for one that has finished.";
+    }
+    if (!w.messages || !w.tools) {
+      return "ERROR: " + w.id + " was not started in this session, so its "
+        + "context is gone. Dispatch a fresh worker with the background it needs.";
+    }
+    w.messages.push({ role: "user", content: AC.RESUME_PREAMBLE.replace("{task}", task) });
+    w.state = "running";
+    w.stop = false;
+    w.started = Date.now();
+    w.ended = 0;
+    w.report = "";
+    addBubble("system", "⚙️ " + w.id + " (" + w.name + "): " + task, false);
+    runWorkerTurn(w);
+    return "Picked " + w.id + " (" + w.name + ") back up. It runs while this app "
+      + "is open — tell the user it is going, and carry on.";
+  }
+
+  function checkWorkers() {
+    const all = Object.values(workers);
+    if (!all.length) return "No workers have been dispatched yet.";
+    return all.map(workerLine).join("\n");
+  }
+
+  function steerWorker(ref, message) {
+    const w = workerFind(ref);
+    if (!w) return "ERROR: no worker called " + ref + ".";
+    if (w.state !== "running") return w.id + " is already " + w.state + ".";
+    if (!message) return "ERROR: nothing to tell it.";
+    w.steer.push(message);
+    return "Passed that to " + w.id + " — it picks it up after its current step.";
+  }
+
+  function stopWorker(ref) {
+    const w = workerFind(ref);
+    if (!w) return "ERROR: no worker called " + ref + ".";
+    if (w.state !== "running") return w.id + " is already " + w.state + ".";
+    w.stop = true;
+    return "Stopping " + w.id + " at its next safe point.";
+  }
+
+  function workerChanges(ref) {
+    const w = workerFind(ref);
+    if (!w) return "ERROR: no worker called " + ref + ".";
+    if (!w.changes.length) return w.id + " has not changed any files.";
+    return w.id + " changed: " + w.changes.join(", ");
+  }
+
+  /* Put the files back as they were before this worker started.
+   *
+   * Destructive, and the schema tells the model to confirm out loud first. A
+   * file it created is deleted; one it edited goes back to the text captured
+   * before its first write. */
+  async function revertWorker(ref) {
+    const w = workerFind(ref);
+    if (!w) return "ERROR: no worker called " + ref + ".";
+    if (w.state === "running") return "ERROR: " + w.id + " is still running — stop it first.";
+    if (!w.changes.length) return w.id + " changed nothing, so there is nothing to undo.";
+    const undone = [], failed = [];
+    for (const path of w.changes) {
+      const prev = w.before[path];
+      try {
+        // The CURRENT sha, read now rather than remembered: GitHub rejects a
+        // write to an existing path without it, and that is the whole
+        // compare-and-swap this app's writes are built on. Reading it here also
+        // means a file someone else has touched since fails loudly instead of
+        // being silently clobbered by the revert.
+        let sha;
+        try { sha = (await session.gh.getFile(path)).sha; } catch (e) { sha = undefined; }
+        if (prev === null || prev === undefined) {
+          if (sha) await session.gh.deleteFile(path, "revert " + w.id, sha);
+        } else {
+          await session.gh.putFile(path, prev, "revert " + w.id, sha);
+        }
+        undone.push(path);
+      } catch (e) { failed.push(path); }
+    }
+    w.changes = w.changes.filter((p) => failed.includes(p));
+    let out = "Reverted " + undone.length + " file(s) from " + w.id + ".";
+    if (failed.length) out += " Could not revert: " + failed.join(", ") + ".";
+    return out;
+  }
+
+  // Wrap a run: manage the running state, stop control, errors, and the
+  // cross-device lock. Returns a { locked, lockedBy, lockedSince } object if
+  // another live device holds the chat and force wasn't set (fn never runs
+  // in that case); otherwise undefined.
+  // --------------------------------------------- surviving the app going away
+  // The agent loop runs in this page: runAgent calls the model with fetch from
+  // the tab. So when iOS suspends the app, the request in flight is killed
+  // under it, model.chat throws, and the turn ends on its error path. Nothing
+  // inside a PWA can prevent that -- WebKit has never shipped Background Sync
+  // or Background Fetch, and Web Push can deliver a notification but cannot run
+  // anything. Two things are possible, and these are both of them.
+  //
+  // One: stop the screen from locking on its own while a turn is running. That
+  // is the common way this happens -- send something, put the phone down, watch
+  // it lock -- and the Screen Wake Lock API (Safari 16.4+) is exactly that. It
+  // does nothing for switching to another app, which is not fixable here.
+  let wakeLock = null;
+  async function keepScreenAwake() {
+    if (!navigator.wakeLock) return;   // older iOS, or a non-secure origin
+    try { wakeLock = await navigator.wakeLock.request("screen"); }
+    catch { wakeLock = null; }         // Low Power Mode refuses it; not fatal
+  }
+  function letScreenSleep() {
+    const held = wakeLock;
+    wakeLock = null;
+    if (held) { try { held.release(); } catch {} }
+  }
+
+  // Two: make being suspended cost the turn instead of the conversation. Every
+  // completed step is already persisted, so what is missing on the way back is
+  // only the one request that was in flight.
+  //
+  // Only a turn that was hidden AND did not reach a terminal event counts as
+  // interrupted. An error raised while the app was on screen is a real error --
+  // a rejected key, a bad request -- and resuming that would fail again on the
+  // same call, forever.
+  let hiddenDuringRun = false;
+  let turnEnded = null;              // "answer" | "stopped" | "error" | null
+
+  async function withRun(fn, opts) {
+    if (currentRun) return;
+    opts = opts || {};
+    const chatId = session && session.chatId;
+    if (chatId) {
+      const lockResult = await tryAcquireDeviceLock(chatId, !!opts.force);
+      if (lockResult) return lockResult;
+    }
+    stopFlag = false;
+    hiddenDuringRun = document.hidden;
+    turnEnded = null;
+    currentRun = { stop: () => { stopFlag = true; $("btn-stop").disabled = true; } };
+    // Marked as interrupted BEFORE the turn, not after it. If the OS kills the
+    // app outright rather than merely suspending it, the finally below never
+    // runs, and a flag written only at the end would say the turn had never
+    // started. Every completed step is persisted as it goes, so what is saved
+    // here is a real resume point rather than an optimistic one.
+    if (session) { session.interrupted = true; persistSession(); }
+    setRunning(true);
+    await keepScreenAwake();
+    try { await fn(() => stopFlag); }
+    catch (e) { addBubble("error", e.message || String(e)); }
+    finally {
+      letScreenSleep();
+      // Recorded before persistSession, so the flag is part of what gets saved
+      // and survives the app being killed outright rather than just backgrounded.
+      if (session) {
+        session.interrupted =
+          hiddenDuringRun && turnEnded !== "answer" && turnEnded !== "stopped";
+      }
+      setRunning(false); currentRun = null; persistSession(); renderContextMeter();
+      await syncSave();
+      if (chatId) await releaseDeviceLock(chatId);
+      // After currentRun is cleared, so this starts a turn rather than
+      // re-queueing itself against the run that just ended.
+      if (steerQueued) await steerLeftOver();
+    }
+  }
+
+  // Undo the optimistic bubble/message-array additions made before a send
+  // that turned out to be locked elsewhere.
+  function popOptimisticUser(bubble) {
+    if (bubble && bubble.remove) bubble.remove();
+    if (session) {
+      const t = session.transcript;
+      if (t && t.length && t[t.length - 1].role === "user") t.pop();
+      const m = session.messages;
+      if (m && m.length && m[m.length - 1].role === "user") m.pop();
+    }
+  }
+  // Same, plus restore the composer's text/attachments (for a manual send).
+  function rollbackOptimisticSend(bubble, text, atts) {
+    popOptimisticUser(bubble);
+    prompt.value = text;
+    prompt.style.height = "auto";
+    prompt.style.height = Math.min(prompt.scrollHeight, 160) + "px";
+    attachments = atts;
+    renderChips();
+  }
+
+  // A message typed while a turn is running redirects that turn instead of
+  // starting another. Typing is slow on a phone, so the thing you forgot to
+  // say usually arrives after you've already hit send.
+  let steerQueued = "";
+  let steerBubble = null;
+  function queueSteer(text) {
+    if (steerQueued) {
+      // One at a time, so the model isn't handed a pile of contradictions.
+      toast("Already queued — that'll go in at the next step.");
+      return;
+    }
+    steerQueued = text;
+    prompt.value = ""; prompt.style.height = "auto"; fitMessages();
+    steerBubble = addBubble("user", text, false);
+    steerBubble.classList.add("queued");
+    haptic(8);
+  }
+  // Consumed by the run: it's a real part of the conversation now.
+  function steerAccepted(text) {
+    if (steerBubble) { steerBubble.classList.remove("queued"); steerBubble = null; }
+    session.transcript = session.transcript || [];
+    session.transcript.push({ role: "user", text });
+    refreshTailActions();
+  }
+  // The turn ended before it was picked up. Don't drop it — send it as the
+  // next message, which is what was wanted anyway.
+  async function steerLeftOver() {
+    const text = steerQueued;
+    steerQueued = "";
+    if (!text) return;
+    if (steerBubble) { steerBubble.remove(); steerBubble = null; }
+    prompt.value = text;
+    await sendPrompt();
+  }
+
+  async function sendPrompt(force) {
+    if (composing) return;
+    if (currentRun) {                    // mid-turn: steer instead of queueing a turn
+      const t = prompt.value.trim();
+      if (t) queueSteer(t);
+      return;
+    }
+    const text = prompt.value.trim();
+    if (session && session.readOnly) {
+      // No agent to send to; the send button parks a note instead.
+      if (!text) return;
+      prompt.value = ""; prompt.style.height = "auto"; fitMessages();
+      await parkNoteForDesktop(text);
+      return;
+    }
+    if (!text && !attachments.length) return;
+    const savedAttachments = attachments.slice();
+    prompt.value = ""; prompt.style.height = "auto"; fitMessages();
+    const bubble = addBubble("user", (text || "(attached files)") + attachmentNote());
+    // composeMessage may call the vision model (to describe uploaded images), so
+    // guard against a second send and disable the composer while it runs.
+    composing = true; setRunning(true);
+    let content;
+    try { content = await composeMessage(text); }
+    finally { composing = false; setRunning(false); }
+    clearAttachments();
+    session.turnCommits = 0;
+    session.messages.push({ role: "user", content });
+
+    const lockResult = await withRun(async (getStopped) => {
+      if (planMode()) {
+        session.messages[0].content = session.baseSystem + PLAN_DIRECTIVE;
+        await runTurn(getStopped, session.readTools, READ_SCHEMAS);
+        if (!getStopped()) showApproveBar();
+      } else {
+        await runBuild(getStopped);
+      }
+    }, { force });
+
+    if (lockResult && lockResult.locked) {
+      rollbackOptimisticSend(bubble, text, savedAttachments);
+      if (await confirmLockOverride(lockResult)) await sendPrompt(true);
+    }
+  }
+
+  function showApproveBar() {
+    const bar = document.createElement("div");
+    bar.className = "approve-bar";
+    const discard = document.createElement("button");
+    discard.className = "ghost"; discard.textContent = "Discard";
+    const build = document.createElement("button");
+    build.className = "primary"; build.textContent = "Approve & build";
+    discard.onclick = () => { bar.remove(); addBubble("system", "Plan discarded."); };
+    build.onclick = () => { bar.remove(); executePlan(); };
+    bar.append(discard, build);
+    messages.appendChild(bar);
+    if (atBottom()) scroll();
+  }
+
+  async function executePlan(force) {
+    const bubble = addBubble("user", "Approved — build it.");
+    session.turnCommits = 0;
+    session.messages.push({ role: "user", content: "Approved. Implement that plan now: make the edits and commit them." });
+    const lockResult = await withRun((getStopped) => runBuild(getStopped), { force });
+    if (lockResult && lockResult.locked) {
+      popOptimisticUser(bubble);
+      if (await confirmLockOverride(lockResult)) await executePlan(true);
+      else showApproveBar();
+    }
+  }
+
+  function setRunning(on) {
+    // The send button stays available while a turn runs: what it does changes
+    // from "start a turn" to "steer the one in flight". Stop sits beside it.
+    $("btn-stop").hidden = !on;
+    $("btn-stop").disabled = false;
+    $("btn-attach").disabled = on;   // attachments compose a fresh message
+    prompt.disabled = false;
+    prompt.placeholder = on ? "Add something to the run…" : "Message the agent…";
+  }
+
+  // ------------------------------------------------------------- rendering
+  const messages = $("messages");
+  function atBottom() { return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 80; }
+  function scroll() { messages.scrollTop = messages.scrollHeight; }
+
+  // Scrolling up during a long reply shouldn't strand you: a pill appears to
+  // jump back to the live end. (Auto-scroll already pauses while you're away
+  // from the bottom, so reading back never fights the stream.)
+  $("btn-compact").addEventListener("click", compactNow);
+  $("btn-ctx").addEventListener("click", () => {
+    const used = contextTokens();
+    toast(used.toLocaleString() + " of ~" + CONTEXT_LIMIT_TOKENS.toLocaleString() +
+      " tokens used. Older turns are summarised automatically before this fills.");
+  });
+
+  const toBottomBtn = $("btn-to-bottom");
+  function syncToBottomBtn() { toBottomBtn.hidden = atBottom(); }
+  messages.addEventListener("scroll", syncToBottomBtn, { passive: true });
+  toBottomBtn.addEventListener("click", () => {
+    messages.scrollTo({ top: messages.scrollHeight, behavior: "smooth" });
+    toBottomBtn.hidden = true;
+  });
+  // A quiet "Copy" affordance on assistant replies — the phone equivalent of
+  // the desktop's hover actions, where there's no hover to rely on.
+  // ---- rewinding the tail of a conversation ----
+  // Edit-and-resend and Retry are deliberately limited to the LAST exchange.
+  // Reaching further back would mean mapping a bubble to a position in
+  // session.messages, which tool calls and compaction both shift underneath —
+  // and the last turn is where essentially all of the need is: you spot the
+  // typo you just made, or the answer you just got was wrong.
+  function lastUserIndex() {
+    const m = session.messages || [];
+    for (let i = m.length - 1; i >= 1; i--) if (m[i].role === "user") return i;
+    return -1;
+  }
+  // Re-render the visible conversation from the transcript. Tool lines aren't
+  // in the transcript, so they don't come back — the same as resuming a chat.
+  function replayTranscript() {
+    $("messages").innerHTML = "";
+    for (const b of session.transcript || []) addBubble(b.role, b.text, false);
+    refreshTailActions();
+    scroll();
+    syncToBottomBtn();
+  }
+  // Drop the transcript back to just before its last entry of `role`.
+  function trimTranscriptFromLast(role) {
+    const t = session.transcript || [];
+    for (let i = t.length - 1; i >= 0; i--) {
+      if (t[i].role === role) { session.transcript = t.slice(0, i); return; }
+    }
+  }
+
+  // Pick a turn back up after the OS suspended the app mid-request.
+  //
+  // Nothing is replayed: the history already holds every completed step, so
+  // continuing from it is an ordinary turn that happens to start in the middle
+  // of one. The only repair needed is for tool calls whose results never got
+  // recorded -- see healInterruptedTurn, without which the first request would
+  // be rejected for having an unanswered tool_call and the chat would be stuck.
+  async function resumeInterruptedTurn() {
+    if (!session || !session.interrupted || currentRun || composing) return;
+    session.interrupted = false;         // cleared first: a resume that fails
+                                         // must not re-arm itself into a loop
+    session.messages = AC.healInterruptedTurn(session.messages || []);
+    addBubble("system", "That turn stopped when the app went into the background. Carrying on from the last completed step.");
+    await withRun((getStopped) => runBuild(getStopped));
+  }
+
+  async function regenerateLast() {
+    if (currentRun || composing) return;
+    const at = lastUserIndex();
+    if (at < 0) { toast("Nothing to retry yet."); return; }
+    // Keep the user's message, drop everything the model said after it.
+    session.messages = session.messages.slice(0, at + 1);
+    trimTranscriptFromLast("assistant");
+    session.compact = null;          // the summary described messages that are gone
+    replayTranscript();
+    haptic(10);
+    await withRun((getStopped) => runBuild(getStopped));
+  }
+
+  async function editLast() {
+    if (currentRun || composing) return;
+    const at = lastUserIndex();
+    if (at < 0) { toast("Nothing to edit yet."); return; }
+    const original = session.messages[at];
+    // Attachments were folded into the message text when it was composed, so
+    // only the typed part can be handed back — say so instead of pretending.
+    const text = typeof original.content === "string"
+      ? original.content
+      : (original.content || []).filter((p) => p.type === "text").map((p) => p.text).join(" ");
+    session.messages = session.messages.slice(0, at);
+    trimTranscriptFromLast("user");
+    session.compact = null;
+    replayTranscript();
+    prompt.value = text;
+    prompt.style.height = "auto";
+    prompt.style.height = Math.min(prompt.scrollHeight, 160) + "px";
+    prompt.focus();
+    persistSession();
+    toast("Edit and send again. Any files already committed stay committed.");
+  }
+
+  function addBubbleActions(bubble, text) {
+    const act = document.createElement("div");
+    act.className = "bubble-actions";
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "bubble-copy";
+    copy.textContent = "Copy";
+    copy.addEventListener("click", () => copyText(text, copy));
+    act.appendChild(copy);
+    bubble.appendChild(act);
+  }
+
+  // Edit and Retry belong ONLY on the newest exchange, since that's all they
+  // can act on. Showing them on older bubbles would quietly rewind the tail
+  // instead of the message the user actually pointed at.
+  function refreshTailActions() {
+    for (const b of messages.querySelectorAll(".tail-action")) b.remove();
+    // Nothing to edit or re-run in a read-only chat: there is no agent behind
+    // it and session.messages is empty, so both buttons lead nowhere. Offering
+    // them is worse than not having them.
+    if (session && session.readOnly) return;
+    const mk = (bubble, label, fn) => {
+      if (!bubble) return;
+      let act = bubble.querySelector(".bubble-actions");
+      if (!act) {
+        act = document.createElement("div");
+        act.className = "bubble-actions";
+        bubble.appendChild(act);
+      }
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "bubble-copy tail-action";
+      btn.textContent = label;
+      btn.addEventListener("click", fn);
+      act.insertBefore(btn, act.firstChild);
+    };
+    const users = messages.querySelectorAll(".bubble.user");
+    const bots = messages.querySelectorAll(".bubble.assistant:not(.streaming)");
+    mk(users[users.length - 1], "Edit", editLast);
+    mk(bots[bots.length - 1], "Retry", regenerateLast);
+  }
+
+  function addBubble(role, text, record) {
+    const near = atBottom();
+    const div = document.createElement("div");
+    div.className = "bubble " + role;
+    renderText(div, text);
+    if (role === "assistant" && String(text || "").trim()) addBubbleActions(div, text);
+    messages.appendChild(div);
+    if (near) scroll();
+    syncToBottomBtn();
+    if (role === "user" || role === "assistant") refreshTailActions();
+    // Record durable bubbles so the conversation can be re-rendered on resume.
+    // (record defaults to true; the transcript replay passes false.)
+    if (record !== false && session && (role === "user" || role === "assistant" || role === "system")) {
+      session.transcript = session.transcript || [];
+      session.transcript.push({ role, text });
+    }
+    return div;
+  }
+  // Safe markdown rendering. Everything text-bearing goes through textContent /
+  // createTextNode — no innerHTML with model output, so no HTML/script injection.
+  // Handles fenced code, headings, lists, quotes, and inline emphasis/code/links.
+  function renderText(container, text) {
+    const parts = String(text == null ? "" : text).split(/```/);
+    parts.forEach((part, i) => {
+      if (i % 2 === 1) renderCodeBlock(container, part);
+      else if (part.trim()) renderBlocks(container, part);
+    });
+  }
+
+  function renderCodeBlock(container, part) {
+    const nl = part.indexOf("\n");
+    const lang = nl >= 0 ? part.slice(0, nl).trim() : "";
+    const code = (nl >= 0 ? part.slice(nl + 1) : part).replace(/\n$/, "");
+    const wrap = document.createElement("div");
+    wrap.className = "codewrap";
+    const bar = document.createElement("div");
+    bar.className = "codebar";
+    const tag = document.createElement("span");
+    tag.className = "code-lang";
+    tag.textContent = lang || "code";
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "code-copy";
+    btn.textContent = "Copy";
+    btn.addEventListener("click", () => copyText(code, btn));
+    bar.append(tag, btn);
+    const pre = document.createElement("pre");
+    pre.className = "code";
+    pre.textContent = code;
+    wrap.append(bar, pre);
+    container.appendChild(wrap);
+  }
+
+  // Block level: headings, bullet/numbered lists, blockquotes, paragraphs.
+  function renderBlocks(container, text) {
+    const lines = String(text).split("\n");
+    let list = null, ordered = false, para = [];
+    const flushPara = () => {
+      if (!para.length) return;
+      const p = document.createElement("div");
+      p.className = "para";
+      // Soft-wrap, as markdown does: a model that hard-wraps its prose at 80
+      // columns must not come out with ragged line breaks on a narrow phone.
+      renderInline(p, para.join(" "));
+      container.appendChild(p);
+      para = [];
+    };
+    const flushList = () => { list = null; };
+    for (const line of lines) {
+      const t = line.trim();
+      if (!t) { flushPara(); flushList(); continue; }
+      const h = /^(#{1,4})\s+(.*)$/.exec(t);
+      const bullet = /^[-*+]\s+(.*)$/.exec(t);
+      const num = /^\d+[.)]\s+(.*)$/.exec(t);
+      const quote = /^>\s?(.*)$/.exec(t);
+      if (h) {
+        flushPara(); flushList();
+        const el = document.createElement("div");
+        el.className = "mdh mdh" + h[1].length;
+        renderInline(el, h[2]);
+        container.appendChild(el);
+      } else if (bullet || num) {
+        flushPara();
+        const isOrdered = !!num;
+        if (!list || ordered !== isOrdered) {
+          list = document.createElement(isOrdered ? "ol" : "ul");
+          list.className = "mdlist";
+          ordered = isOrdered;
+          container.appendChild(list);
+        }
+        const li = document.createElement("li");
+        renderInline(li, bullet ? bullet[1] : num[1]);
+        list.appendChild(li);
+      } else if (quote) {
+        flushPara(); flushList();
+        const q = document.createElement("div");
+        q.className = "mdquote";
+        renderInline(q, quote[1]);
+        container.appendChild(q);
+      } else { flushList(); para.push(t); }
+    }
+    flushPara();
+  }
+
+  // Inline: `code`, **bold**, *italic*, [label](url), and bare links.
+  function renderInline(el, text) {
+    const src = String(text);
+    const rx = /`([^`]+)`|\*\*([^*]+)\*\*|\*([^*\n]+)\*|\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>]+)/g;
+    let last = 0, m;
+    while ((m = rx.exec(src))) {
+      if (m.index > last) el.appendChild(document.createTextNode(src.slice(last, m.index)));
+      if (m[1] != null) { const c = document.createElement("code"); c.textContent = m[1]; el.appendChild(c); }
+      else if (m[2] != null) { const b = document.createElement("strong"); b.textContent = m[2]; el.appendChild(b); }
+      else if (m[3] != null) { const i = document.createElement("em"); i.textContent = m[3]; el.appendChild(i); }
+      else if (m[4] != null) el.appendChild(mdLink(m[5], m[4]));
+      else if (m[6] != null) el.appendChild(mdLink(m[6], m[6]));
+      last = rx.lastIndex;
+    }
+    if (last < src.length) el.appendChild(document.createTextNode(src.slice(last)));
+  }
+  // http(s) only — never javascript:/data:, whatever the model emits.
+  function mdLink(href, label) {
+    const a = document.createElement("a");
+    a.href = /^https?:\/\//i.test(href) ? href : "#";
+    a.textContent = label;
+    a.target = "_blank";
+    a.rel = "noopener noreferrer";
+    return a;
+  }
+
+  async function copyText(text, btn) {
+    try {
+      await navigator.clipboard.writeText(text);
+      haptic(8);
+      if (btn) { const was = btn.textContent; btn.textContent = "Copied"; btn.classList.add("ok");
+        setTimeout(() => { btn.textContent = was; btn.classList.remove("ok"); }, 1200); }
+    } catch (e) { toast("Couldn't copy"); }
+  }
+  // Short, quiet taps on meaningful moments. Silently absent on iOS Safari.
+  function haptic(ms) {
+    if (!hapticsOn()) return;
+    try { if (navigator.vibrate) navigator.vibrate(ms); } catch (e) {}
+  }
+  function addTool(name, args) {
+    const near = atBottom();
+    const div = document.createElement("div");
+    div.className = "tool-line running";
+    const head = document.createElement("div");
+    head.className = "tool-head";
+    head.textContent = "⚙ " + name + argSummary(name, args);
+    div.appendChild(head);
+    messages.appendChild(div);
+    if (near) scroll();
+    return div;
+  }
+  function finishTool(div, out) {
+    div.classList.remove("running");
+    const body = document.createElement("pre");
+    body.className = "tool-out";
+    body.textContent = String(out).slice(0, 1500);
+    div.appendChild(body);
+    div.querySelector(".tool-head").addEventListener("click", () => div.classList.toggle("open"));
+    if (atBottom()) scroll();
+  }
+  function argSummary(name, a) {
+    if (!a) return "";
+    if (a.path) return " · " + a.path;
+    if (a.pattern) return " · " + a.pattern;
+    if (a.query) return " · " + a.query;
+    return "";
+  }
+  let statusBubble = null;
+  function setStatus(text) {
+    if (!text) { if (statusBubble) { statusBubble.remove(); statusBubble = null; } return; }
+    if (!statusBubble) {
+      statusBubble = document.createElement("div");
+      statusBubble.className = "status";
+      messages.appendChild(statusBubble);
+    }
+    statusBubble.textContent = text;
+    if (atBottom()) scroll();
+  }
+
+  // ================================================================ BACKGROUND
+  // The background choice is a cosmetic preference, not a secret, so it lives in
+  // plain localStorage (unencrypted) and is applied at boot regardless of lock
+  // state. Uploaded images are downscaled and stored as a data URL on-device.
+  const BG_KEY = "mnm.bg.v1";
+  const BG_PRESETS = [
+    { label: "Default", type: "default", css: "#0b0d10" },
+    { label: "Midnight", type: "color", value: "linear-gradient(160deg,#0d1526,#0b0d10 70%)" },
+    { label: "Plum", type: "color", value: "linear-gradient(160deg,#1c1030,#0b0d10 70%)" },
+    { label: "Pine", type: "color", value: "linear-gradient(160deg,#052622,#0b0d10 70%)" },
+    { label: "Ember", type: "color", value: "linear-gradient(160deg,#2a1206,#0b0d10 70%)" },
+    { label: "Nebula", type: "color", value: "radial-gradient(120% 90% at 28% 12%,#26407a,#0b0d10 60%)" },
+  ];
+  function loadBg() { try { return JSON.parse(localStorage.getItem(BG_KEY) || "null"); } catch { return null; } }
+  function saveBg(bg) {
+    try { if (bg) localStorage.setItem(BG_KEY, JSON.stringify(bg)); else localStorage.removeItem(BG_KEY); return true; }
+    catch { return false; }
+  }
+  // Relative luminance of a #rrggbb colour (0 = black … 1 = white).
+  function hexLuminance(hex) {
+    const m = /^#?([0-9a-fA-F]{6})$/.exec(String(hex || "").trim());
+    if (!m) return null;
+    const n = parseInt(m[1], 16);
+    const lin = (c) => { c /= 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); };
+    return 0.2126 * lin(n >> 16 & 255) + 0.7152 * lin(n >> 8 & 255) + 0.0722 * lin(n & 255);
+  }
+  // Is the background light enough that we should switch to dark text?
+  function bgIsLight(bg) {
+    if (!bg || bg.type === "default") return false;      // default is dark
+    if (bg.type === "image") return !!bg.light;          // sampled when chosen
+    if (bg.type === "color") { const L = hexLuminance(bg.value); return L != null && L > 0.6; } // gradients (not hex) are dark presets
+    return false;
+  }
+  // The wallpaper goes on <html> ONLY, never on #bg-layer as well.
+  //
+  // <html>'s background propagates to the root canvas, which is the one
+  // surface that reaches the strip of screen below the layout viewport in an
+  // installed iOS PWA — a position:fixed layer cannot, which was tried. If
+  // #bg-layer painted the same image too, it would scale `cover` to its own
+  // (viewport-sized) box while the canvas scaled to <html>'s taller box, and
+  // the two would meet in a visible line just above the bottom of the screen.
+  // That line was the reported "gradient offset". One painter, no seam.
+  function applyBg(bg) {
+    const layer = $("bg-layer");
+    const root = document.documentElement;
+    layer.classList.remove("image");
+    document.body.classList.toggle("light-bg", bgIsLight(bg));
+    // Assigning the `background` shorthand already resets background-image, so
+    // there is nothing to clear afterwards — and clearing it unconditionally
+    // wiped out the gradient the shorthand had just set, which is why the
+    // gradient presets came out blank while photo wallpapers worked.
+    const set = (el, css, img) => {
+      el.style.background = css;
+      if (img) el.style.backgroundImage = img;
+    };
+    set(layer, "");                       // never paints while a wallpaper is up
+    if (!bg || bg.type === "default") {
+      document.body.classList.remove("has-bg");
+      set(root, "");
+      return;
+    }
+    // body.has-bg turns body transparent so the canvas shows through it; while
+    // body still had an opaque background it covered the canvas over the whole
+    // viewport, leaving the canvas visible only in the strip. That split is
+    // exactly what produced two differently-scaled copies of the image.
+    document.body.classList.add("has-bg");
+    if (bg.type === "image") {
+      layer.classList.add("image");
+      set(root, "#0b0d10 center/cover no-repeat", 'url("' + bg.value + '")');
+    } else {
+      set(root, bg.value);
+    }
+  }
+  function sameBg(a, b) {
+    if (!a) return b.type === "default";
+    if (a.type !== b.type) return false;
+    return a.type === "default" || a.value === b.value;
+  }
+  function setBg(bg) {
+    applyBg(bg);                       // always apply for this session
+    if (!saveBg(bg) && bg) toast("Applied — but too large to remember next launch.");
+    renderAllBgPickers();
+  }
+  function renderAllBgPickers() { ["setup-bg", "settings-bg"].forEach((id) => { const el = $(id); if (el) renderBgPicker(el); }); }
+  function renderBgPicker(container) {
+    const cur = loadBg();
+    container.innerHTML = "";
+    for (const p of BG_PRESETS) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "swatch"; b.title = p.label;
+      b.style.background = p.type === "default" ? p.css : p.value;
+      if (sameBg(cur, p)) b.classList.add("sel");
+      b.addEventListener("click", () => setBg(p.type === "default" ? null : { type: "color", value: p.value }));
+      container.appendChild(b);
+    }
+    // custom colour
+    const color = document.createElement("label");
+    color.className = "swatch color-pick" + (cur && cur.type === "color" && /^#/.test(cur.value) ? " sel" : "");
+    color.title = "Custom colour";
+    const ci = document.createElement("input");
+    ci.type = "color"; ci.value = (cur && cur.type === "color" && /^#/.test(cur.value)) ? cur.value : "#0b0d10";
+    ci.addEventListener("input", () => setBg({ type: "color", value: ci.value }));
+    color.appendChild(ci); container.appendChild(color);
+    // image upload
+    const up = document.createElement("label");
+    up.className = "swatch upload" + (cur && cur.type === "image" ? " sel" : "");
+    up.title = "Upload an image"; up.textContent = "＋";
+    const fi = document.createElement("input");
+    fi.type = "file"; fi.accept = "image/*"; fi.hidden = true;
+    fi.addEventListener("change", () => handleBgFile(fi));
+    up.appendChild(fi); container.appendChild(up);
+  }
+  // Average luminance of a canvas (sampled tiny) → true if it's a light image.
+  function canvasIsLight(canvas) {
+    try {
+      const s = document.createElement("canvas"); s.width = 16; s.height = 16;
+      const sc = s.getContext("2d"); sc.drawImage(canvas, 0, 0, 16, 16);
+      const d = sc.getImageData(0, 0, 16, 16).data;
+      let sum = 0;
+      for (let i = 0; i < d.length; i += 4) sum += (0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2]) / 255;
+      return sum / (d.length / 4) > 0.6;
+    } catch { return false; }
+  }
+  function handleBgFile(input) {
+    const f = input.files && input.files[0];
+    input.value = "";
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const max = 2560; // keep wallpaper sharp on high-DPI phones
+        let w = img.width, h = img.height;
+        const scale = Math.min(1, max / Math.max(w, h));
+        w = Math.round(w * scale); h = Math.round(h * scale);
+        const c = document.createElement("canvas"); c.width = w; c.height = h;
+        c.getContext("2d").drawImage(img, 0, 0, w, h);
+        let data; try { data = c.toDataURL("image/jpeg", 0.82); } catch { data = reader.result; }
+        setBg({ type: "image", value: data, light: canvasIsLight(c) });
+      };
+      img.onerror = () => toast("Couldn't read that image.");
+      img.src = reader.result;
+    };
+    reader.onerror = () => toast("Couldn't read that image.");
+    reader.readAsDataURL(f);
+  }
+
+  // ================================================================ PREFERENCES
+  // Non-secret settings live in plain localStorage. The model NAME isn't a
+  // secret (the key is), so it can live here and override what setup stored.
+  function pref(k, def) { const v = localStorage.getItem(k); return v === null ? def : v; }
+  /* Every API this phone knows about, paired over from the desktop. Kept in
+   * localStorage next to the other preferences rather than in the vault: the
+   * vault is unlocked with the PIN and this list has to be readable to draw
+   * the settings screen. The KEYS are the sensitive part, and they came from a
+   * camera rather than the network, which is the property worth preserving. */
+  const PROVIDERS_KEY = "mnm.providers";
+  function getProviders() {
+    try { return JSON.parse(localStorage.getItem(PROVIDERS_KEY) || "[]") || []; }
+    catch { return []; }
+  }
+  function setProviders(list) {
+    try { localStorage.setItem(PROVIDERS_KEY, JSON.stringify(list || [])); } catch { }
+  }
+  /* The provider a chat runs on. Falls back to whatever pairing configured
+   * first, so a phone paired before any of this still works untouched. */
+  function currentProvider() {
+    const list = getProviders();
+    const want = pref("mnm.provider", "");
+    return list.find((p) => p.name === want)
+      || list.find((p) => AC.normalizeBase(p.baseUrl)
+        === AC.normalizeBase(session && session.secrets && session.secrets.baseUrl))
+      || list[0] || null;
+  }
+  /* Which model answers, in order of how deliberate the choice was.
+   *
+   * The vault's model used to rank BELOW the provider's first model, and that
+   * is not a detail: the model picked on the setup screen is written into the
+   * vault, so on any phone that had also been paired -- which is every phone
+   * that scanned a QR -- the desktop provider's first model silently replaced
+   * the choice just made. You picked gemini-3.5-flash-lite, the app used
+   * whatever happened to sort first in the paired list, and the first message
+   * failed saying that model does not exist.
+   *
+   * It only ranks above models[0] when the provider actually offers it,
+   * though. Switching APIs leaves the vault holding a model belonging to the
+   * old one, and sending a glm name to a Gemini key was only ever going to
+   * 404. */
+  function getModelName() {
+    const chosen = pref("mnm.model", "");
+    if (chosen) return chosen;
+    const p = currentProvider();
+    const models = (p && p.models) || [];
+    const stored = (session && session.secrets && session.secrets.model) || "";
+    if (stored && (!models.length || models.includes(stored))) return stored;
+    if (models.length) return models[0];
+    return stored || "glm-4.7-flash";
+  }
+  function getThinking() { return pref("mnm.thinking", "medium"); }
+  function confirmCommits() { return pref("mnm.confirm", "1") === "1"; }
+  function planMode() { return pref("mnm.plan", "0") === "1"; }
+  function subagentsOn() { return pref("mnm.subagents", "1") === "1"; }
+  function hapticsOn() { return pref("mnm.haptics", "1") === "1"; }
+  // `why` belongs here for the same reason view_image does: it is read-only,
+  // and "what was already tried and reverted" is exactly a planning question --
+  // the one a plan that repeats a mistake was missing.
+  const READ_TOOL_NAMES = ["list_dir", "glob", "read_file", "grep", "search_code",
+                           "why", "check_ci"];
+  // view_image is read-only, and looking at a mockup is exactly a planning job,
+  // so plan mode gets it too (session.readTools already wires the implementation).
+  const READ_SCHEMAS = AC.TOOL_SCHEMAS.filter((s) => READ_TOOL_NAMES.includes(s.function.name))
+    .concat([AC.VIEW_IMAGE_SCHEMA]);
+  const PLAN_DIRECTIVE = "\n\nPLAN MODE: do NOT edit or commit anything. Use the read/search tools to " +
+    "investigate, then reply with a short, concrete numbered plan of the exact changes you'd make " +
+    "(which files, and what changes in each). Stop after the plan and wait for approval.";
+  function buildModel() {
+    session.model = newModel(getModelName());
+  }
+  function thinkingDirective(mode) {
+    if (mode === "low") return "\n\nBe fast and direct: minimal deliberation, short answers.";
+    if (mode === "high") return "\n\nThink carefully, step by step, before acting; after each edit re-read it to check correctness.";
+    if (mode === "max") return "\n\nThink rigorously and be exhaustive: plan before acting, verify every change against the request, and prefer correctness over speed.";
+    return ""; // medium
+  }
+  const REVIEW_NUDGE = "Now review the change(s) you just made with fresh eyes. If anything is incorrect, " +
+    "incomplete, or doesn't match my request, fix it now. If it's all correct, reply APPROVED.";
+  function setSegOn(seg, val) {
+    for (const b of seg.querySelectorAll("button[data-v]")) b.classList.toggle("on", b.dataset.v === val);
+  }
+
+  // ================================================================ SETTINGS SHEET
+  function openSettings() {
+    renderBgPicker($("settings-bg"));
+    // This draws the model control too (through renderModelOptions), which
+    // decides between the menu and the text box from the chosen provider's
+    // list and selects the current model in whichever is showing. Setting the
+    // field here as well is how the two used to disagree.
+    renderProviderPicker();
+    setSegOn($("set-thinking"), getThinking());
+    $("set-plan").checked = planMode();
+    $("set-subagents").checked = subagentsOn();
+    $("set-confirm").checked = confirmCommits();
+    $("set-haptics").checked = hapticsOn();
+    $("set-autolock").value = String(parseInt(pref("mnm.autolock", "15"), 10) || 0);
+    $("set-keepsignedin").checked = keepSignedIn();
+    $("set-sync").checked = syncOn();
+    $("set-sync-pass-row").hidden = !syncOn();
+    $("set-kb-cal").checked = calibrating();
+    renderDiagnostics();
+    $("settings-backdrop").hidden = false;
+  }
+  function closeSettings() { $("settings-backdrop").hidden = true; stopDiagnostics(); }
+
+  // ---- diagnostics ----
+  // Everything that has gone wrong on this screen -- the keyboard, the safe
+  // areas, the strip under the layout viewport -- is invisible to any browser
+  // that isn't this phone. Three attempts at the keyboard were guesses shipped
+  // and checked by screenshot. These are the numbers that would have answered
+  // it on the first try, so they are in the app now rather than in my head.
+  let diagTimer = null;
+  function buildDiagnostics() {
+    const build = (document.querySelector('meta[name="mnm-build"]') || {}).content || "?";
+    const rows = [
+      ["build", build],
+      // What this bundle CONTAINS, asked of the code itself.
+      //
+      // The stamp above lives in index.html and proves only that index.html is
+      // current -- app.js and agent-core.js are separate files that arrive
+      // separately, and a report of "the build id is right but nothing else
+      // changed" cannot be answered by a number that only describes one of the
+      // three. So each capability is probed where it actually lives.
+      ["core", typeof AC.LIVE_MODEL === "string" ? "voice-capable" : "older"],
+      ["app", typeof startVoice === "function" ? "voice-capable" : "older"],
+      // And whether the feature can RUN, which is a different question again:
+      // shipped, deployed and gated off looks identical to never arrived.
+      ["voice", voiceAvailable() ? "ready" : voiceUnavailableReason()],
+      ["apis", getProviders().map((p) => (p.name || "?")
+        + (p.key ? "" : " (no key)")).join(", ") || "none"],
+      // What the spoken session was actually offered. The model claiming it
+      // cannot write files is a claim about this list, and this is the only
+      // place it can be checked against reality rather than against source.
+      ["voice tools", voice.sentTools === null
+        ? "voice not opened yet on this launch"
+        : voice.sentTools.length + " — " + (voice.sentTools.join(", ") || "none")],
+      // A property of the BUNDLE, so it is reported without needing a session:
+      // a tool that is declared but never mentioned in the prompt is one the
+      // model does not reach for, which looks identical to one that is missing.
+      ["voice prompt", (/dispatch_worker/.test(AC.LIVE_VOICE_PROMPT || "")
+        ? "mentions workers" : "NO worker instructions")
+        + (voice.sentPromptChars ? ", " + voice.sentPromptChars + " chars sent" : "")],
+      ["voice resumed", voice.sentTools === null ? "—" : String(voice.resumed)],
+      ["voice last close", voice.lastClose || "—"],
+      ["standalone", String(!!(window.matchMedia("(display-mode: standalone)").matches ||
+                               navigator.standalone))],
+      ["platform", navigator.platform || "?"],
+    ].concat(geometry());
+    if (kbPeak) {
+      rows.push(["", ""], ["while typing", kbPeak.at]);
+      for (const [k, v] of kbPeak.rows) rows.push(["  " + k, v]);
+    } else {
+      rows.push(["", ""],
+                ["while typing", "nothing recorded — type a character, then reopen this"]);
+    }
+    if (focusShove) {
+      rows.push(["", ""], ["on focus", focusShove.at],
+                ["  scrollY moved", focusShove.scrollY + "px"],
+                ["  visual top moved", focusShove.vvTop + "px"],
+                ["  html height moved", Math.round(focusShove.htmlD) + "px"]);
+    } else {
+      rows.push(["", ""], ["on focus", "nothing recorded yet"]);
+    }
+    return rows;
+  }
+  const diagText = () =>
+    buildDiagnostics().map(([k, v]) => (k ? k + ": " + v : "")).join("\n");
+
+  function renderDiagnostics() {
+    const el = $("set-diag");
+    if (!el) return;
+    const paint = () => { el.textContent = diagText(); };
+    paint();
+    // Live, because the interesting values only exist while the keyboard is up
+    // and you cannot read a static snapshot taken before you opened it.
+    stopDiagnostics();
+    diagTimer = setInterval(paint, 400);
+  }
+  function stopDiagnostics() {
+    if (diagTimer) { clearInterval(diagTimer); diagTimer = null; }
+  }
+  $("btn-copy-diag").addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(diagText()); toast("Diagnostics copied."); }
+    catch (e) { toast("Couldn't copy — read them off the screen."); }
+  });
+
+  // ---- composer height calibration ----
+  // The gap left under the composer for iOS's accessory bar cannot be measured
+  // from the page, and the two values shipped so far were both wrong in
+  // opposite directions. This puts the number under the thumb of the only
+  // observer that can see the bar, at the only time it is drawn.
+  const KB_CAL_KEY = "mnm.kb.cal";
+  function calibrating() { return localStorage.getItem(KB_CAL_KEY) === "1"; }
+  function paintCalibration() {
+    const strip = $("kb-calibrate");
+    if (!strip) return;
+    strip.hidden = !calibrating();
+    const val = $("kb-cal-val");
+    if (val) val.textContent = accessoryAllowance() + "px";
+  }
+  // pointerdown with preventDefault, not click: a tap that moves focus off the
+  // textarea puts the keyboard away and takes the bar with it, so the thing
+  // being adjusted would vanish at the moment of adjusting it.
+  for (const [id, delta] of [["kb-cal-down", -2], ["kb-cal-up", 2]]) {
+    const b = $(id);
+    if (!b) continue;
+    b.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      setAccessoryAllowance(accessoryAllowance() + delta);
+    });
+  }
+  $("kb-cal-done").addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    localStorage.setItem(KB_CAL_KEY, "0");
+    const box = $("set-kb-cal");
+    if (box) box.checked = false;
+    paintCalibration();
+    toast("Composer gap set to " + accessoryAllowance() + "px.");
+  });
+  $("set-kb-cal").addEventListener("change", () => {
+    localStorage.setItem(KB_CAL_KEY, $("set-kb-cal").checked ? "1" : "0");
+    paintCalibration();
+  });
+  paintCalibration();
+  $("btn-repo-settings").addEventListener("click", openSettings);
+  $("btn-chat-settings").addEventListener("click", openSettings);
+  $("btn-chats-settings").addEventListener("click", openSettings);
+  $("btn-settings-done").addEventListener("click", closeSettings);
+  /* ---------------------------------------------------------------- push --
+   *
+   * The phone genuinely cannot work in the background, so the desktop finishes
+   * turns it was suspended through -- and until now never told it. A push
+   * cannot RUN anything here either; it just says so, which is the gap.
+   *
+   * Everything below can fail for reasons that are not errors: Safari only
+   * offers push to an app installed to the home screen, the user can decline
+   * the permission, and there may be no desktop paired yet. Each of those gets
+   * said plainly rather than reported as a failure.
+   */
+  async function enablePush() {
+    if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+      return { error: "This browser can't do notifications. On iPhone, add the app to your home screen first." };
+    }
+    if (Notification.permission === "denied") {
+      return { error: "Notifications are blocked for this app in your browser settings." };
+    }
+    const store = await ensureSyncStore();
+    if (!store) return { error: "Turn on chat sync first — that's how your desktop reaches this phone." };
+
+    const key = await store.pushKey();
+    if (!key) {
+      return { error: "No desktop has published a push key yet. Open the desktop app once with sync on, then try again." };
+    }
+    if ((await Notification.requestPermission()) !== "granted") {
+      return { error: "Not enabled — you'll still see everything when you open the app." };
+    }
+    const reg = await navigator.serviceWorker.ready;
+    // Re-subscribing with a DIFFERENT key silently fails on some browsers, so
+    // an existing subscription for another desktop is dropped first.
+    let sub = await reg.pushManager.getSubscription();
+    if (sub && !sameKey(sub, key)) { try { await sub.unsubscribe(); } catch (e) {} sub = null; }
+    if (!sub) {
+      sub = await reg.pushManager.subscribe({
+        // Required by Safari and Chrome alike: a worker that receives a push
+        // and shows nothing gets its subscription revoked.
+        userVisibleOnly: true,
+        applicationServerKey: b64urlToBytes(key),
+      });
+    }
+    await store.registerPush(JSON.parse(JSON.stringify(sub)));
+    return { ok: true };
+  }
+
+  function sameKey(sub, key) {
+    try {
+      const raw = sub.options && sub.options.applicationServerKey;
+      if (!raw) return false;
+      return bytesToB64Url(new Uint8Array(raw)) === key;
+    } catch (e) { return false; }
+  }
+
+  function b64urlToBytes(text) {
+    const pad = text.replace(/-/g, "+").replace(/_/g, "/");
+    const raw = atob(pad + "=".repeat((4 - pad.length % 4) % 4));
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  function bytesToB64Url(bytes) {
+    let s = "";
+    for (const b of bytes) s += String.fromCharCode(b);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+
+  const pushToggle = $("set-push");
+  if (pushToggle) {
+    pushToggle.addEventListener("change", async () => {
+      if (!pushToggle.checked) {
+        // Left registered on purpose: unsubscribing here would need a write to
+        // the store to match, and a toggle flicked by accident should not cost
+        // a round trip. The desktop drops dead endpoints on its own.
+        setPushHint("Off — turn it back on any time.");
+        return;
+      }
+      pushToggle.disabled = true;
+      setPushHint("Asking…");
+      let res;
+      try { res = await enablePush(); } catch (e) { res = { error: String(e && e.message || e) }; }
+      pushToggle.disabled = false;
+      if (res && res.ok) {
+        setPushHint("On — your desktop can reach this phone.");
+      } else {
+        pushToggle.checked = false;
+        setPushHint((res && res.error) || "Couldn't turn that on.");
+      }
+    });
+  }
+
+  function setPushHint(text) {
+    const el = $("set-push-hint");
+    if (el) el.textContent = text;
+  }
+
+  $("settings-backdrop").addEventListener("click", (e) => { if (e.target === $("settings-backdrop")) closeSettings(); });
+  $("btn-settings-lock").addEventListener("click", () => { closeSettings(); lock(); });
+  /* The API picker, and the model list that follows from it. Drawn from the
+   * paired providers so the phone offers what the desktop has, rather than a
+   * base URL typed into a phone and a model name spelled from memory. */
+  function renderProviderPicker() {
+    // Whether talking is possible depends on which APIs are configured, and
+    // pairing can add one at any time -- so the button is re-checked wherever
+    // the provider list is drawn rather than only at startup.
+    refreshVoiceButton();
+    const list = getProviders();
+    const block = $("set-provider-block");
+    const sel = $("set-provider");
+    if (block && sel) {
+      // One API is not a choice, so the row stays out of the way -- but the
+      // model list below it still has to be drawn, which is why this guard
+      // does not return.
+      block.hidden = list.length < 2;
+      const cur = currentProvider();
+      sel.innerHTML = "";
+      for (const p of list) {
+        const o = document.createElement("option");
+        o.value = p.name; o.textContent = p.name;
+        if (cur && p.name === cur.name) o.selected = true;
+        sel.appendChild(o);
+      }
+    }
+    renderModelOptions();
+  }
+  /* The model menu, drawn from the chosen provider -- so the names offered
+   * belong to the API that will actually be called; glm names against a Gemini
+   * key were only ever going to 404.
+   *
+   * Falls back to the text box when this API has no list to offer, which is
+   * the case for an endpoint typed in by hand. Same split as the setup screen,
+   * and for the same reason: with a list, spelling a model out is a typo
+   * waiting to happen; without one, typing is all there is. */
+  function renderModelOptions() {
+    const sel = $("set-model-pick"), box = $("set-model");
+    if (!sel || !box) return;
+    const p = currentProvider();
+    const models = ((p && p.models) || []).slice();
+    const cur = getModelName();
+    sel.hidden = !models.length;
+    box.hidden = !!models.length;
+    $("set-model-hint").textContent = models.length
+      ? "Which model answers. Scan the QR on your computer again if one is missing."
+      : "The model name this API expects, spelled exactly.";
+    if (!models.length) { box.value = cur; return; }
+    // A model the list does not carry is still the one in use -- offered
+    // rather than quietly swapped out from under the chat, which is the whole
+    // failure this screen just had.
+    if (cur && !models.includes(cur)) models.unshift(cur);
+    sel.innerHTML = "";
+    for (const m of models) {
+      const o = document.createElement("option");
+      o.value = m; o.textContent = m;
+      if (m === cur) o.selected = true;
+      sel.appendChild(o);
+    }
+  }
+  if ($("set-provider")) {
+    $("set-provider").addEventListener("change", () => {
+      localStorage.setItem("mnm.provider", $("set-provider").value);
+      // The model belonged to the old API. Move to one this provider has
+      // rather than sending a name it has never heard of.
+      const p = currentProvider();
+      const models = (p && p.models) || [];
+      if (models.length && !models.includes(pref("mnm.model", ""))) {
+        localStorage.setItem("mnm.model", models[0]);
+      }
+      renderModelOptions();
+      if (session) buildModel();
+    });
+  }
+
+  function chooseModel(name) {
+    const m = String(name || "").trim();
+    localStorage.setItem("mnm.model", m || getModelName());
+    if (session) buildModel();
+  }
+  $("set-model-pick").addEventListener("change", () => chooseModel($("set-model-pick").value));
+  $("set-model").addEventListener("change", () => chooseModel($("set-model").value));
+  $("set-thinking").addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-v]"); if (!b) return;
+    localStorage.setItem("mnm.thinking", b.dataset.v);
+    setSegOn($("set-thinking"), b.dataset.v);
+  });
+  $("set-plan").addEventListener("change", () => {
+    localStorage.setItem("mnm.plan", $("set-plan").checked ? "1" : "0");
+  });
+  $("set-subagents").addEventListener("change", () => {
+    localStorage.setItem("mnm.subagents", $("set-subagents").checked ? "1" : "0");
+  });
+  $("set-confirm").addEventListener("change", () => {
+    localStorage.setItem("mnm.confirm", $("set-confirm").checked ? "1" : "0");
+  });
+  $("set-haptics").addEventListener("change", () => {
+    localStorage.setItem("mnm.haptics", $("set-haptics").checked ? "1" : "0");
+    haptic(12);   // confirm the setting with the thing itself
+  });
+  $("set-autolock").addEventListener("change", () => {
+    localStorage.setItem("mnm.autolock", $("set-autolock").value);
+    armIdle();
+  });
+  $("set-keepsignedin").addEventListener("change", async () => {
+    const on = $("set-keepsignedin").checked;
+    localStorage.setItem("mnm.keepsignedin", on ? "1" : "0");
+    if (!on) { localStorage.removeItem(KEEPKEY_KEY); return; }
+    // Turning it on: remember the key so future launches skip the PIN. Re-derive
+    // an extractable key from the PIN we still hold if needed.
+    try {
+      let key = session && session.cryptoKey;
+      if (session && session.pin && session.vaultSalt) key = await AC.deriveKey(session.pin, session.vaultSalt, true);
+      if (key) { session.cryptoKey = key; localStorage.setItem(KEEPKEY_KEY, await AC.exportRawKey(key)); }
+    } catch { toast("Couldn't enable — lock and unlock once, then try again."); }
+  });
+
+  // ---- sync settings + passphrase sheet ----
+  $("set-sync").addEventListener("change", () => {
+    const on = $("set-sync").checked;
+    if (on && !hasSyncPass()) { $("set-sync").checked = false; startSync(); return; }
+    localStorage.setItem("mnm.sync", on ? "1" : "0");
+    $("set-sync-pass-row").hidden = !on;
+    if (!on && session) session.syncStore = null;
+  });
+
+  /* Turning sync on where this phone has no key yet.
+   *
+   * Almost always it already does: pairing carries it over, which is the
+   * whole point of pairing. Beyond that there are two cases and only one of
+   * them needs a person. Nothing here yet -- this phone is the first device --
+   * and it makes a key, the same way the computer would. A store that already
+   * exists, and the key is decided and cannot be guessed, so the recovery code
+   * has to be copied across.
+   *
+   * What it no longer does is ask anyone to invent a passphrase and type it
+   * twice. That was never a password, and a phone keyboard is the worst place
+   * to mistype the one string that has to match another device exactly.
+   */
+  async function startSync() {
+    if (!session || !session.cryptoKey) { toast("Unlock first."); return; }
+    toast("Setting up shared chats…");
+    try {
+      const api = AC.makeGitHub({ token: session.secrets.githubToken, owner: "", repo: "" });
+      const { owner, repo } = await AC.ensureSyncRepo(api);
+      const gh = AC.makeGitHub({ token: session.secrets.githubToken,
+        owner, repo, branch: AC.SYNC_REPO_BRANCH });
+      if (await AC.syncStoreExists(gh)) { openSyncPass(); return; }
+      const pass = AC.makeSyncPassphrase();
+      const { store } = await AC.openSync(gh, pass);
+      await storeSyncPass(pass);
+      localStorage.setItem("mnm.sync", "1");
+      session.syncStore = store;
+      if (session.chatId) await syncSave();
+      $("set-sync").checked = true;
+      $("set-sync-pass-row").hidden = false;
+      toast("Shared chats are on.");
+    } catch (e) {
+      toast(friendlyGhError(e, "list"));
+    }
+  }
+  // Shows the key rather than offering to change it. Changing it was never a
+  // useful thing to do -- a new one cannot read anything already uploaded --
+  // whereas reading it off is how a second computer joins.
+  $("btn-change-syncpass").addEventListener("click", async () => {
+    const box = $("set-syncpass-code"), hint = $("set-syncpass-hint");
+    if (!box.hidden) { box.hidden = true; hint.hidden = true; box.value = ""; return; }
+    const pass = await getSyncPass();
+    if (!pass) { toast("Shared chats aren't on yet."); return; }
+    box.value = pass; box.hidden = false; hint.hidden = false;
+  });
+  function openSyncPass() {
+    $("in-syncpass").value = "";
+    $("syncpass-error").textContent = "";
+    $("syncpass-backdrop").hidden = false;
+  }
+  function closeSyncPass() { $("syncpass-backdrop").hidden = true; }
+  $("btn-syncpass-cancel").addEventListener("click", closeSyncPass);
+  $("syncpass-backdrop").addEventListener("click", (e) => { if (e.target === $("syncpass-backdrop")) closeSyncPass(); });
+  $("btn-syncpass-save").addEventListener("click", async () => {
+    const err = $("syncpass-error"); err.textContent = "";
+    const p1 = $("in-syncpass").value.trim();
+    if (p1.length < 6) return (err.textContent = "That code is too short to be one.");
+    if (!session || !session.cryptoKey) return (err.textContent = "Unlock first.");
+    $("btn-syncpass-save").disabled = true;
+    try {
+      // Verify the passphrase against the central store BEFORE storing it, so
+      // a mismatch with another device is caught here rather than silently
+      // forking the history (or, worse, bootstrapping a fresh empty store
+      // under a typo'd passphrase that then "just works" with nothing in it).
+      const { store } = await openCentralSync(p1);
+      await storeSyncPass(p1);
+      localStorage.setItem("mnm.sync", "1");
+      session.syncStore = store;
+      if (session.chatId) await syncSave();   // catch up an in-progress chat
+      closeSyncPass();
+      $("set-sync").checked = true;
+      $("set-sync-pass-row").hidden = false;
+      toast("Sync enabled.");
+    } catch (e) { err.textContent = friendlyGhError(e, "list"); }
+    finally { $("btn-syncpass-save").disabled = false; }
+  });
+
+  function registerSW() {
+    if (!("serviceWorker" in navigator)) return;
+    navigator.serviceWorker.register("sw.js").then((reg) => {
+      // Ask whether there's a new build whenever the app comes back to the
+      // foreground. Without this, an installed PWA only looks on a fresh
+      // navigation — so one left open for days keeps running old code, and the
+      // only way out is knowing to close and reopen it. Nobody should have to
+      // know that the app has a cache.
+      const check = () => {
+        if (document.visibilityState === "visible") reg.update().catch(() => {});
+      };
+      document.addEventListener("visibilitychange", check);
+      window.addEventListener("focus", check);
+    }).catch(() => {});
+    // When a new SW takes control (a fresh deploy), reload once so the page runs
+    // the new code. Guarded on an existing controller so a first install doesn't loop.
+    if (navigator.serviceWorker.controller) {
+      let refreshing = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => {
+        if (refreshing) return;
+        refreshing = true;
+        // Never mid-turn. The agent's reply is in flight and lives only in this
+        // page; reloading now throws away work the user is waiting for, and a
+        // deploy landing at that moment is pure bad luck they didn't cause.
+        // Wait for the turn to finish — the new code is one reload away either
+        // way, and this one can be a quiet one.
+        //
+        // A spoken session counts as mid-turn, and so does a running worker.
+        // Both live entirely in this page: reloading drops the socket in the
+        // middle of a sentence, or kills work the user was told had started.
+        const whenIdle = () => {
+          const busy = currentRun || composing || voice.on
+            || Object.values(workers).some((w) => w.state === "running");
+          if (busy) return setTimeout(whenIdle, 1000);
+          location.reload();
+        };
+        whenIdle();
+      });
+    }
+  }
+
+  // ================================================================ PAIRING
+  // Arriving from the desktop's QR: the sealed payload is in the URL fragment,
+  // which the browser never sends to the server — so the keys got here without
+  // touching the network. Take it out of the URL before anything else, so it
+  // can't linger in history, a bookmark, or a shared screenshot of the address
+  // bar. The pairing code is NOT in the link; it's the six characters shown on
+  // the computer, which is what makes a captured QR useless on its own.
+  let pendingSyncPass = "";
+  // A pairing token that arrived while the app was locked (see
+  // consumePairLink), held until there is a PIN to re-seal the vault with.
+  let pendingPairToken = "";
+
+  // Ask for the code and fill the setup form in. Shared by both ways a token
+  // can arrive: scanned in-app (the good path) or carried in the URL.
+  async function applyPairToken(token) {
+    for (;;) {
+      // window.prompt explicitly: `prompt` is the composer textarea in this
+      // scope (const prompt = $("in-prompt")), so a bare call reaches a DOM
+      // element and throws — which broke pairing entirely, by both routes.
+      const code = window.prompt(
+        "Setting up from your computer.\n\n" +
+        "Type the 6-character pairing code shown next to the QR code.");
+      if (code === null) { toast("Set-up cancelled — you can still type your keys in."); return false; }
+      try {
+        const data = await AC.openPairToken(token, code);
+        // Merged, never replaced: scanning again is how an API added on the
+        // desktop gets here, and it must not delete one added on the phone.
+        if (data.providers && data.providers.length) {
+          setProviders(AC.mergeProviders(getProviders(), data.providers));
+          renderProviderPicker();
+        }
+        // Which of the two pairings this is. Before setup there is no vault to
+        // write to, so the keys go into the form and the PIN seals them a
+        // moment later. AFTER setup that form does not exist -- its inputs are
+        // on a screen you never see again -- so filling them in dropped the
+        // keys on the floor and then said "now pick a PIN", which is why an
+        // API added later never actually arrived here.
+        if (session && session.secrets) {
+          await adoptPairedSecrets(data);
+          return true;
+        }
+        if (data.modelKey) $("in-model-key").value = data.modelKey;
+        if (data.githubToken) $("in-gh-token").value = data.githubToken;
+        if (data.baseUrl) {
+          // Select the matching preset where there is one, so the model menu
+          // and the key link follow; otherwise it is a hand-typed endpoint and
+          // the fields for one are what should be showing.
+          const known = AC.SETUP_PRESETS.find(
+            (p) => p.baseUrl && AC.normalizeBase(p.baseUrl) === AC.normalizeBase(data.baseUrl));
+          chooseSetupPreset(known ? known.key : "custom");
+          $("in-base-url").value = data.baseUrl;
+        }
+        if (data.model) {
+          if (setupPresetKey === "custom") $("in-model").value = data.model;
+          else {
+            const sel = $("in-model-pick");
+            // A model the menu does not list is still the one the desktop is
+            // using, so it is added rather than quietly ignored.
+            if (![...sel.options].some((o) => o.value === data.model)) {
+              sel.insertAdjacentHTML("afterbegin", `<option>${data.model}</option>`);
+            }
+            sel.value = data.model;
+          }
+        }
+        // Sync needs the vault key, which doesn't exist until a PIN is set —
+        // so hold it and turn sync on once the vault is unlocked.
+        pendingSyncPass = data.syncPass || "";
+        haptic(14);
+        toast(pendingSyncPass
+          ? "Keys filled in from your computer. Pick a PIN and your chats will sync too."
+          : "Keys filled in from your computer. Now pick a PIN.");
+        return true;
+      } catch (e) {
+        // Wrong or stale code: say which, and let them try again.
+        if (!confirm((e && e.message ? e.message : e) + "\n\nTry again?")) return false;
+      }
+    }
+  }
+
+  // A token can also arrive in the URL, from a pairing link made before the QR
+  // stopped carrying one. That route is why it stopped: on iOS a home-screen
+  // app has its own storage, so anything paired through the browser stays in
+  // the browser and never reaches the installed app. Still read, because such
+  // links exist; not made any more.
+  async function consumePairLink() {
+    const token = AC.pairTokenFrom(location.hash || "");
+    if (!token) return;
+    // Out of the URL before anything else, so it can't linger in history or a
+    // bookmark. Keeping it would also mean re-pairing on every launch.
+    history.replaceState(null, "", location.pathname + location.search);
+    if (loadVault() && !(session && session.secrets)) {
+      // Set up, but locked: the vault cannot be written without the PIN, so
+      // the token waits for it rather than being applied to nothing.
+      //
+      // This used to offer to ERASE the vault and start over, which was the
+      // only post-setup pairing route there was -- so "I added an API on the
+      // computer, send it over" meant re-entering every key by hand, and
+      // pairing's whole purpose only worked once, on a new phone.
+      pendingPairToken = token;
+      toast("Unlock with your PIN and the keys from your computer will be added.");
+      return;
+    }
+    await applyPairToken(token);
+  }
+
+  // ---- in-app scanner ----
+  // Uses the platform decoder when there is one (Chrome/Android) and falls back
+  // to a bundled decoder, because Safari has no BarcodeDetector — and iOS is
+  // exactly where scanning in-app matters most.
+  let scanStop = null;
+  let jsQRLoading = null;
+  function loadJsQR() {
+    if (window.jsQR) return Promise.resolve(window.jsQR);
+    if (jsQRLoading) return jsQRLoading;
+    jsQRLoading = new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = "vendor/jsQR.js";           // same-origin, so CSP script-src 'self' allows it
+      s.onload = () => res(window.jsQR);
+      s.onerror = () => rej(new Error("Couldn't load the QR decoder."));
+      document.head.appendChild(s);
+    });
+    return jsQRLoading;
+  }
+
+  async function startScan() {
+    const back = $("scan-backdrop"), video = $("scan-video"), status = $("scan-status");
+    status.textContent = "Starting the camera…";
+    back.hidden = false;
+    let stream;
+    try {
+      // Resolution is asked for, and that is half the reason this code would
+      // not scan. Requesting none leaves the browser free to hand back
+      // 640x480; the pairing QR was 113 modules, so held at a comfortable
+      // distance from a laptop screen it landed around 1.7 pixels per module,
+      // which no decoder can read. The install QR beside it is 37 modules,
+      // which is why that one always scanned and this one never did. (The
+      // other half was the payload, now deflated: see glmcode/pairing.py.)
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: false,
+      });
+    } catch (e) {
+      back.hidden = true;
+      toast(e && e.name === "NotAllowedError"
+        ? "Camera access was denied — allow it, or type your keys in below."
+        : "No camera available here — type your keys in below.");
+      return;
+    }
+    video.srcObject = stream;
+    try { await video.play(); } catch (e) { /* autoplay attr covers most cases */ }
+
+    let detector = null;
+    try {
+      if (window.BarcodeDetector) detector = new BarcodeDetector({ formats: ["qr_code"] });
+    } catch (e) { detector = null; }
+    let decode = null;
+    if (!detector) {
+      status.textContent = "Getting ready…";
+      try { await loadJsQR(); } catch (e) { stop(); toast(e.message); return; }
+    }
+    status.textContent = "Point at the QR code on your computer.";
+
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    let raf = 0, busy = false, done = false;
+
+    function stop() {
+      done = true;
+      if (raf) cancelAnimationFrame(raf);
+      raf = 0;
+      try { stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+      video.srcObject = null;
+      back.hidden = true;
+      scanStop = null;
+    }
+    scanStop = stop;
+
+    async function frame() {
+      raf = 0;
+      if (done) return;
+      if (!busy && video.videoWidth) {
+        busy = true;
+        try {
+          // Cap the working size, but not below what the code needs. 720 was
+          // cheap and fine for a 37-module install code; against a pairing
+          // code it threw away exactly the detail being looked for. The cap
+          // stays, though -- jsQR is plain JavaScript costing per pixel, and a
+          // full 1920x1080 frame every animation frame is a crawl on a phone.
+          // The native detector is given the frame untouched: it is
+          // implemented below the page and handles a full-size image far
+          // better than it handles a starved one.
+          const cap = detector ? video.videoWidth : 1440;
+          const scale = Math.min(1, cap / video.videoWidth);
+          canvas.width = Math.round(video.videoWidth * scale);
+          canvas.height = Math.round(video.videoHeight * scale);
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+          let text = "";
+          // ONLY the decode is allowed to fail quietly — an unreadable frame is
+          // completely normal. Everything after it is real work, and swallowing
+          // an error there would leave the scanner dead with nothing said.
+          try {
+            if (detector) {
+              const hits = await detector.detect(canvas);
+              text = hits && hits.length ? hits[0].rawValue : "";
+            } else {
+              const d = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              const r = window.jsQR(d.data, d.width, d.height);
+              text = r ? r.data : "";
+            }
+          } catch (e) { text = ""; }
+          if (text) {
+            const token = AC.pairTokenFrom(text);
+            if (token) { stop(); haptic(20); await applyPairToken(token); return; }
+            // A QR that isn't ours: say so rather than looking broken.
+            status.textContent = "That's a QR code, but not a set-up code from your computer.";
+          }
+        } catch (e) {
+          stop();
+          toast("Set-up failed: " + (e && e.message ? e.message : e));
+          return;
+        }
+        busy = false;
+      }
+      if (!done) raf = requestAnimationFrame(frame);
+    }
+    raf = requestAnimationFrame(frame);
+  }
+
+  // Re-sealing the vault with keys that arrived after setup.
+  //
+  // Only the fields the desktop actually sent are touched: a pairing payload
+  // carries whatever that computer had, and an absent GitHub token means "I
+  // did not send one", never "delete the one you have".
+  async function adoptPairedSecrets(data) {
+    const before = session.secrets;
+    const next = Object.assign({}, before);
+    for (const k of ["modelKey", "githubToken", "model", "baseUrl"]) {
+      if (data[k]) next[k] = data[k];
+    }
+    if (Object.keys(next).some((k) => next[k] !== before[k])) {
+      // Both copies have to move. The in-memory one is what this session
+      // uses; the stored one is what the next unlock reads -- writing only
+      // one means the new key works until you close the app.
+      session.secrets = next;
+      if (session.pin) {
+        try {
+          storeVault(await AC.encryptVault(next, session.pin));
+        } catch (e) {
+          toast("Keys updated for now, but not saved — unlock with your PIN and scan again.");
+        }
+      } else {
+        // Unlocked from a remembered key rather than a typed PIN, so there is
+        // nothing to re-encrypt under. Said out loud rather than silently
+        // losing the new key on the next launch.
+        toast("Keys updated for now. Lock and unlock with your PIN to save them.");
+      }
+      session.model = newModel(getModelName());
+    }
+    if (data.syncPass) {
+      try {
+        await storeSyncPass(data.syncPass);
+        localStorage.setItem("mnm.sync", "1");
+      } catch (e) { /* sync stays off; the keys still arrived */ }
+    }
+    refreshVoiceButton();
+    haptic(14);
+    const n = (data.providers || []).length;
+    toast(n ? "Updated from your computer — " + n + " API" + (n === 1 ? "" : "s") + "."
+            : "Updated from your computer.");
+    return true;
+  }
+
+  $("btn-scan-setup").addEventListener("click", startScan);
+  $("btn-scan-again").addEventListener("click", startScan);
+  $("scan-cancel").addEventListener("click", () => { if (scanStop) scanStop(); });
+
+  // ================================================================ BOOT
+  async function boot() {
+    applyBg(loadBg());
+    renderBgPicker($("setup-bg"));
+    // Something chosen from the start: an empty picker leaves the key box
+    // asking for a key with no indication of whose, and no endpoint at all.
+    chooseSetupPreset(setupPresetKey || AC.SETUP_PRESETS[0].key);
+    registerSW();
+    const blob = loadVault();
+    const rawKey = localStorage.getItem(KEEPKEY_KEY);
+    // "Keep me signed in": use the remembered key to unlock without the PIN.
+    if (blob && rawKey) {
+      try {
+        const key = await AC.importRawKey(rawKey, true);
+        const secrets = await AC.aesDecrypt(blob, key);
+        await finishUnlock(secrets, key, null, AC._b64.b64ToBytes(blob.salt));
+        return;
+      } catch { localStorage.removeItem(KEEPKEY_KEY); }
+    }
+    if (blob) show("screen-unlock"); else show("screen-setup");
+    // After the screen is up, so prefilled fields are visible behind the prompt.
+    await consumePairLink();
+  }
+  boot();
+  /* ===================== TALKING TO IT =============================== *
+   *
+   * The phone is the device where typing is worst and talking is most
+   * obvious, and until now it was the one device with no voice at all.
+   *
+   * The Live API fits this app's hardest constraint exactly: the session is a
+   * WebSocket opened by this page, so there is still no backend -- the same
+   * reason the whole app is Path A. What it does NOT do is change what the
+   * phone can do while closed. iOS gives web content no background execution,
+   * so a live session dies with the app exactly as a turn does; the sheet says
+   * so rather than letting you find out.
+   *
+   * Tools run here, against the same GitHub-as-filesystem the typed agent
+   * uses -- so it can actually read the repo and answer from it. Anything
+   * needing a shell goes to needs_desktop, which is already how this app moves
+   * work to a real machine.
+   */
+  const voice = {
+    ws: null, ctx: null, node: null, stream: null, on: false,
+    playAt: 0, sources: [], handle: "", closing: false, tries: 0,
+    established: false, said: "", heard: "", muted: false,
+    // Recorded from the last setup actually built, for the diagnostics panel.
+    sentTools: null, sentPromptChars: 0, resumed: false, lastClose: "",
+  };
+  const VOICE_MAX_TRIES = 5;
+  /* What a spoken session can do: the same as the desktop's.
+   *
+   * It used to be the read tools plus needs_desktop, so asking it to do
+   * anything left a note for the computer rather than doing it. The reasoning
+   * was sound for a default -- a phone cannot work in the background, and a
+   * commit you cannot see the diff of, triggered by a sentence that might have
+   * been misheard, is a real risk. But it is the user's risk to take, and
+   * being told "I've written that down for your computer" when you asked for
+   * work is its own kind of broken.
+   *
+   * So: everything. The writing tools, and the workers that do the real work
+   * off the conversation. needs_desktop stays, because handing off is still
+   * the right answer for anything that needs a shell -- there is genuinely no
+   * shell here, and no tool set can invent one.
+   */
+  function voiceSchemas() {
+    // Guarded because app.js and agent-core.js are cached as separate files by
+    // the service worker, so a deploy can briefly leave one new and the other
+    // old. Spreading an undefined export would throw here and take the whole
+    // voice session down with it -- an unexplained dead microphone, from a
+    // cache skew that resolves itself on the next load. Missing workers is the
+    // far better failure, and it is one the model can say out loud.
+    const workers = AC.WORKER_SCHEMAS || [];
+    if (!workers.length) {
+      console.warn("voice: WORKER_SCHEMAS missing — agent-core.js is older than app.js");
+    }
+    return [...AC.TOOL_SCHEMAS, AC.VIEW_IMAGE_SCHEMA, AC.NEEDS_DESKTOP_SCHEMA, ...workers];
+  }
+
+  function voiceLiveKey() {
+    // Only a provider that actually serves the live model. The phone can hold
+    // several APIs since pairing started syncing them, and most of them do not
+    // speak this protocol at all.
+    const list = getProviders().filter((p) => AC.normalizeBase(p.baseUrl || "")
+      .includes("generativelanguage.googleapis.com"));
+    const p = list.find((x) => x.key) || null;
+    return p ? p.key : "";
+  }
+
+  function voiceAvailable() {
+    return !!(voiceLiveKey() && window.WebSocket && navigator.mediaDevices
+      && (window.AudioContext || window.webkitAudioContext));
+  }
+
+  function voiceSend(obj) {
+    if (voice.ws && voice.ws.readyState === WebSocket.OPEN) voice.ws.send(JSON.stringify(obj));
+  }
+
+  function voiceSetStatus(t) { $("voice-status").textContent = t; }
+  function voiceSetOrb(state) { $("voice-orb").className = "voice-orb " + state; }
+
+  function voiceStopPlayback() {
+    for (const s of voice.sources) { try { s.stop(); } catch (e) { /* ended */ } }
+    voice.sources = [];
+    voice.playAt = 0;
+  }
+
+  function voicePlay(bytes) {
+    const ctx = voice.ctx;
+    if (!ctx) return;
+    const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+    const buf = ctx.createBuffer(1, pcm.length, AC.LIVE_OUTPUT_RATE);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 32768;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    // Scheduled end to end rather than played on arrival: chunks land in
+    // bursts, and starting each one "now" overlaps them into noise.
+    voice.playAt = Math.max(voice.playAt, ctx.currentTime + 0.06);
+    src.start(voice.playAt);
+    voice.playAt += buf.duration;
+    voice.sources.push(src);
+    src.onended = () => {
+      voice.sources = voice.sources.filter((x) => x !== src);
+      if (!voice.sources.length && voice.on) voiceSetOrb("idle");
+    };
+  }
+
+  async function voiceRunTools(calls) {
+    // Answered as a batch: the model is blocked on all of them at once.
+    const out = await Promise.all((calls || []).map(async (c) => {
+      let output;
+      try {
+        output = await voiceCallTool(c.name, c.args || {});
+      } catch (e) {
+        // Reported, not thrown: the model is stopped waiting for this, so a
+        // failure has to come back as something it can talk about.
+        output = "ERROR: " + (e && e.message ? e.message : String(e));
+      }
+      return { id: c.id, name: c.name, output: String(output == null ? "" : output) };
+    }));
+    voiceSend(AC.liveToolResponse(out));
+  }
+
+  async function voiceCallTool(name, args) {
+    if (name === "needs_desktop") return needsDesktop(args.task || "", args.why || "");
+    // The workers, which are the whole point of the parity: dispatch returns
+    // instantly and the work carries on after it, because a Live function call
+    // holds the model silent until the tool returns.
+    if (name === "dispatch_worker") {
+      // The schema is shared with the desktop, so the model is offered
+      // kind="browser" here too -- and there is no browser on this device to
+      // drive. Saying so is the point: a tool that silently did something
+      // else would have the model report browsing it never did.
+      if (String(args.kind || "") === "browser") {
+        return "ERROR: I can't drive a browser from the phone — that needs the " +
+               "desktop, which has the browser extension. Use needs_desktop to " +
+               "hand it over, or dispatch this as an ordinary worker if it is " +
+               "really about the code.";
+      }
+      return dispatchWorker(args.name || "", args.task || "");
+    }
+    if (name === "check_workers") return checkWorkers();
+    if (name === "steer_worker") return steerWorker(args.worker || "", args.message || "");
+    if (name === "stop_worker") return stopWorker(args.worker || "");
+    if (name === "worker_changes") return workerChanges(args.worker || "");
+    if (name === "revert_worker") return revertWorker(args.worker || "");
+    if (name === "resume_agent") return resumeAgent(args.agent || "", args.task || "");
+    const t = session.tools;
+    if (!t) return "ERROR: this chat is not open.";
+    const fn = t[name];
+    if (typeof fn !== "function") return "ERROR: no tool named " + name;
+    return fn(args);
+  }
+
+  // The tool dispatcher, reachable from a test. Deliberately the REAL one the
+  // socket calls rather than a stand-in: what is worth testing about a worker
+  // is that dispatch returns before the work is done, and a stub of this would
+  // be the one thing that cannot show it.
+  window.__voiceTool = voiceCallTool;
+  // Seams for the diagnostics tests: what the panel reports has to be driven
+  // from the same fields voiceOpen writes, or the test proves only that a
+  // string can be formatted.
+  window.__diagPoke = (names, chars) => {
+    voice.sentTools = names; voice.sentPromptChars = chars;
+  };
+  window.__diagClose = (s) => { voice.lastClose = s; };
+  // Seam for the branch tests. The REAL session and the real rebind, for the
+  // same reason __voiceTool is the real dispatcher: what is worth testing here
+  // is that moving to another branch rebuilds the GitHub client AND drops the
+  // file cache that hangs off it, and a stand-in for either is the one thing
+  // that cannot show it.
+  window.__branch = {
+    session: () => session,
+    bind: (name) => bindBranch(name),
+    persist: () => persistSession(),
+  };
+
+  function voiceOnMessage(payload) {
+    // The only thing that distinguishes "the session is up" from "the socket
+    // opened and was then hung up on", which need opposite responses.
+    if (payload.setupComplete) {
+      voice.established = true;
+      voice.tries = 0;          // this connection worked; the budget resets
+    }
+    if (payload.toolCall) voiceRunTools(payload.toolCall.functionCalls);
+    if (payload.sessionResumptionUpdate && payload.sessionResumptionUpdate.resumable) {
+      voice.handle = payload.sessionResumptionUpdate.newHandle || voice.handle;
+    }
+    // Sent BEFORE the connection ends, which is the only warning there is.
+    if (payload.goAway) { voiceReconnect(); return; }
+    const sc = payload.serverContent;
+    if (!sc) return;
+    if (sc.interrupted) voiceStopPlayback();
+    if (sc.inputTranscription && sc.inputTranscription.text) {
+      voice.heard += sc.inputTranscription.text;
+      $("voice-caption").textContent = voice.heard;
+    }
+    if (sc.outputTranscription && sc.outputTranscription.text) {
+      voice.said += sc.outputTranscription.text;
+      $("voice-caption").textContent = voice.said;
+    }
+    // One event can carry several parts at once, so every part is looked at.
+    for (const part of (sc.modelTurn && sc.modelTurn.parts) || []) {
+      const d = part.inlineData;
+      if (d && d.data && String(d.mimeType || "").startsWith("audio/")) {
+        voiceSetOrb("speaking");
+        voicePlay(AC.liveBytes(d.data));
+      }
+    }
+    if (sc.turnComplete) {
+      const heard = voice.heard.trim();
+      const said = voice.said.trim();
+      voice.heard = voice.said = "";
+      if (heard || said) voiceRecordTurn(heard, said);
+      voiceSetOrb("idle");
+    }
+  }
+
+  function voiceRecordTurn(heard, said) {
+    // Into the same conversation the typed agent uses, so a spoken exchange
+    // scrolls back with everything else and syncs to the desktop like any
+    // other turn. The model holds the conversation on its own side, so
+    // nothing lands here unless it is put here.
+    if (!session || !session.messages) return;
+    if (heard) {
+      session.messages.push({ role: "user", content: heard });
+      addBubble("user", heard);
+    }
+    if (said) {
+      session.messages.push({ role: "assistant", content: said });
+      addBubble("assistant", said);
+    }
+    syncSave().catch(() => {});
+  }
+
+  async function voiceReconnect() {
+    if (voice.closing || !voice.on) return;
+    if (voice.tries >= VOICE_MAX_TRIES) {
+      voiceSetStatus("Kept losing the connection.");
+      setTimeout(stopVoice, 1500);
+      return;
+    }
+    voice.tries += 1;
+    try { voice.ws.close(); } catch (e) { /* already gone */ }
+    await voiceOpen();
+  }
+
+  function voiceOpen() {
+    const key = voiceLiveKey();
+    if (!key) return Promise.resolve(false);
+    const setup = AC.liveSetup(AC.LIVE_MODEL, AC.LIVE_VOICE_PROMPT, voiceSchemas(),
+      { resumeHandle: voice.handle });
+    // What actually went on the wire, kept for the diagnostics panel.
+    //
+    // "It says it can't write files" is a claim about the tool list, and until
+    // now the only way to check it was to reason about the source and hope the
+    // device was running it. Two rounds were lost to that. This reads the
+    // declarations out of the built message, on the phone, after the fact.
+    const decls = ((setup.setup.tools || [])[0] || {}).functionDeclarations || [];
+    voice.sentTools = decls.map((d) => d.name);
+    voice.sentPromptChars = ((setup.setup.systemInstruction || {}).parts || [{}])[0].text
+      ? setup.setup.systemInstruction.parts[0].text.length : 0;
+    voice.resumed = !!voice.handle;
+    return new Promise((resolve) => {
+      let ws;
+      try { ws = new WebSocket(AC.liveWsUrl(key)); } catch (e) { resolve(false); return; }
+      voice.ws = ws;
+      ws.onopen = () => { ws.send(JSON.stringify(setup)); resolve(true); };
+      ws.onmessage = async (ev) => {
+        let text = ev.data;
+        if (text instanceof Blob) text = await text.text();
+        else if (text instanceof ArrayBuffer) text = new TextDecoder().decode(text);
+        let payload;
+        try { payload = JSON.parse(text); } catch (e) { return; }
+        try { voiceOnMessage(payload); } catch (e) { /* one bad frame is not the session */ }
+      };
+      ws.onclose = (ev) => {
+        if (voice.closing || !voice.on) return;
+        // The code and reason the server sends, which this used to discard --
+        // a rejected setup names the field it objected to in ev.reason, and
+        // throwing that away leaves "kept losing the connection" as the only
+        // thing the app can say about a message it built wrong itself.
+        const why = (ev && ev.reason ? ev.reason : "").trim();
+        voice.lastClose = (ev && ev.code ? ev.code : "?") + (why ? " " + why : "");
+        if (!voice.established) {
+          // Closed before the session opened. Retrying cannot help: the same
+          // setup is rejected the same way every time.
+          voiceSetStatus(why ? "Couldn't start: " + why : "Couldn't start.");
+          setTimeout(stopVoice, 3500);
+          return;
+        }
+        voiceReconnect();
+      };
+    });
+  }
+
+  async function startVoice() {
+    if (voice.on) return;
+    if (!voiceAvailable()) {
+      // The specific missing piece, not a generic sentence covering four
+      // different causes that each need a different thing done about them.
+      toast(voiceUnavailableReason());
+      return;
+    }
+    voice.on = true;
+    voice.closing = false;
+    voice.tries = 0;
+    voice.established = false;
+    voice.handle = "";
+    voice.said = voice.heard = "";
+    voice.muted = false;
+    $("voice-backdrop").hidden = false;
+    voiceSetStatus("Connecting…");
+    voiceSetOrb("thinking");
+    try {
+      voice.stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (e) {
+      voiceSetStatus("Microphone access is needed.");
+      setTimeout(stopVoice, 1800);
+      return;
+    }
+    if (!(await voiceOpen())) { voiceSetStatus("Couldn't connect."); setTimeout(stopVoice, 1800); return; }
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    voice.ctx = new Ctx();
+    // iOS starts every context suspended until a user gesture resumes it, and
+    // this runs inside the tap that opened the sheet -- so it is the one
+    // moment resume() is allowed to work.
+    try { await voice.ctx.resume(); } catch (e) { /* older WebKit */ }
+    const src = voice.ctx.createMediaStreamSource(voice.stream);
+    const rate = voice.ctx.sampleRate;
+    // ScriptProcessor rather than an AudioWorklet: a worklet is loaded from a
+    // separate module URL, and this page runs under a CSP with script-src
+    // 'self' and no bundler. Deprecated, universally supported, and the work
+    // per block is one downsample.
+    const node = voice.ctx.createScriptProcessor(4096, 1, 1);
+    node.onaudioprocess = (e) => {
+      if (!voice.on || voice.muted) return;
+      voiceSend(AC.liveAudioChunk(AC.liveB64(
+        AC.livePcm16(e.inputBuffer.getChannelData(0), rate))));
+    };
+    src.connect(node);
+    // Into a silent gain node: a ScriptProcessor only runs while connected to
+    // something, and connecting it to the speakers plays the mic back into the
+    // room -- which on a phone is immediate feedback howl.
+    const sink = voice.ctx.createGain();
+    sink.gain.value = 0;
+    node.connect(sink);
+    sink.connect(voice.ctx.destination);
+    voice.node = node;
+    voiceSetStatus("Listening — just talk.");
+    voiceSetOrb("idle");
+  }
+
+  function stopVoice() {
+    if (!voice.on && !voice.stream) return;
+    voice.on = false;
+    voice.closing = true;
+    voiceStopPlayback();
+    // Flushes what the server is still holding. Without it the tail of the
+    // last sentence is simply lost.
+    try { voiceSend(AC.liveAudioStreamEnd()); } catch (e) { /* closed */ }
+    try { if (voice.node) voice.node.disconnect(); } catch (e) { /* ignore */ }
+    try { if (voice.ws) voice.ws.close(); } catch (e) { /* ignore */ }
+    if (voice.stream) { voice.stream.getTracks().forEach((t) => t.stop()); voice.stream = null; }
+    if (voice.ctx) { try { voice.ctx.close(); } catch (e) { /* ignore */ } }
+    voice.ws = voice.ctx = voice.node = null;
+    $("voice-backdrop").hidden = true;
+  }
+
+  // Shown whether or not it can work, and dimmed when it cannot.
+  //
+  // It used to hide itself, and that was a mistake worth naming: a feature
+  // that ships, deploys correctly and then makes itself invisible is
+  // indistinguishable from a feature that never arrived -- which is exactly
+  // how it was reported ("the build id is correct but nothing else"). An
+  // absence answers no questions. A dimmed button that says why answers the
+  // only one that matters.
+  function refreshVoiceButton() {
+    const b = $("btn-voice");
+    if (!b) return;
+    b.hidden = false;
+    const ok = voiceAvailable();
+    b.classList.toggle("unavailable", !ok);
+    b.title = ok ? "Talk to it" : "Talking needs a Google AI Studio key";
+  }
+
+  // Why talking is not possible, in the words of whatever is missing. Only
+  // reached on a tap, so the phone is never lecturing about a key you may not
+  // want.
+  function voiceUnavailableReason() {
+    if (!window.WebSocket) return "This browser can't open the connection it needs.";
+    if (!navigator.mediaDevices) {
+      // The usual cause by far: getUserMedia does not exist outside a secure
+      // context, and "it worked on my laptop over localhost" is how that gets
+      // missed -- localhost is treated as secure and a LAN address is not.
+      return "The microphone isn't available here. This page has to be served "
+        + "over https for a browser to allow it at all.";
+    }
+    if (!(window.AudioContext || window.webkitAudioContext)) return "No audio support.";
+    const google = getProviders().filter((p) => AC.normalizeBase(p.baseUrl || "")
+      .includes("generativelanguage.googleapis.com"));
+    if (!google.length) {
+      return "Talking needs a Google AI Studio key, and this phone doesn't have "
+        + "one. Add Google on your computer, then scan the pairing QR again "
+        + "(Settings → Phone) to send it over.";
+    }
+    return "Google is set up here but without a key. Re-scan the pairing QR "
+      + "from your computer to send it over.";
+  }
+
+})();
