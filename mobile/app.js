@@ -1072,9 +1072,38 @@
     }
     let list;
     try { list = await store.list(); }
-    catch (e) { $("chats-list").innerHTML = ""; $("chats-error").textContent = friendlyGhError(e, "list"); return; }
+    catch (e) {
+      $("chats-list").innerHTML = "";
+      $("chats-error").textContent = friendlyGhError(e, "list");
+      // Only for damage. An unreachable GitHub says so in its own words and
+      // there is nothing to repair -- rebuilding then would read no chats and
+      // write that emptiness over a perfectly good list.
+      $("chats-repair").hidden = !/index/i.test((e && e.message) || "");
+      return;
+    }
+    $("chats-repair").hidden = true;
     renderChatList(list);
   }
+
+  // Rebuild the list from the chats themselves. Offered here as well as on the
+  // desktop because this is the device you are most likely to be holding when
+  // the list comes up empty.
+  async function repairChatList(btn) {
+    const label = btn.textContent;
+    btn.disabled = true; btn.textContent = "Rebuilding…";
+    try {
+      const store = await ensureSyncStore();
+      const res = await store.rebuildIndex();
+      $("chats-error").textContent = res.unreadable
+        ? `Found ${res.found}. ${res.unreadable} couldn't be read with this key and were left alone.`
+        : "";
+      $("chats-repair").hidden = true;
+      renderChatList(await store.list());
+    } catch (e) {
+      $("chats-error").textContent = friendlyGhError(e, "list");
+    } finally { btn.disabled = false; btn.textContent = label; }
+  }
+  $("chats-repair").addEventListener("click", (e) => repairChatList(e.currentTarget));
   function renderChatList(list) {
     const ul = $("chats-list");
     ul.innerHTML = "";

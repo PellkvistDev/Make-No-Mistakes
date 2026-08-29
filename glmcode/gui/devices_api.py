@@ -218,11 +218,33 @@ class DeviceApi:
         try:
             rows = store.list()
         except (syncstore.SyncError, githubsync.GitHubError) as e:
-            return {"error": str(e)}
+            # `can_rebuild` is what turns this from a dead end into a button.
+            # The chat bodies are separate files and are almost certainly fine;
+            # it is the one-file index that is damaged, and it can be rebuilt
+            # from them. Not offered for a network failure -- there is nothing
+            # wrong to repair, and rebuilding from a store you cannot read
+            # would write an empty index over a good one.
+            return {"error": str(e), "can_rebuild": isinstance(e, syncstore.SyncError)}
         local_ids = {s["id"] for s in self._store.list()}
         for r in rows:
             r["local"] = r.get("id") in local_ids
         return {"chats": rows}
+
+    def sync_rebuild_index(self):
+        """Rebuild the synced chat list from the chats themselves.
+
+        The index is one small file naming every chat; each chat is a separate
+        file beside it. Damage the index and the chats are all still there and
+        none of them can be found, since nothing enumerates them in normal
+        use. This reads them back and writes a fresh index.
+        """
+        store, err = self._open_sync_store()
+        if err or store is None:
+            return {"error": err or "Sync isn't set up on this computer."}
+        try:
+            return {"ok": True, **store.rebuild_index()}
+        except (syncstore.SyncError, githubsync.GitHubError) as e:
+            return {"error": str(e)}
 
     def sync_finish_interrupted(self):
         """Finish a turn a phone was suspended part-way through.

@@ -198,6 +198,12 @@
           can't reach, so they're synced to read, not to continue.</p>
         <ul id="chats-list" class="repo-list"></ul>
         <p id="chats-error" class="error" role="alert"></p>
+        <!-- The chat list is one small file naming every chat; each chat is a
+             separate file beside it. Damage that one file and every chat is
+             still stored and none can be found. Shown only when the list fails
+             for a reason repairing can fix -- rebuilding from a store you
+             cannot read would write an empty list over a good one. -->
+        <button id="chats-repair" class="btn" hidden>Rebuild the list</button>
       </div>
     </section>
 

@@ -492,6 +492,67 @@ them already said *"a check that only holds because of where the caller got its
 input is not a check"*; it simply was not true of itself. `is_relative_to`
 walks components and does not.
 
+## The index is a cache, and a cache whose loss is permanent is not one
+
+Every synced chat is its own encrypted file under `chats/`. One small file
+beside them, `index.json`, is the only thing that names them — **nothing in
+normal operation enumerates that directory**. So the index is the single point
+of failure for the entire store, and it was read by code that collapsed three
+different answers into two:
+
+- **there is no index yet** — a first device against a fresh store;
+- **there is one and we did not get it** — GitHub down, a phone with no signal;
+- **there is one and it will not decrypt.**
+
+The second was answered with *"you have no chats"*, which is a sentence about
+your data offered in place of one about the network, and it is by far the most
+common of the three.
+
+The third was destructive. It returned an empty index **carrying the real
+sha**, so the very next `save` wrote that emptiness straight over the good
+index — leaving every chat's ciphertext sitting there readable and unnamed,
+with nothing left that knew the ids. On both devices at once, since they share
+the file.
+
+`_read_index` / `readIndex` now answer all three separately, and refusing is
+the point: one failed sync costs a retry, and guessing cost the list. The
+distinction is drawn on a **status**, so `GitHubError` carries one (0 for
+"could not reach GitHub", None for a fake API or an older path, which are
+treated as absent because that is what they have always meant) and the phone's
+client attaches `err.status` for the same reason.
+
+`rebuild_index` / `rebuildIndex` is the other half, and it is what makes the
+claim in the rest of this file true — *"the index is a cache; the body is the
+truth"* was written all over the store and was not true **of** it, because
+nothing could turn the bodies back into a list.
+
+- **A chat is dropped only when its body says so.** A body that will not
+  decrypt is counted and **left alone**: "this key can't read it" is not "it
+  isn't wanted", and deleting it would finish the job the damaged index started.
+- **Tombstones survive only if the old index can still be read**, and the
+  result says how many were found rather than implying the delete history came
+  through. Losing them lets a chat deleted on another device come back on the
+  next save, and keep coming back.
+- **`chats/<id>.lock.json` is not a chat**, and it lives in the same directory.
+- **It is offered for damage, never for a network failure.** Rebuilding from a
+  store you cannot read writes an empty index over a good one — the original
+  bug, wearing a button.
+- **Both devices have it.** The phone is the one you are most likely to be
+  holding when the list comes up empty.
+
+**One builder for the index row** (`_index_row` / `indexRow`), because `save`
+and the rebuild both produce it. That is not tidiness: `interrupted` was simply
+**absent** from the phone's row, and `pickup_candidates` reads rows. So a turn
+the phone was suspended through was saved with the flag in its body and no flag
+in its row, and *"the desktop finishes turns the phone couldn't"* — the whole
+section above — never fired for a single chat. Nothing failed; it just never
+happened.
+
+The row is also built from the **merged** body rather than the incoming write.
+Absent means "I have nothing to say about this" everywhere else in this store;
+one field further out, in the row, it still meant "delete it", so a device that
+knew nothing about a chat's repo blanked that column while the body kept it.
+
 ## The history is a tree; rewinding is only one way down it
 
 `backup.py` commits a snapshot of the work tree before **every** user turn, and

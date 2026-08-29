@@ -418,10 +418,25 @@
         "X-GitHub-Api-Version": "2022-11-28",
       };
       if (body) headers["Content-Type"] = "application/json";
-      const r = await fetchFn(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+      // The status is carried on the error, not only inside its message.
+      // Anyone reading a file that is ALLOWED to be missing has to tell "404"
+      // from "the server is down", and a thrown string cannot say which --
+      // treating the second as an empty file is how a device concludes you
+      // have no chats and then writes that conclusion back. 0 means GitHub
+      // was not reached at all, matching GitHubError.status on the desktop.
+      let r;
+      try {
+        r = await fetchFn(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+      } catch (e) {
+        const err = new Error("Couldn't reach GitHub: " + ((e && e.message) || e));
+        err.status = 0;
+        throw err;
+      }
       if (!r.ok) {
         const t = await r.text().catch(() => "");
-        throw new Error("GitHub " + r.status + ": " + t.slice(0, 200));
+        const err = new Error("GitHub " + r.status + ": " + t.slice(0, 200));
+        err.status = r.status;
+        throw err;
       }
       return r.status === 204 ? null : r.json();
     }
@@ -457,6 +472,16 @@
       },
       async deleteFile(path, message, sha) {
         return gh("DELETE", `/repos/${owner}/${repo}/contents/${path}`, { message, sha, branch });
+      },
+      // Names and shas of the files in one directory, or [] if there is no
+      // such directory. Used only to rebuild the sync index -- normal
+      // operation never enumerates, which is exactly why losing the index
+      // used to be permanent.
+      async listDir(path) {
+        let d;
+        try { d = await gh("GET", `/repos/${owner}/${repo}/contents/${path}?ref=${branch}`); }
+        catch (e) { return []; }
+        return Array.isArray(d) ? d.filter((e) => e && typeof e === "object") : [];
       },
       // The repo's own default branch, which is what a pull request goes
       // BACK to. Not assumed to be "main": plenty of repositories are not,
@@ -649,13 +674,53 @@
 
   // The encrypted session store over a sync gh-client + derived key.
   function makeSyncStore(gh, key) {
+    // Absent, unreachable and unreadable are THREE outcomes, and one catch
+    // collapsing them into "you have no chats" is a lie the user acts on --
+    // most often for the dullest reason, a phone with no signal. Mirrors
+    // SyncStore._read_index; the reasoning is written out there.
+    const missing = (e) => e && (e.status === undefined || e.status === 404);
+    function emptyIndex() { return { v: 1, chats: [], deleted: [] }; }
     async function readIndex() {
+      let f;
       try {
-        const f = await gh.getFile("index.json");
-        const data = await aesDecrypt(JSON.parse(f.text), key);
-        if (!data.deleted) data.deleted = [];   // indexes written before tombstones
-        return { data, sha: f.sha };
-      } catch (e) { return { data: { v: 1, chats: [], deleted: [] }, sha: null }; }
+        f = await gh.getFile("index.json");
+      } catch (e) {
+        if (missing(e)) return { data: emptyIndex(), sha: null };
+        throw new Error("Couldn't read the chat index: " + ((e && e.message) || e));
+      }
+      let data;
+      try {
+        data = await aesDecrypt(JSON.parse(f.text), key);
+      } catch (e) {
+        // Never returned with f.sha: a caller would write an empty index
+        // straight over the good one, and nothing enumerates chats/ in normal
+        // operation, so every other chat would go unreachable at once.
+        throw new Error("The chat index couldn't be read. Your chats are still "
+          + "stored; rebuilding the index will find the ones this key can read.");
+      }
+      if (!data.deleted) data.deleted = [];   // indexes written before tombstones
+      return { data, sha: f.sha };
+    }
+    // The summary the index carries for one chat. One builder, because save
+    // and rebuildIndex both produce it -- and because this row is what the
+    // DESKTOP shortlists on: `interrupted` was missing from it here, so a turn
+    // the phone was suspended through was saved with the flag in its body and
+    // no flag in its row, and pickup_candidates never saw a single one.
+    function indexRow(chat) {
+      return {
+        id: chat.id || "",
+        title: chat.title || "Untitled",
+        updated: Number(chat.updated || 0),
+        preview: chat.preview || "",
+        project: chat.project || "",
+        // Just the full_name, not the whole repo object: the index is read in
+        // one piece on every list, so it stays small. Empty means the chat has
+        // no GitHub repo, which is what lets the list say so up front instead
+        // of only finding out once you've tapped it.
+        repo: (chat.repo && chat.repo.full_name) || "",
+        device: chat.device || "",
+        interrupted: !!chat.interrupted,
+      };
     }
     async function writeIndex(chats, sha, deleted) {
       const blob = await aesEncrypt({ v: 1, chats, deleted: deleted || [] }, key);
@@ -765,17 +830,46 @@
         await gh.putFile(path, JSON.stringify(blob), `Save session ${chat.id}`, priorSha);
         const { data, sha } = await readIndex();
         const chats = (data.chats || []).filter((c) => c.id !== chat.id);
-        chats.push({ id: chat.id, title: chat.title || "Untitled",
-          updated: chat.updated, preview: chat.preview || "",
-          project: chat.project || "",
-          // Just the full_name, not the whole repo object: the index is read in
-          // one piece on every list, so it stays small. Empty means the chat has
-          // no GitHub repo, which is what lets the list say so up front instead
-          // of only finding out once you've tapped it.
-          repo: (chat.repo && chat.repo.full_name) || "",
-          device: chat.device || "" });
+        // From the MERGED body, not the incoming write. A device that sends no
+        // `repo` is saying nothing about it, and building the row from the
+        // write alone blanked that column in the list while the body kept it.
+        chats.push(indexRow(merged));
         await writeIndex(chats, sha, tombstones(data));
         return chat.updated;
+      },
+      // Rebuild the index from the chat bodies. Returns { found, unreadable }.
+      //
+      // The index is a cache and the bodies are the truth -- said all over
+      // this store, and it was not true of it, because nothing could turn the
+      // bodies back into a list. Mirrors SyncStore.rebuild_index; the rules
+      // are written out there. In short: a chat is dropped only when its body
+      // says so, an undecryptable body is counted and left alone, and
+      // tombstones survive only if the old index can still be read.
+      async rebuildIndex() {
+        let old = {};
+        try { old = (await readIndex()).data; } catch (e) { /* that is why we are here */ }
+        const found = [];
+        let unreadable = 0;
+        for (const entry of await gh.listDir("chats")) {
+          const name = entry.name || "";
+          if (!name.endsWith(".json") || name.endsWith(".lock.json")) continue;
+          const id = name.slice(0, -".json".length);
+          let chat;
+          // Read directly rather than through `this.load`: a rebuild is
+          // exactly the sort of thing a caller destructures off the store,
+          // and `this` would be undefined the moment one did.
+          try {
+            const f = await gh.getFile(`chats/${id}.json`);
+            chat = await aesDecrypt(JSON.parse(f.text), key);
+          } catch (e) { unreadable += 1; continue; }
+          if (!chat.id) chat.id = id;
+          found.push(indexRow(chat));
+        }
+        found.sort((a, b) => (b.updated || 0) - (a.updated || 0));
+        let sha = null;
+        try { sha = (await gh.getFile("index.json")).sha; } catch (e) { /* none yet */ }
+        await writeIndex(found, sha, pruneTombstones(tombstones(old)));
+        return { found: found.length, unreadable };
       },
       // Delete a chat file and its index entry.
       async remove(id) {

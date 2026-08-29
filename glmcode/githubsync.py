@@ -47,7 +47,19 @@ _ASKPASS_DIR = CONFIG_DIR / "git-askpass"
 
 
 class GitHubError(Exception):
-    """Any failure in a git or GitHub-API operation, with a user-safe message."""
+    """Any failure in a git or GitHub-API operation, with a user-safe message.
+
+    ``status`` is the HTTP status when there was one, 0 when GitHub could not
+    be reached at all, and None when the caller cannot know -- a git failure,
+    or a fake API in a test. That distinction matters to anyone reading a file
+    that is *allowed* to be missing: "404" and "the server is down" both arrive
+    here as a failed read, and treating the second as an empty file is how a
+    device concludes you have no chats and writes that conclusion back.
+    """
+
+    def __init__(self, message: str = "", status: int | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 def available() -> bool:
@@ -506,17 +518,18 @@ def _api(method: str, path: str, token: str, body: dict | None = None) -> dict |
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             raise GitHubError("GitHub rejected the token (check it hasn't expired "
-                              "and has the right repository permissions).")
+                              "and has the right repository permissions).", e.code)
         if e.code == 404:
-            raise GitHubError("Not found (the token may not have access).")
+            raise GitHubError("Not found (the token may not have access).", 404)
         detail = ""
         try:
             detail = json.loads(e.read().decode("utf-8")).get("message", "")
         except Exception:
             pass
-        raise GitHubError(f"GitHub API error {e.code}{': ' + detail if detail else ''}.")
+        raise GitHubError(f"GitHub API error {e.code}{': ' + detail if detail else ''}.",
+                          e.code)
     except urllib.error.URLError as e:
-        raise GitHubError(f"Could not reach GitHub: {e.reason}")
+        raise GitHubError(f"Could not reach GitHub: {e.reason}", 0)
 
 
 def verify_token(token: str) -> dict:
