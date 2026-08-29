@@ -1795,24 +1795,37 @@ class Api(DeviceApi, GitHubApi, VoiceApi):
         except Exception:
             return None   # a chat must never fail to sync over a git hiccup
 
-    def _repo_state(self, cwd: str) -> dict:
+    def _repo_state(self, cwd: str) -> dict | None:
         """This machine's git state for a project, published with the chat.
 
         The phone reads the repo over the GitHub API, so anything living only
         on this disk -- uncommitted edits, or commits not pushed yet -- is
         invisible to it. Without this it would read an older copy of a file and
         commit straight over the work sitting here.
+
+        Three answers, and None is the one that used to be missing:
+
+        - a state -- the phone warns, naming what it is up against;
+        - `{}` -- KNOWN to be nothing to warn about (no cwd, or no GitHub
+          remote at all), which correctly clears any warning still standing;
+        - `None` -- we could not find out. Published as `{}` this was a git
+          hiccup telling the phone everything was fine, and `SyncStore.save`
+          MERGES, so an empty dict is present and overwrites the last true
+          answer rather than leaving it be. Absent means "I have nothing to
+          say about this" everywhere else in that store; it has to mean it
+          here, where the thing not said is "editing this file may commit over
+          work that only exists on the desktop".
         """
         if not cwd:
             return {}
         try:
             st = githubsync.status(Path(cwd))
-            if not st.connected:
-                return {}
-            return {"branch": st.branch or "", "dirty": bool(st.dirty),
-                    "ahead": int(st.ahead or 0), "at": syncstore._now_ms()}
         except Exception:
-            return {}   # a chat must never fail to sync over a git hiccup
+            return None   # a chat must never fail to sync over a git hiccup
+        if not st.connected:
+            return {}
+        return {"branch": st.branch or "", "dirty": bool(st.dirty),
+                "ahead": int(st.ahead or 0), "at": syncstore._now_ms()}
 
 
 

@@ -24,6 +24,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import githubsync
+from .. import secretstore
 from ..config import save_config
 from ..sessions import new_id
 from .paths import WHITEBOARD_DIR
@@ -71,13 +72,19 @@ class GitHubApi:
             who = githubsync.verify_token(token)
         except githubsync.GitHubError as e:
             return {"error": str(e)}
-        githubsync.save_token("github.com", token)
+        try:
+            githubsync.save_token("github.com", token)
+        except secretstore.SecretsUnreadable as e:
+            return {"error": str(e)}
         self._cfg.extra["github_login"] = who.get("login", "")
         save_config(self._cfg)
         return {"ok": True, **self.github_env()}
 
     def github_forget_token(self):
-        githubsync.forget_token("github.com")
+        try:
+            githubsync.forget_token("github.com")
+        except secretstore.SecretsUnreadable as e:
+            return {"error": str(e)}
         self._cfg.extra.pop("github_login", None)
         save_config(self._cfg)
         return {"ok": True, **self.github_env()}

@@ -1096,12 +1096,15 @@ def session_to_chat(sess: dict, repo_state: dict | None = None,
     `repo_state` (optional) is this machine's git state for the project. The
     phone reads the repo over the GitHub API, so it cannot see work that is
     only on the desktop's disk -- it would edit an older copy of a file and
-    commit over it. Publishing the state is what lets the phone warn instead."""
+    commit over it. Publishing the state is what lets the phone warn instead.
+    None means the caller could not find out, and the key is then OMITTED --
+    save() merges, so absent leaves the last true answer standing while an
+    empty dict would overwrite it with "nothing to worry about"."""
     body = [m for m in (sess.get("messages") or []) if m.get("role") != "system"]
     messages = [{"role": "system", "content": ""}] + body
     transcript = _messages_to_transcript(body)
     cwd = sess.get("cwd", "")
-    return {
+    chat = {
         "id": sess["id"],
         "title": sess.get("title") or "Untitled",
         "preview": (transcript[-1]["text"][:80] if transcript else ""),
@@ -1121,7 +1124,8 @@ def session_to_chat(sess: dict, repo_state: dict | None = None,
         "transcript": transcript,
         # What this machine's checkout looks like right now, so the phone can
         # tell whether GitHub is actually the latest word on this project.
-        "repo_state": dict(repo_state) if repo_state else {},
+        # Filled in below, or left out entirely when it is not known.
+        "repo_state": dict(repo_state or {}),
         # Work the phone couldn't run. Defaults to empty, so the desktop
         # pushing after a turn clears whatever it was handed.
         "pending": list(pending or []),
@@ -1139,6 +1143,9 @@ def session_to_chat(sess: dict, repo_state: dict | None = None,
             "model": sess.get("model", ""),
         },
     }
+    if repo_state is None:
+        chat.pop("repo_state")
+    return chat
 
 
 def chat_to_session(chat: dict) -> dict:

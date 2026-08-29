@@ -193,7 +193,10 @@ class DeviceApi:
             syncstore.open_central(passphrase, token=self._gh_token())
         except (syncstore.SyncError, githubsync.GitHubError) as e:
             return {"error": str(e)}
-        syncstore.save_passphrase(passphrase)
+        try:
+            syncstore.save_passphrase(passphrase)
+        except secretstore.SecretsUnreadable as e:
+            return {"error": str(e)}
         return {"ok": True, **self.sync_env()}
 
     def sync_forget_passphrase(self):
@@ -347,7 +350,11 @@ class DeviceApi:
         """
         from .. import webpush
         store = secretstore.get_store()
-        raw = store.get(self.VAPID_ACCOUNT)
+        # read(), not get(): get() answers "I couldn't tell" with None, which
+        # here reads as "there isn't one yet" and regenerates -- the exact
+        # thing the paragraph above says must never happen. Raising leaves
+        # every existing subscription alone; the caller tries again later.
+        raw = store.read(self.VAPID_ACCOUNT)
         if raw:
             try:
                 keys = json.loads(raw)
