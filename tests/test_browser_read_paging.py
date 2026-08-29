@@ -153,3 +153,61 @@ def test_the_two_answers_are_kept_apart():
     turns trying it -- browser_read already returns the whole page."""
     assert "not to read more text" in _schema("browser_key")["description"]
     assert "not scrolling" in _schema("browser_read")["description"]
+
+
+# ------------------------------- the extension's cap, made honest --------
+#
+# The extension hands over at most TEXT_LIMIT characters. Python then pages
+# through what it got -- so a cap applied silently on that side would have the
+# agent page tidily to the end of a TRUNCATED document and be told it had read
+# the whole page. That is the same defect this file exists for, one level down,
+# and it arrived with the paging rather than being found by it.
+
+
+class _CappedPage:
+    """The extension route: it returns a slice, and the page's real length
+    beside it."""
+
+    def __init__(self, text, cap):
+        self._text = text
+        self.text_total = len(text)
+        self._cap = cap
+
+    def inner_text(self, selector):
+        return self._text[:self._cap]
+
+
+def _capped(text, cap):
+    s = BrowserSession.__new__(BrowserSession)
+    s._page = _CappedPage(text, cap)
+    s._url = lambda: "https://example.test/huge"
+    return s
+
+
+def test_a_page_beyond_the_cap_is_not_reported_as_fully_read():
+    huge = "z" * 50_000
+    out = _capped(huge, 10_000)._op_read_text(max_chars=2000, offset=8000)
+    assert "50000" in out, "it reported the truncated length as the page total"
+    assert "offset=" not in out, "it offered an offset that would come back empty"
+
+
+def test_it_says_the_rest_is_out_of_reach_and_what_to_do():
+    huge = "z" * 50_000
+    out = _capped(huge, 10_000)._op_read_text(max_chars=2000, offset=8000)
+    assert "beyond what the browser extension will hand over" in out
+    assert "follow a link" in out or "page's own search" in out
+
+
+def test_within_the_cap_it_still_pages_normally():
+    text = "\n".join(f"line {i}" for i in range(500))
+    out = _capped(text, 1_000_000)._op_read_text(max_chars=200)
+    assert "offset=" in out
+
+
+def test_an_older_extension_that_sends_a_bare_string_still_works():
+    """They are loaded unpacked, so a copy predating the {text,total} shape is
+    a real possibility and must not crash on a subscript."""
+    s = BrowserSession.__new__(BrowserSession)
+    s._page = _Page("plain old string")
+    s._url = lambda: "u"
+    assert "plain old string" in s._op_read_text(max_chars=6000)

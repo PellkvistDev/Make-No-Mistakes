@@ -626,7 +626,10 @@ class BrowserSession:
         except Exception as e:
             raise BrowserError(f"Could not read page text: {e}")
         txt = txt or ""
-        total = len(txt)
+        # The extension caps what it sends; the page's REAL length comes back
+        # beside it. Without this, a page over that cap would page tidily to
+        # the end of a truncated document and be reported as fully read.
+        total = max(len(txt), int(getattr(self._page, "text_total", 0) or 0))
         start = max(0, min(int(offset or 0), total))
         chunk = txt[start:start + max_chars]
         end = start + len(chunk)
@@ -643,8 +646,16 @@ class BrowserSession:
             head += f"\n[characters {start}-{end} of {total}]"
         out = f"{head}\n\n{chunk}"
         if end < total:
-            out += (f"\n\n... [{total - end} of {total} characters not shown. "
-                    f"Call browser_read again with offset={end} for the next part.]")
+            if end >= len(txt):
+                # Past what this backend can reach. Naming the limit beats
+                # naming an offset that would come back empty.
+                out += (f"\n\n... [{total - end} of {total} characters are beyond "
+                        f"what the browser extension will hand over at once "
+                        f"({len(txt)}). Narrow the page down -- follow a link to "
+                        f"the section you need, or use the page's own search.]")
+            else:
+                out += (f"\n\n... [{total - end} of {total} characters not shown. "
+                        f"Call browser_read again with offset={end} for the next part.]")
         return out
 
     def _op_screenshot(self, path: str) -> str:
@@ -934,9 +945,21 @@ class ExtensionPage:
         self._refresh()
         return self._call("snapshot")
 
+    # How much page text the extension will hand over at once. Generous, but
+    # finite -- a runaway page must not be pulled through the socket whole.
+    TEXT_LIMIT = 200_000
+
     def inner_text(self, selector: str) -> str:
         self._refresh()
-        return self._call("text", max=200_000) or ""
+        got = self._call("text", max=self.TEXT_LIMIT)
+        # Older extensions return a bare string. They are loaded unpacked, so a
+        # copy predating the {text,total} shape is a real possibility, and it
+        # should keep working rather than crash on a subscript.
+        if isinstance(got, dict):
+            self.text_total = int(got.get("total") or 0)
+            return got.get("text") or ""
+        self.text_total = 0
+        return got or ""
 
     def screenshot(self, path: str = ""):
         import base64
