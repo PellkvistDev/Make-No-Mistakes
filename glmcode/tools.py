@@ -18,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import concurrent.futures
 import threading
 import time
 import urllib.parse
@@ -1043,6 +1044,11 @@ _NEW_GROUP_KWARGS = {} if sys.platform == "win32" else {"start_new_session": Tru
 # the UI can offer a Stop button that kills it (and its whole child tree)
 # on demand -- the tool then returns at once and the agent keeps going.
 
+# How long a network READ may take before it is given up on. Both were
+# unbounded or unnamed; a tool that can hang forever is a turn that can.
+SEARCH_TIMEOUT = 30
+FETCH_TIMEOUT = 30
+
 _foreground_lock = threading.Lock()
 _foreground_procs: dict[str, subprocess.Popen] = {}
 _stopped_tokens: set[str] = set()
@@ -1058,6 +1064,73 @@ def set_call_token(token) -> None:
 
 def get_call_token():
     return getattr(_call_token, "value", None)
+
+
+# Tools that BLOCK on something other than a process.
+#
+# stop_foreground kills a shell command's process tree, which is what stops a
+# shell command. A network read has no process to kill, so a turn blocked in
+# web_search or fetch_url ignored Stop completely -- and the default search
+# backend had no timeout either, so "ignored Stop" meant "for as long as the
+# other end felt like it".
+#
+# You cannot kill a thread in Python. What you CAN do is stop waiting for one,
+# which is what `interruptible` does: the call is abandoned, not cancelled, and
+# it finishes into nothing on its own timeout. That is only defensible for a
+# READ -- the same line the extension bridge draws with SAFE_TO_REPEAT. Nothing
+# that changes anything should go through here.
+_cancelled_tokens: set[str] = set()
+_INTERRUPT_POLL = 0.15
+
+
+def mark_cancelled(token: str) -> None:
+    """Tell any interruptible tool running under this token to give up."""
+    if token:
+        with _foreground_lock:
+            _cancelled_tokens.add(token)
+            if len(_cancelled_tokens) > 512:      # a session, not a lifetime
+                _cancelled_tokens.clear()
+                _cancelled_tokens.add(token)
+
+
+def is_cancelled(token) -> bool:
+    if not token:
+        return False
+    with _foreground_lock:
+        return token in _cancelled_tokens
+
+
+def clear_cancelled(token) -> None:
+    if not token:
+        return
+    with _foreground_lock:
+        _cancelled_tokens.discard(token)
+
+
+def interruptible(fn, *args, **kwargs):
+    """Run a blocking READ and give up on it if the turn is stopped.
+
+    Waits in short slices rather than one long block, so a Stop pressed while
+    the network is hanging is acted on within a poll interval instead of at the
+    mercy of the other end.
+    """
+    token = get_call_token()
+    if not token:
+        return fn(*args, **kwargs)              # CLI, tests: nothing to stop
+    clear_cancelled(token)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    try:
+        fut = pool.submit(fn, *args, **kwargs)
+        while True:
+            try:
+                return fut.result(timeout=_INTERRUPT_POLL)
+            except concurrent.futures.TimeoutError:
+                if is_cancelled(token):
+                    raise ToolErrorBase("Stopped before this finished.",
+                                        ErrorSeverity.ERROR)
+    finally:
+        # Not waiting on the abandoned call: that is the whole point of it.
+        pool.shutdown(wait=False)
 
 
 def stop_foreground(token: str) -> bool:
@@ -1467,10 +1540,16 @@ def fetch_url(url: str, max_chars: int = 20_000) -> str:
         "User-Agent": "Mozilla/5.0 (GLMCode/1.0; coding agent)",
         "Accept": "text/html,application/json,text/plain,*/*",
     })
+    def _get():
+        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
+            return resp.headers.get("Content-Type", ""), resp.read(2_000_000)
+
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            ctype = resp.headers.get("Content-Type", "")
-            raw = resp.read(2_000_000)
+        # A read, so it is safe to abandon: nothing on the far side changes
+        # because we stopped listening.
+        ctype, raw = interruptible(_get)
+    except ToolErrorBase:
+        raise
     except Exception as e:
         raise ToolErrorBase(f"Fetch failed for {url}: {e}", ErrorSeverity.ERROR)
     text = raw.decode("utf-8", errors="replace")
@@ -1513,7 +1592,12 @@ def _search_duckduckgo(query: str, max_results: int) -> list[dict]:
             "Run: pip install duckduckgo-search", ErrorSeverity.ERROR)
 
     try:
-        with DDGS() as ddgs:
+        # WITH a timeout. It had none, and DuckDuckGo is the default whenever
+        # no Tavily key is set -- which on the free tier this app is built
+        # around is the ordinary case. A hung request blocked the turn for as
+        # long as the other end felt like it, and Stop could not reach a
+        # network read either, so there was no way out but killing the app.
+        with DDGS(timeout=SEARCH_TIMEOUT) as ddgs:
             raw = list(ddgs.text(query, max_results=max_results))
     except Exception as e:
         # duckduckgo-search raises various exceptions on rate-limit / network issues
@@ -1531,7 +1615,7 @@ def _search_tavily(query: str, max_results: int, api_key: str) -> list[dict]:
         "https://api.tavily.com/search",
         json={"api_key": api_key, "query": query,
               "max_results": max_results, "include_answer": True},
-        timeout=30,
+        timeout=SEARCH_TIMEOUT,
     )
     if resp.status_code != 200:
         raise ToolErrorBase(f"Tavily returned HTTP {resp.status_code}: {resp.text[:300]}", ErrorSeverity.ERROR)
@@ -1562,16 +1646,16 @@ def web_search(query: str, max_results: int = 8) -> str:
             if not tavily_key:
                 raise ToolErrorBase("search_provider is 'tavily' but tavily_api_key is not set "
                                 "(/config tavily_api_key <key>; free at https://tavily.com).")
-            results = _search_tavily(query, max_results, tavily_key)
+            results = interruptible(_search_tavily, query, max_results, tavily_key)
             provider_used = "tavily"
         else:
-            results = _search_duckduckgo(query, max_results)
+            results = interruptible(_search_duckduckgo, query, max_results)
             provider_used = "duckduckgo"
     except requests.RequestException as e:
         raise ToolErrorBase(f"Search request failed: {e}", ErrorSeverity.ERROR)
 
     if not results and use_tavily is False and tavily_key:
-        results = _search_tavily(query, max_results, tavily_key)
+        results = interruptible(_search_tavily, query, max_results, tavily_key)
         provider_used = "tavily (fallback)"
 
     if not results:

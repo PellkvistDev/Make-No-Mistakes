@@ -41,7 +41,7 @@ from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
                     SHOW_HTTP_CAT_TOOL, SHOW_IMAGE_TOOL, SPEAK_TOOL,
                     STEER_WORKER_TOOL, STOP_WORKER_TOOL, SUBAGENT_TOOL,
                     TOOL_SCHEMAS, VIEW_IMAGE_TOOL, WORKER_CHANGES_TOOL, ToolError,
-                    clean_todo_items, execute_tool, set_call_token, stop_foreground, set_workdir)
+                    clean_todo_items, execute_tool, mark_cancelled, set_call_token, stop_foreground, set_workdir)
 
 # Tools whose output tells the model whether its changes actually work --
 # used by the verify-nudge (see _run_turn): a turn that edits files but never
@@ -561,6 +561,13 @@ class Agent:
         if token:
             try:
                 stop_foreground(token)
+            except Exception:
+                pass
+            # And a network read, which has no process to kill. web_search and
+            # fetch_url wait in slices and check this, so Stop reaches them
+            # within a poll interval instead of at the mercy of the far end.
+            try:
+                mark_cancelled(token)
             except Exception:
                 pass
 

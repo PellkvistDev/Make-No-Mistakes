@@ -4679,8 +4679,6 @@ function renderSyncSettings() {
   if (note && e.repo) {
     note.textContent = `Chats upload automatically after each turn, to ${e.repo}.`;
   }
-  const repoName = $("sync-repo-name");
-  if (repoName && e.repo) repoName.textContent = e.repo;
 }
 
 // Turning it on: one click, nothing to invent. The backend makes the key.

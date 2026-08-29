@@ -1203,6 +1203,49 @@ step would only have agreed with whatever I believed it did. One test asserts
 the surprising half directly — that the same stream decodes correctly the
 moment a charset appears — because the whole fix rests on it.
 
+## A read can be abandoned; nothing else can
+
+Found by scanning rather than by being reported, which is the point of having
+scanned. Two facts that only bite together:
+
+- **`web_search`'s default backend had no timeout.** `DDGS()` takes one and was
+  not given one, and DuckDuckGo is the default whenever no Tavily key is set —
+  the ordinary case on the free tier this app is built around.
+- **Stop reached a shell command and a sub-agent, and nothing else.** A network
+  read has no process to kill and no cancel Event to set.
+
+So a hung search was unbounded AND unstoppable: no way out but killing the app.
+
+`interruptible()` is the general answer. You cannot kill a thread in Python;
+what you can do is stop WAITING for one. The call is **abandoned, not
+cancelled** — it finishes into nothing on its own timeout — which is only
+defensible for a read, the same line the extension bridge draws with
+`SAFE_TO_REPEAT`. `run_command` deliberately does not use it: a command that
+might have half-run is not something to walk away from, and killing its process
+tree is the harder guarantee it needs.
+
+- **It waits in slices** (`_INTERRUPT_POLL`) so a Stop is acted on within a
+  poll interval rather than at the mercy of the far end.
+- **A stale cancel is cleared on entry.** Tokens are per tool call, but a flag
+  left set would make the next read fail instantly for no reason.
+- **The pool is shut down with `wait=False`.** Waiting for the abandoned call
+  to wind down would give back exactly what giving up was for.
+- **No token means no machinery.** The CLI and the tests have nothing to stop,
+  and the call should not be pushed onto a thread for nothing.
+
+## The extension caps the page text, and the cap has to travel with it
+
+`ExtensionPage.inner_text` asks for at most `TEXT_LIMIT` characters, and Python
+pages through what it gets. So a cap applied silently on the extension side
+would have `browser_read` report a TRUNCATED document's length as the page
+total: the agent pages tidily to "the end" and is told it read all of it.
+
+That is the same defect `browser_read` was just fixed for, one level down — and
+it arrived *with* the paging rather than being found by it. `page.js` returns
+`{text, total}` now, and the read says the rest is beyond what the extension
+will hand over, naming what to do instead, rather than offering an offset that
+would come back empty. A bare string from an older unpacked copy still works.
+
 ## Stop has to reach what the turn is waiting ON
 
 Reported: *"interrupting is not reliable, especially when it's using tools,

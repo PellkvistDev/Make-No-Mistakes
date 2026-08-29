@@ -150,8 +150,15 @@
           return { value: MNM_SNAPSHOT(MNM_SELECTOR) };
 
         case "text": {
+          // The TRUE length travels with the slice. Python pages through this
+          // text and tells the model how much of the page is left, so a cap
+          // applied silently here would have it report a truncated document's
+          // length as the whole page -- the agent would page cleanly to "the
+          // end" of something that was already cut, and be told it had read
+          // all of it.
           const t = (document.body && document.body.innerText) || "";
-          return { value: t.slice(0, a.max || 6000) };
+          const max = a.max || 6000;
+          return { value: { text: t.slice(0, max), total: t.length } };
         }
 
         case "exists":
