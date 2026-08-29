@@ -553,6 +553,42 @@ Absent means "I have nothing to say about this" everywhere else in this store;
 one field further out, in the row, it still meant "delete it", so a device that
 knew nothing about a chat's repo blanked that column while the body kept it.
 
+## A result belongs to the call that made it, not to the last box on screen
+
+Reported as a photograph: a `browser_new_tab` chip, red, showing an error about
+`run_command`.
+
+The page attached every `tool_result` to `t.lastTool` — the chip it built most
+recently. That is correct exactly as long as calls and results strictly
+alternate, and `_handle_tool_calls` has **one path where they don't**:
+arguments the model sent that will not parse as JSON were answered with a reply
+and no call, because there is nothing to run. So that result landed on the
+*previous* tool's chip, and `finishToolEl` overwrites the body and adds the
+error class — relabelling a finished, often successful call with a different
+tool's failure, under its own name. The failed call appeared nowhere at all.
+
+**Reloading the chat put it right, which is most of why this was hard to
+report.** `sessions.to_display` pairs by `tool_call_id` and was always correct;
+only the live stream was guessing. A bug that fixes itself when you look again
+gets described as "sometimes it shows the wrong thing".
+
+Both halves are fixed, and the second is what stops the next one:
+
+- **The unparseable call announces itself.** The name is known — only the
+  arguments are unreadable — so it gets a chip of its own and the error goes in
+  it.
+- **`tool_result` carries `call_id`, and the page matches on it**, falling back
+  to the last chip only when there is no id (an older backend, a replayed
+  event). `data-call-id` therefore goes on **every** chip; it used to be set
+  only for `STOPPABLE_TOOLS`, because Stop was the only thing that had needed
+  it.
+
+The phone had the same defect wearing different clothes: `JSON.parse(...)
+catch (e) {}` left `args = {}` and **ran the tool anyway**. A write whose
+`content` was mangled became a write of nothing, and the only party who could
+have noticed — the model — was never told. It reports it now and does not run
+the tool, which is what the desktop already did.
+
 ## The history is a tree; rewinding is only one way down it
 
 `backup.py` commits a snapshot of the work tree before **every** user turn, and

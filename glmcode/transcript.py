@@ -53,7 +53,8 @@ class Transcript:
         if parts:
             self._append(f"\n## Assistant [{_now()}]\n" + "\n".join(parts) + "\n")
 
-    def tool_result(self, name: str, content: str, is_error: bool = False) -> None:
+    def tool_result(self, name: str, content: str, is_error: bool = False,
+                    call_id: str = "") -> None:
         content = content or ""
         body = content[:MAX_TOOL_RESULT_CHARS]
         if len(content) > MAX_TOOL_RESULT_CHARS:

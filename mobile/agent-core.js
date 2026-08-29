@@ -2145,11 +2145,27 @@
       }
       for (const tc of msg.tool_calls) {
         const name = tc.function.name;
-        let args = {}; try { args = JSON.parse(tc.function.arguments || "{}"); } catch (e) {}
-        onEvent({ type: "tool", name, args });
+        // Arguments that will not parse used to be swallowed and the tool run
+        // with {} -- so a write with a mangled `content` became a write of
+        // nothing, and the only party who could have noticed (the model) was
+        // never told. Reported instead, the way the desktop reports it: the
+        // call still gets its own event so it is visible, and the tool is not
+        // run at all.
+        let args = null, argErr = "";
+        try {
+          args = JSON.parse(tc.function.arguments || "{}");
+          if (!args || typeof args !== "object" || Array.isArray(args))
+            throw new Error("arguments must be a JSON object");
+        } catch (e) { argErr = (e && e.message) || String(e); args = null; }
+        onEvent({ type: "tool", name, args: args || {} });
         let out;
-        try { out = tools[name] ? await tools[name](args) : unknownTool(name, tools); }
-        catch (e) { out = "ERROR: " + (e && e.message ? e.message : e); }
+        if (argErr) {
+          out = "ERROR: could not parse tool arguments: " + argErr +
+                ". Raw arguments were: " + String(tc.function.arguments || "").slice(0, 500);
+        } else {
+          try { out = tools[name] ? await tools[name](args) : unknownTool(name, tools); }
+          catch (e) { out = "ERROR: " + (e && e.message ? e.message : e); }
+        }
         onEvent({ type: "tool_result", name, out: String(out) });
         messages.push({ role: "tool", tool_call_id: tc.id, content: String(out).slice(0, 8000) });
       }

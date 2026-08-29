@@ -488,9 +488,14 @@ const STOPPABLE_TOOLS = new Set(["run_command", "run_powershell", "run_tests", "
 function buildToolEl(name, args, callId) {
   const el = document.createElement("div");
   el.className = "tool running";
+  // On EVERY chip, not just the stoppable ones: it is what the result is
+  // matched against. It used to be set only where Stop needed it, and the
+  // result was paired with "the chip built last" -- which is right until
+  // something emits a result with no call of its own, and then writes one
+  // tool's error into another tool's box under that tool's name.
+  if (callId) el.dataset.callId = callId;
   let stopBtn = "";
   if (callId && STOPPABLE_TOOLS.has(name)) {
-    el.dataset.callId = callId;
     stopBtn = `<button class="tool-stop" title="Stop this command" aria-label="Stop this command">Stop</button>`;
   }
   el.innerHTML =
@@ -529,6 +534,17 @@ function diffStat(text) {
     else if (l.startsWith("-") && !l.startsWith("---")) del++;
   }
   return [add, del];
+}
+
+// The chip a result belongs to: the one whose call carried this id, falling
+// back to the last one built when there is no id to go on (an older backend,
+// or a replayed event). Never searches outside this turn's own wrap.
+function toolElFor(turn, callId) {
+  if (turn && callId) {
+    const match = turn.wrap.querySelector(`.tool[data-call-id="${CSS.escape(callId)}"]`);
+    if (match) return match;
+  }
+  return turn ? turn.lastTool : null;
 }
 
 function finishToolEl(el, content, isError) {
@@ -1211,7 +1227,7 @@ function handle(ev) {
     }
     case "tool_result": {
       const t = current;
-      const el = t && t.lastTool;
+      const el = toolElFor(t, ev.call_id || "");
       if (!el) break;
       if (SILENT_TOOLS.has(ev.name) && !ev.error) {
         // The real result is a "show_image" event (already rendered, or
@@ -1834,7 +1850,7 @@ function renderSubagentEvent(aid, ev) {
       break;
     }
     case "tool_result": {
-      const el = t.lastTool;
+      const el = toolElFor(t, ev.call_id || "");
       if (!el) break;
       if (SILENT_TOOLS.has(ev.name) && !ev.is_error) {
         el.remove();

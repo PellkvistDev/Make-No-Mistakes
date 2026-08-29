@@ -255,7 +255,8 @@ class ConsoleEvents(AgentEvents):
     def tool_call(self, name: str, args: dict, call_id: str = "") -> None:
         tool_call(name, args)
 
-    def tool_result(self, name: str, content: str, is_error: bool = False) -> None:
+    def tool_result(self, name: str, content: str, is_error: bool = False,
+                    call_id: str = "") -> None:
         tool_result(name, content, is_error)
 
     def todos(self, items: list[dict]) -> None:
