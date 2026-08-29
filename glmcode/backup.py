@@ -41,6 +41,13 @@ class Snapshot:
     timestamp: str
 
 
+# What a pre-undo safety snapshot is called. Distinct wording on purpose: it
+# shows up in Settings' restore-point list beside the per-turn ones, and "what
+# the files looked like before an undo" is exactly the point you want back
+# after undoing too far.
+REVERT_SAFETY_LABEL = "(automatic) files as they were before this undo"
+
+
 class BackupRepo:
     def __init__(self, session_id: str, project_dir: Path):
         self.project_dir = Path(project_dir)
@@ -158,7 +165,11 @@ class BackupRepo:
         if not available() or not self._initialized():
             raise RuntimeError("no snapshots exist for this chat")
         target = (self.project_dir / path).resolve()
-        if not str(target).startswith(str(self.project_dir.resolve())):
+        # is_relative_to, not a string prefix. "/home/you/proj" prefixes
+        # "/home/you/proj-evil" too, so the prefix form lets a sibling
+        # directory through -- on the one function here whose job is deleting
+        # files. Path comparison walks components and does not.
+        if not target.is_relative_to(self.project_dir.resolve()):
             raise RuntimeError("path escapes the project directory")
         # Does the snapshot know this file? (exit 0 = tracked at HEAD)
         tracked = self._run("cat-file", "-e", f"HEAD:{path}", check=False).returncode == 0
@@ -230,8 +241,10 @@ class BackupRepo:
             target = (self.project_dir / path).resolve()
             # Same guard revert_file uses. These paths come from a diff this
             # class produced, but a check that only holds because of where the
-            # caller got its input is not a check.
-            if not str(target).startswith(str(root)):
+            # caller got its input is not a check -- and a check that a sibling
+            # directory satisfies is not one either. A string prefix accepts
+            # "/home/you/proj-evil" for a root of "/home/you/proj".
+            if not target.is_relative_to(root):
                 continue
             existed = self._run("cat-file", "-e", f"{commit}:{path}",
                                 check=False).returncode == 0
@@ -265,10 +278,43 @@ class BackupRepo:
 
     def revert_to(self, commit: str) -> None:
         """Reset the project dir's actual files back to how they looked at
-        `commit`. Does not touch the chat conversation -- only files."""
+        `commit`. Does not touch the chat conversation -- only files.
+
+        It SNAPSHOTS FIRST, and that is not belt-and-braces. Snapshots are
+        taken before a user turn, so everything the newest turn produced --
+        and anything the user edited by hand since -- exists in no commit at
+        all, only on disk. `reset --hard` plus `clean -fd` then destroys it
+        with nothing holding it: edit-and-resend a message from five turns ago
+        and those five turns are gone for good, because an undo could not
+        itself be undone.
+
+        The commit is nearly free (the shadow repo is already open and git
+        dedupes the blobs) and it is the difference between a mistake and a
+        loss. It lives here rather than at the call sites for the same reason
+        the delete guard below does: a safety net a caller can forget to bring
+        is not one.
+        """
         if not available() or not self._initialized():
             raise RuntimeError("no backups exist for this chat yet")
-        self._run("reset", "--hard", commit)
+        try:
+            self.snapshot(REVERT_SAFETY_LABEL)
+        except Exception:
+            # Best-effort: failing to keep a safety copy must not block the
+            # undo the user actually asked for.
+            pass
+        # The history only ever moves FORWARD. `reset --hard` was the obvious
+        # way to do this and it rewinds the branch pointer, which orphans every
+        # commit after the target -- including the safety snapshot taken one
+        # line above, so the first version of this kept a copy that
+        # list_snapshots could no longer see. A restore-point log that deletes
+        # restore points is not one.
+        #
+        # These three do what `reset --hard` does to the FILES and nothing to
+        # the branch: the index becomes the old tree, the work tree is written
+        # from the index, and anything on disk that the old tree did not have
+        # is now untracked and swept.
+        self._run("read-tree", commit)
+        self._run("checkout-index", "-a", "-f")
         # -e .git is redundant with info/exclude (git clean skips ignored
         # paths by default) but cheap insurance against ever touching the
         # project's own real git directory.
