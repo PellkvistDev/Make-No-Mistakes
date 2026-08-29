@@ -589,6 +589,34 @@ catch (e) {}` left `args = {}` and **ran the tool anyway**. A write whose
 have noticed — the model — was never told. It reports it now and does not run
 the tool, which is what the desktop already did.
 
+## `env` is not a command, it is a way of starting one
+
+`is_readonly_command` is not a convenience. It is what **plan mode enforces
+itself with** — documented as a hard deny "regardless of ask/autoedit/yolo mode
+or session allowlists" — and it is also the only thing standing between a shell
+command and the per-path rules that protect `.env` and migrations, since those
+apply to file-*write* tools and a shell command is not one.
+
+Its own bar is *"provably read-only"* and *"when in doubt, we ask"*. Three
+things were getting through it.
+
+- **`env` and `command` were in the safe list.** So `env rm -rf build` and
+  `command rm x` were classified as reading, in a turn that had promised only
+  to explore. Refusing them outright would have been wrong too: `env
+  NODE_ENV=production npm ls` is an ordinary thing to write and reads exactly
+  as much as `npm ls` does. The prefix is stripped and what is left is judged
+  on its own merits — recursion **bounded**, because `env env env rm x` is
+  legal.
+- **An unrecognised flag fails closed.** `env -S` takes a whole command as a
+  *string*; a flag whose meaning is not known may be carrying one.
+- **Three of the safe commands take an output file as an argument.**
+  Redirection was already refused and these need none: `sort -o FILE`,
+  `uniq in out`, `xxd -r in out`. The value-taking flags are listed per command
+  so `uniq -f 2 in.txt` is not read as naming an output.
+
+`command -v` goes the other way and is allowed: that flag is what stops it
+running anything.
+
 ## The history is a tree; rewinding is only one way down it
 
 `backup.py` commits a snapshot of the work tree before **every** user turn, and
