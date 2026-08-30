@@ -638,6 +638,9 @@ glmcode/
   prompts.py      the system prompt, vision-analysis prompt, compaction prompt
   sessions.py     ~/.makenomistakes/sessions/*.json — chat history per project folder
   backup.py       ~/.makenomistakes/backups/ — per-chat shadow git repo, snapshot + revert
+  ledger.py       ~/.makenomistakes/ledger.json — the tool failures this model
+                  makes in this project, counted; the repeat offenders go in
+                  its system prompt so it stops making them
   events.py       frontend-agnostic event sink the agent reports through
   ui.py           rich terminal UI (streaming markdown, diffs, todo panel)
   cli.py          REPL, slash commands, image detection, first-run setup
@@ -645,7 +648,11 @@ glmcode/
   gui/            desktop app: pywebview shell (app.py) + HTML/CSS/JS (web/)
 evals/            task fixtures + `python -m glmcode.evals`: does the
                   scaffolding actually help? (calls a real model; see
-                  evals/README.md)
+                  evals/README.md). `--grid` tries every combination,
+                  `--budget N` stops before spending more than N requests,
+                  `--journal FILE` makes an interrupted run resumable, and
+                  `--save-profile` stores the winner for that model so the
+                  app can use what was measured instead of what was guessed
 tests/            pytest suite (no network, no GUI deps): agent loop, retry/
                   backoff, steering, sub-agents, backups, sessions, memory
 ```

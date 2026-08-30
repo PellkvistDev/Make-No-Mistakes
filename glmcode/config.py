@@ -367,6 +367,12 @@ class Config:
     verify_edits: bool = False       # nudge the agent to verify edits it never ran anything to check (off by default)
     auto_fix_tests: bool = False     # "make it green": after an edit turn, run the project's tests and fix until they pass (opt-in, bounded)
     codebase_memory_neural: bool = False  # search_code uses a local embedding model (semantic) instead of lexical TF-IDF
+    # Record the tool failures this model makes in this project, and put the
+    # repeat offenders in its system prompt (glmcode/ledger.py). On by default
+    # because it is passive -- it observes a funnel every tool result already
+    # goes through -- and capped hard, so the prompt prefix it competes with
+    # cannot grow without bound. Off means neither record nor inject.
+    learn_from_mistakes: bool = True
     parallel_attempts: int = 1       # "race": 1 = off; 2 or 3 = run that many isolated attempts from a common baseline and keep the best
     show_reasoning: bool = True      # print the model's reasoning (dimmed)
     # auto = ask the provider (see Agent._images_go_direct). It used to

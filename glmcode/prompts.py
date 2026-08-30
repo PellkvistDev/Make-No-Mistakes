@@ -201,6 +201,27 @@ def _user_memory() -> str:
     )
 
 
+def _learned_rules(cwd: Path, model: str, endpoint: str) -> str:
+    """Mistakes this model has actually made in this project (glmcode/ledger.py).
+
+    `remember` holds what somebody thought to assert; this holds what really
+    happened, counted. Placed after the user's memory and before the project's
+    own instructions: it is evidence about this model, which is worth less
+    than a rule the project's maintainers wrote down and more than nothing,
+    which is what was here before.
+
+    Imported inside the function so prompts.py keeps costing nothing to import
+    for the CLI paths that never build a full system prompt.
+    """
+    try:
+        from .ledger import rules_block
+        return rules_block(cwd, model, endpoint)
+    except Exception:
+        # A bookkeeper must never break a prompt build. Same bargain the
+        # ledger itself makes with every one of its own entry points.
+        return ""
+
+
 def _project_memory(cwd: Path) -> str:
     for name in AGENT_MD_NAMES:
         p = cwd / name
@@ -231,8 +252,14 @@ screenshotted, or found while working."""
 
 
 def build_system_prompt(cwd: Path | None = None, model: str = "",
-                        sees_images: bool = False) -> str:
+                        sees_images: bool = False, endpoint: str = "",
+                        learn: bool = True) -> str:
     """`sees_images`: this model is being handed images directly.
+
+    `endpoint` + `model` together key the mistake ledger. Both are needed and
+    neither is enough: the fallback chain switches models mid-task, and the
+    same model name on another provider is a different quota and a different
+    failure profile. `learn=False` leaves the block out entirely.
 
     Without saying so, a multimodal model reads the tool list, sees view_image,
     reads "read it yourself before responding: ... view_image for images", and
@@ -262,7 +289,9 @@ def build_system_prompt(cwd: Path | None = None, model: str = "",
         f"{_git_info(cwd)}"
     )
     return (SYSTEM_PROMPT + (SEES_IMAGES_NOTE if sees_images else "")
-            + env + _project_map(cwd) + _user_memory() + _project_memory(cwd))
+            + env + _project_map(cwd) + _user_memory()
+            + (_learned_rules(cwd, model, endpoint) if learn else "")
+            + _project_memory(cwd))
 
 
 def conversational_project_context(cwd: Path | None = None) -> str:

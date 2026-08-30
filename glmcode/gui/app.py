@@ -824,6 +824,7 @@ class Api(CheckupApi, DeviceApi, GitHubApi, VoiceApi):
             "thinking_mode": c.thinking_mode, "verify_edits": c.verify_edits,
             "auto_fix_tests": c.auto_fix_tests, "parallel_attempts": c.parallel_attempts,
             "codebase_memory_neural": c.codebase_memory_neural,
+            "learn_from_mistakes": c.learn_from_mistakes,
             "show_reasoning": c.show_reasoning, "temperature": c.temperature,
             "cwd": str(Path.cwd()) if self.session_id else "",
             "background_custom": bool(c.background_path),
@@ -962,6 +963,13 @@ class Api(CheckupApi, DeviceApi, GitHubApi, VoiceApi):
             codebase_memory.set_neural_enabled(c.codebase_memory_neural)
             if c.codebase_memory_neural and not codebase_memory.NeuralEmbedder.packages_installed():
                 self._install_neural_memory()   # background; falls back to lexical until ready
+        elif key == "learn_from_mistakes":
+            c.learn_from_mistakes = bool(value)
+            # Takes effect in the open chat, not only in the next one: the
+            # block lives in the system prompt, and the prompt is cached until
+            # something rebuilds it (same reason the remember tool does this).
+            if self._agent:
+                self._agent.rebuild_system_prompt()
         elif key == "parallel_attempts":
             try:
                 c.parallel_attempts = int(min(3, max(1, int(value))))

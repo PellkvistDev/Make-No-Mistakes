@@ -366,7 +366,13 @@ class Agent:
             # blend: the name it was handed, and the name it knows.
             self._base_system_prompt = build_system_prompt(
                 self.workdir, self.model_override or self.cfg.model,
-                sees_images=self._images_go_direct())
+                sees_images=self._images_go_direct(),
+                # Both, and not just the model: the fallback chain switches
+                # models mid-task and the same name on another provider fails
+                # differently, so a ledger keyed on the name alone would hand
+                # one provider's lessons to another. See glmcode/ledger.py.
+                endpoint=self._chat_base_url(),
+                learn=getattr(self.cfg, "learn_from_mistakes", True))
         if self.transcript:
             # Tell the model its transcript files exist and where, so it can
             # grep them for anything compacted out of context or said in a
@@ -1769,7 +1775,7 @@ class Agent:
                     msg += f" User says: {decision.feedback}"
                 msg += " Do not retry it as-is; adjust your approach."
                 self._tool_reply(tc, msg, error=True, name=name, args=args,
-                                 call_id=run_token)
+                                 call_id=run_token, learn=False)
                 continue
 
             # Verify-nudge bookkeeping: attempting a verification tool counts
@@ -1905,9 +1911,67 @@ class Agent:
             output = execute_tool(name, args)
         return output
 
+    def _record_outcome(self, name: str, content: str, error: bool) -> str:
+        """File one tool outcome in the mistake ledger; return the content the
+        model should actually read.
+
+        A repeat failure comes back with the count appended, because the
+        moment the model is reading the error is the one moment that lesson is
+        relevant -- a rule in the system prompt is read once per request, and
+        this is read exactly when it applies.
+
+        Never raises, and never changes a SUCCESSFUL result: the ledger is
+        bookkeeping, and bookkeeping that can break a turn is worse than none.
+        "Never raises" includes the guard that decides whether to do anything
+        at all: the first version read self.cfg OUTSIDE the try, and an Agent
+        built without __init__ (which is how several tests drive
+        _handle_tool_calls) has no cfg -- so the one line whose job was to turn
+        the feature OFF is the line that brought a turn down. A check that only
+        holds because of where the caller got its input is not a check.
+        """
+        if not name:
+            return content
+        try:
+            if not getattr(getattr(self, "cfg", None), "learn_from_mistakes", True):
+                return content
+            from . import ledger
+            model = self.model_override or self.cfg.model
+            endpoint = self._chat_base_url()
+            if not error:
+                ledger.record_success(self.workdir, model, endpoint, name)
+                return content
+            # Read BEFORE recording, so it answers "had the model been told
+            # about this when it did it", not "is it in the prompt now" --
+            # and it serves double duty as the baseline for the rebuild check
+            # below, which is the same set at the same moment.
+            before = ledger.active_signatures(self.workdir, model, endpoint)
+            warned = ledger.signature(name, content) in before
+            ledger.record_failure(self.workdir, model, endpoint, name, content,
+                                  was_warned=warned)
+            content += ledger.advice_for(self.workdir, model, endpoint, name, content)
+            # A pattern that has just crossed into being a rule takes effect in
+            # THIS conversation, not only in the next one -- the same reason
+            # the remember tool rebuilds the prompt instead of waiting for a
+            # fresh Agent. Guarded on the set actually changing: rebuilding
+            # runs git subprocesses, and most failures change nothing.
+            if ledger.active_signatures(self.workdir, model, endpoint) != before:
+                self.rebuild_system_prompt()
+        except Exception:
+            pass
+        return content
+
     def _tool_reply(self, tc: dict, content: str, error: bool = False,
                     name: str = "", args: dict | None = None,
-                    call_id: str = "") -> None:
+                    call_id: str = "", learn: bool = True) -> None:
+        """`learn=False` keeps this out of the mistake ledger.
+
+        Used for a permission denial, which arrives here as an error and is
+        not one: the user said no. Recording it would teach the model that the
+        tool is broken and, worse, put the user's own decisions into a prompt
+        block titled "mistakes you have made".
+        """
+        if learn:
+            content = self._record_outcome(name, content, error)
         self.events.tool_result(name, content, is_error=error, call_id=call_id)
         if self.transcript:
             self.transcript.tool_result(name, content, is_error=error)
