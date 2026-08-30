@@ -3905,6 +3905,7 @@ function syncSettingsUI() {
   $("opt-verify").setAttribute("aria-checked", optOn("verify_edits"));
   $("opt-green").setAttribute("aria-checked", !!settings.auto_fix_tests);
   $("opt-neural").setAttribute("aria-checked", !!settings.codebase_memory_neural);
+  $("opt-ledger").setAttribute("aria-checked", settings.learn_from_mistakes !== false);
   $("opt-notify").setAttribute("aria-checked", !!settings.notifications);
   $("opt-reduce-fx").setAttribute("aria-checked", !!settings.reduce_effects);
   $("opt-browser-headless").setAttribute("aria-checked", !!settings.browser_headless);
@@ -4303,6 +4304,7 @@ bindSwitch("opt-reasoning", "show_reasoning");
 bindSwitch("opt-verify", "verify_edits");
 bindSwitch("opt-green", "auto_fix_tests");
 bindSwitch("opt-neural", "codebase_memory_neural");
+bindSwitch("opt-ledger", "learn_from_mistakes");
 
 /* ---- composer message-options popover (per-message behavior) ---------- */
 function renderComposerOpts() {

@@ -22,7 +22,10 @@ The feature itself, and why it exists, is documented at self_check.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from .. import backup as backup_module
+from .. import ledger as ledger_module
 from .. import browser_extension
 from .. import githubsync
 from .. import secretstore
@@ -88,6 +91,45 @@ class CheckupApi:
         worst = checks[0]["status"] if checks else "ok"
         return {"checks": checks, "worst": worst,
                 "problems": sum(1 for c in checks if c["status"] != "ok")}
+
+    # ------------------------------------------------------------------ #
+    # "What goes wrong here" -- self_check for the agent's BEHAVIOUR rather
+    # than its configuration.
+    #
+    # Same reasoning as the panel above, one level in: every expensive bug in
+    # this app was something quietly wrong that nothing said out loud, and
+    # "this model keeps making the same mistake in this project" was nowhere
+    # at all. The ledger has counted it all along; this is the only place a
+    # person can read it.
+
+    def ledger_report(self, all_projects: bool = False) -> dict:
+        """Recorded tool failures for this project (or every project).
+
+        Shows patterns BELOW the injection thresholds too. The panel's job is
+        to say what happened, not only what is currently loud enough to have
+        become a rule -- a pattern at two hits is exactly the one a person can
+        still recognise and explain, and it is invisible to the model.
+        """
+        rows = ledger_module.report(None if all_projects else Path.cwd())
+        return {
+            "enabled": bool(getattr(self._cfg, "learn_from_mistakes", True)),
+            "project": str(Path.cwd()),
+            "all_projects": bool(all_projects),
+            "file": str(ledger_module.LEDGER_FILE),
+            "rows": rows[:200],
+            "total": len(rows),
+            # The number that says whether any of this WORKS. A pattern that
+            # keeps firing with its own warning already in the prompt is not a
+            # lesson the model failed to learn, it is a rule that does not
+            # work -- and no amount of repeating it louder will change that.
+            "warned_and_failed": sum(r["warned_and_failed"] for r in rows),
+        }
+
+    def ledger_forget(self, all_projects: bool = False) -> dict:
+        """Clear the record. The user's own call -- nothing in the app does
+        this on its own, and a success never deletes a pattern either."""
+        ledger_module.forget(None if all_projects else Path.cwd())
+        return {"ok": True}
 
     def _check_git(self) -> dict:
         ok = githubsync.available()

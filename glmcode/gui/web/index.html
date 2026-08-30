@@ -940,6 +940,12 @@
           fixing until they pass (up to a few tries) or report where it's stuck. Only runs when there
           are tests to run — never loops on small tasks. Off by default.</span></div>
         <button id="opt-green" class="switch" role="switch" aria-checked="false"><span></span></button></div>
+      <div class="row"><div class="row-text"><label for="opt-ledger">Learn from mistakes</label>
+        <span class="row-sub">Keep a count of the tool calls that fail in this project with this model,
+          and put the repeat offenders in the agent's system prompt so it stops making them. Recorded
+          from what actually happened, never from guesswork; capped at a few lines so it can't crowd
+          out the prompt. A tool that starts working again fades out of the list on its own.</span></div>
+        <button id="opt-ledger" class="switch" role="switch" aria-checked="true"><span></span></button></div>
     </section>
 
     <section data-tab="github">

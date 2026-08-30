@@ -2291,6 +2291,79 @@ It was the fake payload using `name`/`base_url` where the app reads
 evidence of what the page did with what it was given, which is only evidence
 about the app when the input was shaped like the real one.
 
+## The app is named for mistakes and kept no record of its own
+
+Every failed tool call was answered into the model's context and then thrown
+away. An `edit_file` whose `old_string` never existed, a stale-sha 422, a
+sub-agent that came back FAILED — each fell out of the window at the next
+compaction, so the same model made the same mistake on the same repo on
+Tuesday that it made on Monday. `remember` only ever held what somebody
+thought to assert.
+
+`glmcode/ledger.py` is `remember`, earned instead of asserted. Failures
+already funnel through one place (`Agent._tool_reply`), so observing them
+costs nothing; what turns a pile of errors into something usable is the
+**signature** — the error text with paths, numbers and quoted strings replaced
+by placeholders, so "old_string not found in `foo.py`" and the same about
+`bar.py` are one pattern with a count of two rather than two patterns with a
+count of one. A pattern with a count is a rule. A log of errors is not.
+
+- **Per model AND per endpoint.** The fallback chain switches models mid-task
+  and the same model name on another provider is a different quota and a
+  different failure profile, so a ledger keyed on the name alone hands one
+  provider's lessons to another — in the longest prompt in the app.
+- **A success decays a pattern and never deletes it.** Confidence is
+  failures/(failures+successes), so a tool that works again stops lecturing
+  the model while the record of what happened stays readable. Deleting on
+  success is the sync-index failure again: an answer that cannot be recovered
+  written over one that could. The only thing here that deletes is the
+  per-bucket size cap, which is a memory bound, and the user's own `forget`.
+- **The block is capped hard** — six rules, ~1,200 characters. It competes
+  with the ~12,400 tokens of system prompt and tool schemas re-sent every
+  request, and a prefix that grows every session is a prompt cache that never
+  hits.
+- **Whether the model had already been WARNED is recorded**, which is the only
+  way to find out whether these rules work at all. A pattern that keeps firing
+  with its own rule sitting in the prompt is not a lesson the model failed to
+  learn, it is a rule that does not work, and it says so in its own text
+  instead of being repeated more loudly forever.
+- **A permission denial is not a mistake the model made.** It reaches
+  `_tool_reply` as an error and is not one — the user said no. Recording it
+  would teach the model the tool is broken and would put the user's own
+  decisions into a block titled "mistakes you have made", so that one path
+  passes `learn=False`.
+- **A repeat failure carries its count to the model at the moment it reads
+  it.** A rule in the system prompt is read once per request; the error is
+  read exactly when it applies. The ledger does not know the fix and says so
+  rather than inventing one — what it knows first-hand is that retrying has
+  not worked any of the previous times.
+- **A new rule rebuilds the system prompt in the conversation that earned
+  it**, the same reason the `remember` tool does, and only when the active set
+  actually changed — rebuilding runs git subprocesses and most failures change
+  nothing.
+
+Two things were found by writing the tests rather than by reading the code,
+and both are the usual shape:
+
+- **`_POSIXPATH` matched the `/a.py` inside `src/a.py`** and left `src` in the
+  signature, so the same mistake about two files stayed two patterns of one
+  hit each — the exact counting the module exists to do, not done. A
+  lookbehind fixed it and a relative-path pattern was missing entirely.
+- **"Never raises" did not include the guard that turns the feature off.**
+  `self.cfg` was read outside the `try`, and an Agent built with `__new__` and
+  no `__init__` — which is how several tests drive `_handle_tool_calls` — has
+  no `cfg`. So the one line whose whole job was to disable this brought the
+  turn down instead. A check that only holds because of where the caller got
+  its input is not a check; that sentence is elsewhere in this file and was
+  not true of this.
+
+**Not done, and deliberately: there is no hard preflight refusal.** The
+proposal was that a high-confidence pattern should make the tool refuse
+locally before the call runs. It cannot save a request — the model has already
+spent one to make the call — so all it buys is a different error, and a false
+positive there blocks real work with no way round it. The count is attached to
+the real error instead, which is the same information without the veto.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by
