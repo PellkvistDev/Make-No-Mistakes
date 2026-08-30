@@ -2440,6 +2440,76 @@ real bugs, and it is blocked on something real rather than on effort — a
 fixture is a tiny self-contained repo, and a real project is neither small nor
 free of secrets. Copying "just the files the turn touched" solves neither.
 
+## `why` reads one line; the rest of the history was never read
+
+`why(path, line)` exists because the reasons are in git and the agent could
+not reach them. It answers about ONE line. The rest of the log answers a
+different question nobody was asking: **which files bite, and what has to
+change alongside what.** A weak model cannot know that a file has been
+reverted twice and rewritten six times, so it edits it with exactly the
+confidence it brings to a file nobody has ever had trouble with.
+
+`glmcode/riskmap.py` reads it, from `git log` alone — no service, no model, no
+network. Three things in it were got wrong first and corrected by running it
+against this repository, which is the only reason they are right.
+
+**Coupling is measured by LIFT, not by co-occurrence.** `CLAUDE.md` changes in
+42 of this repo's 51 commits, so it co-occurs with *everything* at ~100% and a
+naive metric names it every file's closest partner — true, and useless. Lift
+divides by how often the sibling changes anyway: `agent.py` (37% of all
+commits, 79% of the ones touching `prompts.py`) scores 2.2 and `CLAUDE.md`
+scores 1.2. But lift is only the FILTER — the ranking is **confidence**,
+because the question a reader is actually asking is *"I changed X, how likely
+is it that Y needs changing too"*, and ranking by lift put a rarely-touched
+file with a perfect record above the answer anybody wanted.
+
+**What a commit DID is in its subject; what it discussed is in its body.** The
+first version matched fix/revert words in the body too, and this repository
+proved that wrong immediately: its commit bodies are essays *about* failures —
+"this was tried and reverted", "nothing said so" — so nearly every file came
+back HIGH and the ranking was worthless. Reverts are now detected by git's own
+markers (a `Revert "…"` subject, or the `This reverts commit <sha>` trailer),
+which are unambiguous in a way no word list can be.
+
+**Partial history is not no history.** The first version REFUSED on a shallow
+clone, and running it here is what showed that up: this checkout is shallow,
+and so is nearly every checkout an agent works in — CI runners, cloud
+sessions, `--depth` clones. A tool that answers "I cannot tell you" in the
+environment it mostly runs in is not cautious, it is absent. A truncated log
+now produces its numbers with `caveat()` attached saying every count is a
+FLOOR. Refusing to answer and answering as if certain are both wrong; the
+third option is answering with the bound stated.
+
+That last point has a harder edge, and it is the one worth keeping: **a signal
+this repository cannot support is said out loud, never rounded to "fine".**
+Only 3 of 52 commit subjects here name a fix, because its subjects describe
+the change rather than classifying it — a perfectly good convention this
+simply cannot read. So `signal_quality()` says so, and `describe()` reports
+UNKNOWN rather than LOW. "This file looks fine", derived from a fix count that
+could not be read, is the reassuring confident wrong answer this whole module
+exists to avoid. Coupling is unaffected and says so: it reads which paths
+appear in a commit, not what the commit says.
+
+**The forgotten-sibling check is the point of the feature.** After a turn that
+edits files, `Agent._sibling_nudge` asks whether one half of a pair was left
+behind. This repository's own `UNTRUSTED_INPUT_RULE` gap — the desktop prompt
+fixed, the phone left with no such rule at all, and NOTHING FAILING — is
+exactly that shape, and CLAUDE.md records that it was found by luck.
+
+- **Two outputs, priced differently.** The line to the USER is free and always
+  emitted, because being told is most of the value. The nudge to the MODEL
+  costs a round trip on a tier metered per day, so it fires only above
+  `SIBLING_NUDGE_CONFIDENCE`, once per turn, and only when the turn wrote
+  something.
+- **The paths come from the agent's own successful edits, not from a git
+  diff.** A diff also carries the user's uncommitted work and anything a
+  background worker changed meanwhile, and warning about a file somebody else
+  touched is a warning nobody can act on.
+- **It is phrased as a frequency with an explicit way out.** It is a
+  correlation; stated as an instruction it would be obeyed where it is wrong,
+  which for a weak model means editing a file it has no reason to touch. The
+  nudge ends by saying not to edit anything just because it asked.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by

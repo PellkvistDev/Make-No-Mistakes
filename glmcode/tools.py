@@ -2854,6 +2854,22 @@ TOOL_SCHEMAS = [
         ["path"],
     ),
     _schema(
+        "risk",
+        "Where this codebase is dangerous, from its git history alone. Reach for it "
+        "BEFORE editing a file you have not worked in: it says how often that file has "
+        "been fixed, whether anything in it has been reverted, and -- most usefully -- "
+        "which OTHER files change alongside it, so you do not fix one half of a pair "
+        "and leave the other. Those pairings are correlations, not rules: if your "
+        "change genuinely does not need the sibling, say so and move on. With no path, "
+        "reports the riskiest files in the project. It says plainly when the history "
+        "cannot support an answer rather than reporting everything as fine.",
+        {
+            "path": {"type": "string", "description": "File to assess (default: the whole project)"},
+            "limit": {"type": "integer", "description": "How many files to list when no path is given (default 5)"},
+        },
+        [],
+    ),
+    _schema(
         "check_ci",
         "Did CI pass? Reports every check GitHub ran on this branch, on the RUNNER -- which "
         "is a different question from running the tests here, and it is the one that gates a "
@@ -3398,6 +3414,29 @@ WORKER_SCHEMAS = [s for s in CONVERSATIONAL_SCHEMAS
                    "resume_agent")]
 
 
+def risk(path: str = "", limit: int = 5) -> str:
+    """What this project's history says about a file: how often it has been
+    fixed, whether anything in it has been reverted, and what changes
+    alongside it. See glmcode/riskmap.py."""
+    from . import riskmap
+    target = (path or "").strip()
+    if not target:
+        rows = riskmap.hotspots(get_workdir(), limit=max(1, min(int(limit or 5), 20)))
+        quality = riskmap.signal_quality(get_workdir())
+        if not rows:
+            head = ("No file in the history read here scores as risky.")
+            if quality.get("note"):
+                head += "\n" + quality["note"]
+            else:
+                head += (" That is a real answer about this repository, not an "
+                         "empty result.")
+            return head
+        out = ["Riskiest files by history:"]
+        out += [f"  {r['risk'].upper():<7} {r['path']} — {r['why']}" for r in rows]
+        return "\n".join(out)
+    return riskmap.describe(target, get_workdir())
+
+
 TOOL_FUNCTIONS = {
     "read_file": read_file,
     "write_file": write_file,
@@ -3430,6 +3469,7 @@ TOOL_FUNCTIONS = {
     "git_branch": git_branch,
     "git_diff": git_diff,
     "why": why,
+    "risk": risk,
     "check_ci": check_ci,
     "my_tabs": my_tabs,
     "git_log": git_log,
@@ -3457,7 +3497,7 @@ READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "find_references",
                  "search_code", "code_diagnostics", "go_to_definition",
                  "scan_secrets", "todo_write", "remember", "show_image",
                  "compact_context", "read_output", "stop_process",
-                 "list_processes", "review_changes", "why", "my_tabs",
+                 "list_processes", "review_changes", "why", "risk", "my_tabs",
                  # Reads a public-ish status from GitHub with a token that is
                  # already stored and already used for push/pull. It changes
                  # nothing anywhere, so a permission prompt would be friction

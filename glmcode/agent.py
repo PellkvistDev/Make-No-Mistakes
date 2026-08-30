@@ -61,6 +61,10 @@ MAX_CONTINUATIONS = 3
 # "Make it green": how many times the bounded test-fix loop will re-run the
 # project's checks and feed a failure back before giving up and reporting.
 GREEN_LOOP_MAX_ROUNDS = 4
+# A pairing has to be this strong before it is worth a model round trip
+# on a tier metered in requests per day. Weaker ones are still SAID to
+# the user, which costs nothing.
+SIBLING_NUDGE_CONFIDENCE = 0.7
 
 
 def _browser_worker_name(goal: str) -> str:
@@ -1242,6 +1246,13 @@ class Agent:
         self._turn_wrote_files = False
         self._turn_verified = False
         self._verify_nudged = False
+        # Paths this turn actually wrote, for the forgotten-sibling check.
+        # Taken from the agent's own successful edit calls rather than from a
+        # git diff: the diff would also carry the user's uncommitted work and
+        # anything a background worker changed meanwhile, and warning about a
+        # file somebody else touched is a warning nobody can act on.
+        self._turn_wrote_paths = set()
+        self._sibling_checked = False
         # The user's request this turn, kept for the fresh-eyes reviewer (which
         # judges the diff against the task in a clean, reasoning-free context).
         self._turn_task = _msg_text(user_message)
@@ -1309,6 +1320,9 @@ class Agent:
                                      "asking the agent to verify its changes")
                     self.messages.append({"role": "user",
                                           "content": verify_nudge(self.workdir)})
+                    continue
+                # Did this turn change one half of a pair? See riskmap.py.
+                if self._sibling_nudge():
                     continue
                 # High/Max: run a review pass over the answer. The first pass
                 # always runs; further passes (Max) only run if the previous one
@@ -1545,6 +1559,61 @@ class Agent:
         return "\n".join(lines)
 
     # -- fresh-eyes review (High/Max) ------------------------------------- #
+
+    def _sibling_nudge(self) -> bool:
+        """Did this turn edit one half of a pair the history says move together?
+
+        This repository's own `UNTRUSTED_INPUT_RULE` gap is the shape: the
+        desktop prompt was fixed, the phone was left with no such rule at all,
+        and NOTHING FAILED. CLAUDE.md records that it was found by luck. A file
+        that follows another in most commits and did not follow it this time is
+        the one mechanical signal available for that, and it costs a git log.
+
+        Returns True when it injected a nudge (so the turn loop continues).
+
+        Two separate outputs on purpose. The line to the USER is free and is
+        always emitted, because being told is most of the value and a request
+        is not. The nudge to the MODEL costs a round trip on a tier metered per
+        day, so it fires only for a strong pairing, once per turn, and only
+        when this turn actually wrote something.
+        """
+        if self._sibling_checked or not self._turn_wrote_paths:
+            return False
+        if not getattr(self.cfg, "sibling_check", True):
+            return False
+        if self.conversational or not self.allow_subagents:
+            return False
+        self._sibling_checked = True
+        try:
+            from .riskmap import forgotten_siblings
+            rows = forgotten_siblings(sorted(self._turn_wrote_paths), self.workdir)
+        except Exception:
+            return False
+        if not rows:
+            return False
+        for row in rows[:3]:
+            self.events.info(
+                f"note: {row['path']} usually changes with {row['because']} "
+                f"({row['confidence']:.0%} of the time) and was not touched")
+        top = rows[0]
+        if top["confidence"] < SIBLING_NUDGE_CONFIDENCE:
+            return False
+        # Phrased as a frequency and given an explicit way out. It is a
+        # correlation, and stated as an instruction it would be obeyed where
+        # it is wrong -- which for a weak model means editing a file it has no
+        # reason to touch.
+        self.messages.append({"role": "user", "content": (
+            f"[Automatic check — not from the user] You changed "
+            f"{', '.join(sorted(self._turn_wrote_paths))}. In this project's "
+            f"history, `{top['path']}` also changes whenever "
+            f"`{top['because']}` does, {top['confidence']:.0%} of the time "
+            f"({top['together']} of {top['of']} commits). That is a "
+            f"correlation from git, not a rule, and it is often irrelevant. "
+            f"Check whether your change needs a matching one there — the "
+            f"usual reason for a pair like this is two copies of one thing "
+            f"that must agree. If it does not apply, say so in one sentence "
+            f"and finish; do not edit that file just because this asked.")})
+        return True
 
     def _refine_nudge(self) -> str | None:
         """The message that drives one High/Max review pass, or None to stop.
@@ -1791,6 +1860,9 @@ class Agent:
                 if name in EDIT_TOOLS:
                     self._turn_wrote_files = True
                     self._refine_pass_changed = True  # a review pass that edits keeps Max going
+                    written = args.get("path") or args.get("file_path") or ""
+                    if written:
+                        self._turn_wrote_paths.add(self._project_relative(written))
                 self._tool_reply(tc, output, name=name, args=args, call_id=run_token)
             except ToolError as e:
                 self._tool_reply(tc, f"ERROR: {e}", error=True, name=name, args=args,
