@@ -2364,6 +2364,82 @@ spent one to make the call — so all it buys is a different error, and a false
 positive there blocks real work with no way round it. The count is attached to
 the real error instead, which is the same information without the veto.
 
+## The instrument was built and wired to nothing
+
+`glmcode/evals.py` has had a case runner, an A/B and a `compare()` table for a
+long time. Nothing in the app ever imported it. So the module that exists to
+test the README's central claim — that scaffolding is the biggest quality
+lever available to a small free model — printed a number to a terminal, the
+number scrolled away, and every scaffold setting stayed wherever it happened
+to be. Ninety-odd test files prove each feature is WIRED UP; none of them, and
+nothing else, measured whether any of it helps.
+
+Two things were missing, and the second is what makes the first honest.
+
+**A run had no price.** The free tiers here are metered in requests per day —
+twenty for Gemini 3.6 Flash — and a grid of four configurations over three
+cases is a day's allowance, discovered as a 429 somewhere in the middle.
+`estimate_requests` says what a run is about to cost BEFORE it starts, and
+`Result.requests` measures what each case really cost, read from `usage.py`
+rather than counted separately (a second counter beside the one the rate-limit
+panel reads is a number that can disagree with it). After the first suite
+anybody runs, the estimate stops being a guess: real per-case medians replace
+`REQUESTS_PER_CASE_GUESS`.
+
+- **`Budget` is enforced BETWEEN cases, and says so.** A case is a whole
+  agentic turn and there is no way to stop one half way that does not also
+  throw away the requests already spent on it. So the cap is "do not START
+  another case once this much has gone" rather than a ceiling it cannot
+  actually be.
+- **A case that was not run is `invalid`, never `fail`.** The agent did not
+  get it wrong; we stopped asking. Scoring it as a failure would report the
+  model as worse than it is, on the run that cost the most to produce — the
+  same distinction the suite already draws for a case whose check passed
+  before the agent touched it.
+- **`Journal` makes a run resumable**, written after every case rather than at
+  the end, because the failure it exists for is the run not reaching the end.
+  A half-written last line is the NORMAL way that file ends — it is appended
+  to during a run that was killed — so an unparseable tail keeps whatever
+  parsed and costs one re-run.
+
+**A result changed nothing.** `glmcode/evalprofile.py` stores the winner per
+model + endpoint (the same key the mistake ledger uses, for the same reason),
+with what it beat and by how much — a winner with no baseline is not a result.
+
+- **Only scaffold knobs can be in a profile** (`PROFILE_FIELDS`). A
+  measurement must not be able to change what it was not measuring; an eval
+  run that could rewrite `model`, a base URL or a key would be a
+  config-editing machine wearing a lab coat. Anything else is dropped, and the
+  CLI says which fields it dropped rather than doing it quietly.
+- **Types come from the config, not from the stored value.** Same rule as
+  `_apply_overrides`: a profile setting a string where an int lives is a
+  setting nobody reads, which surfaces later as "the flag made no difference"
+  and is believed.
+- **A tie goes to the baseline.** A configuration that merely matched the
+  defaults has not earned the right to change anybody's settings, and
+  preferring the fancier one on a tie is how scaffolding accumulates without
+  evidence.
+- **The defaults winning is RECORDED**, with empty settings, so it stays
+  distinguishable from "nobody has measured this" and the question is not
+  reopened every time somebody looks.
+- **Nothing is shipped pre-measured, and must not be.** A table of "good
+  settings for Flash Lite" that nobody ran is exactly the guesswork this
+  replaces, and it would go stale the first time a provider changed a model.
+
+**Applying it is an explicit action, not something a chat does to itself.**
+`Api._cfg` is ONE Config shared by every chat and persisted by `save_config`,
+so an agent that applied a profile on its own initiative would change other
+chats and outlive the session that did it. `CheckupApi.scaffold_profile()`
+says what was measured and whether the current settings already match it;
+`apply_scaffold_profile()` is the button. Two methods on purpose: one reports,
+one changes something.
+
+Not done, and deliberately: **cases are still hand-written.** Harvesting a
+failed chat into a fixture is the part that would make the suite grow from
+real bugs, and it is blocked on something real rather than on effort — a
+fixture is a tiny self-contained repo, and a real project is neither small nor
+free of secrets. Copying "just the files the turn touched" solves neither.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by

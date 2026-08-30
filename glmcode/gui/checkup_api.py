@@ -25,12 +25,14 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import backup as backup_module
+from .. import evalprofile as evalprofile_module
 from .. import ledger as ledger_module
 from .. import browser_extension
 from .. import githubsync
 from .. import secretstore
 from .. import syncstore
 from ..config import all_providers, provider_key as cfg_provider_key
+from ..config import save_config
 
 
 class CheckupApi:
@@ -130,6 +132,77 @@ class CheckupApi:
         this on its own, and a success never deletes a pattern either."""
         ledger_module.forget(None if all_projects else Path.cwd())
         return {"ok": True}
+
+    # ------------------------------------------------------------------ #
+    # The measured scaffold profile.
+    #
+    # evals.py could always answer "does this flag help"; nothing in the app
+    # had ever read the answer, so the suite printed a number to a terminal
+    # and the settings stayed wherever they happened to be. These two methods
+    # are the whole of the wire, and there are two of them on purpose: one
+    # says what was measured, the other changes something, and a measurement
+    # that silently rewrote how every chat behaves would be the worst version
+    # of this feature.
+
+    def scaffold_profile(self) -> dict:
+        """What the eval suite measured for the model this chat is using.
+
+        `matches` is the important field: a profile that agrees with the
+        current settings needs no prompt, and one that differs is the only
+        reason to put anything on screen at all.
+        """
+        c = self._cfg
+        row = evalprofile_module.get(c.model, c.base_url)
+        if not row:
+            return {"measured": False, "model": c.model,
+                    "how": "python -m glmcode.evals --grid auto_fix_tests=false,true "
+                           "--save-profile"}
+        settings = evalprofile_module.sanitize(row.get("settings") or {})
+        differs = {}
+        for key, value in settings.items():
+            if not hasattr(c, key):
+                continue
+            current = getattr(c, key)
+            if isinstance(current, bool):
+                value = str(value).lower() in ("1", "true", "yes", "on")
+            elif isinstance(current, int) and not isinstance(current, bool):
+                try:
+                    value = int(value)
+                except (TypeError, ValueError):
+                    continue
+            if current != value:
+                differs[key] = {"now": current, "measured": value}
+        return {
+            "measured": True,
+            "model": c.model,
+            "summary": evalprofile_module.describe(c.model, c.base_url),
+            "settings": settings,
+            "rate": row.get("rate"),
+            "baseline_rate": row.get("baseline_rate"),
+            "baseline": row.get("baseline"),
+            "cases": row.get("cases"),
+            "at": row.get("at"),
+            "matches": not differs,
+            "differs": differs,
+        }
+
+    def apply_scaffold_profile(self) -> dict:
+        """Put the measured settings into effect. An explicit action, never
+        automatic: `Api._cfg` is one object shared by every chat and persisted
+        by save_config, so anything that wrote to it on the agent's own
+        initiative would change other chats and outlive the session that did
+        it."""
+        c = self._cfg
+        changed = evalprofile_module.apply_to(c, c.model, c.base_url)
+        if not changed:
+            return {"ok": True, "changed": [],
+                    "detail": "Nothing to change — the settings already match "
+                              "what was measured."}
+        save_config(c)
+        if self._agent:
+            self._agent.rebuild_system_prompt()
+        return {"ok": True, "changed": changed,
+                "detail": "Applied: " + ", ".join(changed)}
 
     def _check_git(self) -> dict:
         ok = githubsync.available()
