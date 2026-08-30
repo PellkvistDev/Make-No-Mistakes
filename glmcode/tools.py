@@ -2854,6 +2854,38 @@ TOOL_SCHEMAS = [
         ["path"],
     ),
     _schema(
+        "risk",
+        "Where this codebase is dangerous, from its git history alone. Reach for it "
+        "BEFORE editing a file you have not worked in: it says how often that file has "
+        "been fixed, whether anything in it has been reverted, and -- most usefully -- "
+        "which OTHER files change alongside it, so you do not fix one half of a pair "
+        "and leave the other. Those pairings are correlations, not rules: if your "
+        "change genuinely does not need the sibling, say so and move on. With no path, "
+        "reports the riskiest files in the project. It says plainly when the history "
+        "cannot support an answer rather than reporting everything as fine.",
+        {
+            "path": {"type": "string", "description": "File to assess (default: the whole project)"},
+            "limit": {"type": "integer", "description": "How many files to list when no path is given (default 5)"},
+        },
+        [],
+    ),
+    _schema(
+        "trace_run",
+        "Run a command and watch what the program ACTUALLY did: the calls it made, "
+        "the arguments they got, what they returned, and the values in scope wherever "
+        "it blew up. Reach for it when a test or script fails for a reason the source "
+        "does not explain -- it answers 'why was that None' in one call instead of "
+        "several rounds of adding print statements. Python only (it attaches through "
+        "sitecustomize) and it says so when nothing Python ran. A traced program is "
+        "several times slower, so use `focus` to narrow it to one file or function.",
+        {
+            "command": {"type": "string", "description": "The command to run, e.g. 'python -m pytest tests/test_x.py -x'"},
+            "focus": {"type": "string", "description": "Only record frames whose file path or function name contains this. Strongly recommended."},
+            "timeout_seconds": {"type": "integer", "description": "Give up after this long (default 180, max 600)"},
+        },
+        ["command"],
+    ),
+    _schema(
         "check_ci",
         "Did CI pass? Reports every check GitHub ran on this branch, on the RUNNER -- which "
         "is a different question from running the tests here, and it is the one that gates a "
@@ -3080,6 +3112,26 @@ TOOL_SCHEMAS = [
                                     "configured speed in Settings)"},
         },
         ["text"],
+    ),
+    _schema(
+        "set_contract",
+        "Agree what this task is for, BEFORE starting it. Reach for it at the top of "
+        "any task big enough to drift -- anything spanning several files, or where the "
+        "user named something that must keep working. Three things: what must become "
+        "true (their words, not a restatement), which files this task has no business "
+        "touching, and how you will know it worked. It then stays in front of you for "
+        "the whole task and survives compaction, your final report is judged against "
+        "it, and you are told if you change a file you said you would not. Skip it for "
+        "a one-file edit or a question -- a contract for a trivial task is ceremony.",
+        {
+            "goal": {"type": "string", "description": "What must become true, in the user's own words"},
+            "must_not_change": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Paths, directories or globs this task must not touch (e.g. 'tests/', 'src/api/schema.py')",
+            },
+            "check": {"type": "string", "description": "The command that proves it, or how it will be verified if there is none"},
+        },
+        [],
     ),
     _schema(
         "review_changes",
@@ -3372,6 +3424,7 @@ COMPACT_CONTEXT_TOOL = "compact_context"
 SPEAK_TOOL = "speak"
 REMEMBER_TOOL = "remember"
 REVIEW_CHANGES_TOOL = "review_changes"
+SET_CONTRACT_TOOL = "set_contract"
 SHOW_HTTP_CAT_TOOL = "show_http_cat"
 PREVIEW_PAGE_TOOL = "preview_page"
 CHECK_PAGE_TOOL = "check_page"
@@ -3380,7 +3433,13 @@ RUN_COMMAND_TOOL = "run_command"
 # Both names, in one place, because several callers have to recognise a shell
 # command by tool name -- the permission engine, the Stop button, the verify
 # nudge -- and a saved session can still hand them the old one.
-SHELL_TOOL_NAMES = frozenset({RUN_COMMAND_TOOL, "run_powershell"})
+# trace_run belongs here and its absence would have been a permission BYPASS,
+# not a missing prompt: it takes a command and execs it through the same shell
+# run_command uses. Everything that gates a shell command -- the ask-mode
+# prompt, session allowlists, command aliases, and plan mode's provably
+# read-only rule -- is keyed on membership of this set, so a shell tool that is
+# not in it is a way to run anything with no prompt at all.
+SHELL_TOOL_NAMES = frozenset({RUN_COMMAND_TOOL, "run_powershell", "trace_run"})
 
 
 # The coding agent's half of the worker set. It had NONE of these, because
@@ -3396,6 +3455,41 @@ WORKER_SCHEMAS = [s for s in CONVERSATIONAL_SCHEMAS
                    # Following up meant spawning a fresh one and re-explaining
                    # everything the last one had just worked out.
                    "resume_agent")]
+
+
+def risk(path: str = "", limit: int = 5) -> str:
+    """What this project's history says about a file: how often it has been
+    fixed, whether anything in it has been reverted, and what changes
+    alongside it. See glmcode/riskmap.py."""
+    from . import riskmap
+    target = (path or "").strip()
+    if not target:
+        rows = riskmap.hotspots(get_workdir(), limit=max(1, min(int(limit or 5), 20)))
+        quality = riskmap.signal_quality(get_workdir())
+        if not rows:
+            head = ("No file in the history read here scores as risky.")
+            if quality.get("note"):
+                head += "\n" + quality["note"]
+            else:
+                head += (" That is a real answer about this repository, not an "
+                         "empty result.")
+            return head
+        out = ["Riskiest files by history:"]
+        out += [f"  {r['risk'].upper():<7} {r['path']} — {r['why']}" for r in rows]
+        return "\n".join(out)
+    return riskmap.describe(target, get_workdir())
+
+
+def trace_run(command: str = "", focus: str = "",
+              timeout_seconds: int = 180) -> str:
+    """Run a command with a tracer attached and report what the program
+    actually did. See glmcode/probe.py."""
+    from .probe import trace_run as _trace
+    # A read that can hang, so it goes through the same machinery web_search
+    # does -- a traced program is several times slower and a Stop has to reach
+    # it. Deliberately NOT the run_command treatment: this is for a command
+    # that is being observed, and the process tree is killed by the timeout.
+    return interruptible(_trace, command, focus, timeout_seconds)
 
 
 TOOL_FUNCTIONS = {
@@ -3430,6 +3524,8 @@ TOOL_FUNCTIONS = {
     "git_branch": git_branch,
     "git_diff": git_diff,
     "why": why,
+    "risk": risk,
+    "trace_run": trace_run,
     "check_ci": check_ci,
     "my_tabs": my_tabs,
     "git_log": git_log,
@@ -3457,7 +3553,8 @@ READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "find_references",
                  "search_code", "code_diagnostics", "go_to_definition",
                  "scan_secrets", "todo_write", "remember", "show_image",
                  "compact_context", "read_output", "stop_process",
-                 "list_processes", "review_changes", "why", "my_tabs",
+                 "list_processes", "review_changes", "why", "risk", "my_tabs",
+                 "set_contract",
                  # Reads a public-ish status from GitHub with a token that is
                  # already stored and already used for push/pull. It changes
                  # nothing anywhere, so a permission prompt would be friction

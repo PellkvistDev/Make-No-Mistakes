@@ -2440,6 +2440,209 @@ real bugs, and it is blocked on something real rather than on effort — a
 fixture is a tiny self-contained repo, and a real project is neither small nor
 free of secrets. Copying "just the files the turn touched" solves neither.
 
+## `why` reads one line; the rest of the history was never read
+
+`why(path, line)` exists because the reasons are in git and the agent could
+not reach them. It answers about ONE line. The rest of the log answers a
+different question nobody was asking: **which files bite, and what has to
+change alongside what.** A weak model cannot know that a file has been
+reverted twice and rewritten six times, so it edits it with exactly the
+confidence it brings to a file nobody has ever had trouble with.
+
+`glmcode/riskmap.py` reads it, from `git log` alone — no service, no model, no
+network. Three things in it were got wrong first and corrected by running it
+against this repository, which is the only reason they are right.
+
+**Coupling is measured by LIFT, not by co-occurrence.** `CLAUDE.md` changes in
+42 of this repo's 51 commits, so it co-occurs with *everything* at ~100% and a
+naive metric names it every file's closest partner — true, and useless. Lift
+divides by how often the sibling changes anyway: `agent.py` (37% of all
+commits, 79% of the ones touching `prompts.py`) scores 2.2 and `CLAUDE.md`
+scores 1.2. But lift is only the FILTER — the ranking is **confidence**,
+because the question a reader is actually asking is *"I changed X, how likely
+is it that Y needs changing too"*, and ranking by lift put a rarely-touched
+file with a perfect record above the answer anybody wanted.
+
+**What a commit DID is in its subject; what it discussed is in its body.** The
+first version matched fix/revert words in the body too, and this repository
+proved that wrong immediately: its commit bodies are essays *about* failures —
+"this was tried and reverted", "nothing said so" — so nearly every file came
+back HIGH and the ranking was worthless. Reverts are now detected by git's own
+markers (a `Revert "…"` subject, or the `This reverts commit <sha>` trailer),
+which are unambiguous in a way no word list can be.
+
+**Partial history is not no history.** The first version REFUSED on a shallow
+clone, and running it here is what showed that up: this checkout is shallow,
+and so is nearly every checkout an agent works in — CI runners, cloud
+sessions, `--depth` clones. A tool that answers "I cannot tell you" in the
+environment it mostly runs in is not cautious, it is absent. A truncated log
+now produces its numbers with `caveat()` attached saying every count is a
+FLOOR. Refusing to answer and answering as if certain are both wrong; the
+third option is answering with the bound stated.
+
+That last point has a harder edge, and it is the one worth keeping: **a signal
+this repository cannot support is said out loud, never rounded to "fine".**
+Only 3 of 52 commit subjects here name a fix, because its subjects describe
+the change rather than classifying it — a perfectly good convention this
+simply cannot read. So `signal_quality()` says so, and `describe()` reports
+UNKNOWN rather than LOW. "This file looks fine", derived from a fix count that
+could not be read, is the reassuring confident wrong answer this whole module
+exists to avoid. Coupling is unaffected and says so: it reads which paths
+appear in a commit, not what the commit says.
+
+**The forgotten-sibling check is the point of the feature.** After a turn that
+edits files, `Agent._sibling_nudge` asks whether one half of a pair was left
+behind. This repository's own `UNTRUSTED_INPUT_RULE` gap — the desktop prompt
+fixed, the phone left with no such rule at all, and NOTHING FAILING — is
+exactly that shape, and CLAUDE.md records that it was found by luck.
+
+- **Two outputs, priced differently.** The line to the USER is free and always
+  emitted, because being told is most of the value. The nudge to the MODEL
+  costs a round trip on a tier metered per day, so it fires only above
+  `SIBLING_NUDGE_CONFIDENCE`, once per turn, and only when the turn wrote
+  something.
+- **The paths come from the agent's own successful edits, not from a git
+  diff.** A diff also carries the user's uncommitted work and anything a
+  background worker changed meanwhile, and warning about a file somebody else
+  touched is a warning nobody can act on.
+- **It is phrased as a frequency with an explicit way out.** It is a
+  correlation; stated as an instruction it would be obeyed where it is wrong,
+  which for a weak model means editing a file it has no reason to touch. The
+  nudge ends by saying not to edit anything just because it asked.
+
+## The agent could read the code and run the tests; it never watched the program
+
+`run_command` returns stdout — what the program chose to say. A failing test
+returns a traceback, which is a list of line numbers with no values in it. So
+the model does what a person does with no debugger: adds a print, runs again,
+reads, adds another. Three or four round trips on a tier metered at twenty
+requests a day, to recover information the interpreter had all along.
+
+`glmcode/probe.py`'s `trace_run` attaches a tracer and hands back the call
+tree with arguments and return values, plus the locals at every frame of the
+exception that ended it. "`parse()` returned None because it got `'oops'`"
+replaces the whole loop with one call.
+
+**How it attaches is the interesting part.** A `sitecustomize.py` is written
+to a temp directory placed on `PYTHONPATH`. CPython imports `sitecustomize` at
+interpreter startup, before the program's own code, for every python process —
+so it works for `pytest`, for `python -m thing`, for a script, and for
+subprocesses the command spawns, with nothing patched in the project and
+nothing left behind.
+
+That mechanism had a defect its own test caught, and it is the exact failure
+the module is supposed to avoid: **Python imports the FIRST `sitecustomize` on
+`sys.path` and stops.** Prepending our directory is therefore not "ours runs
+too", it is "ours runs INSTEAD" — a project with its own `sitecustomize` had
+its startup silently replaced by a debugging tool. It now chains explicitly:
+finds the next `sitecustomize.py` further along `sys.path` and execs it
+*before* installing the tracer, so their code runs, and runs untraced.
+
+Four more things keep it from being a liability:
+
+- **Scoped to the project's own files.** Returning `None` rather than the
+  tracer for a frame outside the root does not just filter the output, it stops
+  the interpreter descending into that call at all — which is most of the
+  speed. Tracing the standard library buries the twenty lines that matter.
+- **Bounded twice**: by events collected in the child, and again by characters
+  when rendered, inside `MAX_TOOL_OUTPUT` rather than on top of it. An uncapped
+  tool result once ballooned a chat to ~1.5M tokens here; a tracer is the
+  easiest way to do that again. The cap names the way out of itself (`focus`).
+- **Repr is defensive.** `repr()` raises on a half-built object, hits the
+  database on a lazy ORM row, and can be megabytes on an array. A tracer that
+  crashes or slows the program it is watching is worse than no tracer — so
+  containers report their length, unknown objects report their type, and an
+  exception reports its MESSAGE, because "TypeError" is what the traceback
+  already said.
+- **Values are redacted with `scan_secrets`' own patterns.** A trace through
+  an auth path otherwise puts live credentials into a chat that then syncs to
+  GitHub. Reusing those patterns rather than writing a second set: two ideas
+  of what a secret looks like is one of them being wrong.
+
+**It is in `SHELL_TOOL_NAMES`, and leaving it out would have been a permission
+BYPASS rather than a missing prompt.** It takes a command and execs it through
+the same shell `run_command` uses, and everything that gates a shell command —
+the ask-mode prompt, session allowlists, command aliases, plan mode's
+provably-read-only rule — is keyed on membership of that set. A shell tool
+outside it runs anything with no prompt at all.
+
+Python only, and it says so. The attach mechanism is a CPython feature, so a
+non-Python command gets its output and an explicit "no trace collected —
+`trace_run` only sees Python". Naming the limit is the difference between a
+tool that does not apply and one that looks broken.
+
+## Nothing durable sat between the prompt and the diff
+
+Over a long turn a weak model does something ADJACENT to what was asked,
+verifies that, and reports DONE — honestly, by its own lights.
+`HONEST_REPORT_RULE` fixed the reporting of that: it catches the model that
+knows it fell short. It cannot catch the model that does not.
+
+`glmcode/contract.py` is three things agreed at the top of a task: what must
+become true (the user's words), what must not change, and how we will know.
+Only the second is mechanically checkable, and that is deliberately where the
+weight sits — "did it achieve the goal" is a judgement this does not pretend
+to make, while "did it change something it promised not to" is a set
+difference.
+
+- **A violation is REPORTED, never reverted.** Undoing a file on the agent's
+  own judgement is the `revert_worker` mistake, which threw away work nobody
+  asked it to touch. The user is told; they decide; the per-turn snapshots are
+  what a human reverts with.
+- **The model proposes and the conversation is the confirmation.** A contract
+  invented silently and then graded against is the agent writing its own
+  rubric and marking its own homework. `set_contract` is a tool call, so it
+  appears in the chat as an ordinary visible step before any work happens.
+- **It lives in the system prompt, not the history.** A contract that gets
+  compacted away has evaporated on exactly the long turns it exists for.
+- **A directory pattern covers what is inside it.** `fnmatch` does not do
+  this, and somebody writing `tests` and getting no protection from it is the
+  worst way for this to be wrong — it reads as covered. `tests` must also not
+  match `tests-old`, which is the string-prefix bug already written up under
+  *An undo you cannot undo*.
+- **An empty `must_not_change` means nothing was declared off-limits**, which
+  is a different statement from "nothing may change" and must never be read
+  as the latter.
+
+Found by its own test run, and it is the third time this exact shape has
+appeared: `rebuild_system_prompt` read `self.contract` plainly, and it runs
+during `__init__` and against Agents built with `__new__` in the tests, so it
+raised `AttributeError` out of the prompt build. `_chat_base_url`, eight lines
+below, already carried the comment explaining why it uses `getattr` on `self`.
+
+## The free work was never done
+
+Between turns — while the diff is being read, while the next message is being
+typed — the machine is idle and the day's request allowance is unspent. The
+next turn then opens by paying for things that could have been ready.
+
+`glmcode/prefetch.py` warms the two caches the next turn will certainly want:
+`codebase_memory`'s index over the files that just changed, and `riskmap`'s
+parse of the git log.
+
+**It makes no model request, ever.** That is the whole basis on which it runs
+unasked, and it is why there is nothing to configure about how much it may
+spend. `tests/test_prefetch.py` asserts the module's source contains no client
+or completion call at all, because the moment it needed one it would need a
+budget, and it has neither.
+
+- **It never touches the agent** — not `messages`, not the turn lock, not any
+  session state. It populates module-level caches keyed on file content and on
+  the HEAD sha. A background thread writing into agent state is how you get a
+  `tool_call` with no matching reply, which this repository has scar tissue
+  about in three separate places.
+- **The next turn cancels it, and the cancel never blocks.** Work for an
+  abandoned task is pure heat, and a prefetch still running when the user asks
+  something is competing with the thing they are waiting for.
+- **A failure is silent and total.** Everything it does will be done again,
+  correctly and synchronously, by whoever actually needs it.
+- **`join()` is not `cancel(wait=)`.** The tests reached for the latter to
+  mean "wait for it to finish" and measured an aborted run instead — a real
+  gap in the API, not just a bad test.
+
+Only the main chat agent prefetches. A sub-agent or worker finishing is not a
+moment when nobody is waiting: the coordinator is.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by

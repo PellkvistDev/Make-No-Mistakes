@@ -638,6 +638,16 @@ glmcode/
   prompts.py      the system prompt, vision-analysis prompt, compaction prompt
   sessions.py     ~/.makenomistakes/sessions/*.json — chat history per project folder
   backup.py       ~/.makenomistakes/backups/ — per-chat shadow git repo, snapshot + revert
+  contract.py     set_contract: what must become true, what must not change,
+                  and how we'll know -- survives compaction, and you are told
+                  if a turn touches a file it agreed not to
+  prefetch.py     free cache warming between turns (no model requests)
+  probe.py        trace_run: run a command with a tracer attached and see the
+                  calls, arguments, return values and the locals wherever it
+                  blew up (Python only; attaches via sitecustomize)
+  riskmap.py      where this codebase is dangerous, from git log alone: fix
+                  density, real reverts, and which files change together (the
+                  `risk` tool, and the forgotten-sibling check after an edit)
   ledger.py       ~/.makenomistakes/ledger.json — the tool failures this model
                   makes in this project, counted; the repeat offenders go in
                   its system prompt so it stops making them
