@@ -2510,6 +2510,67 @@ exactly that shape, and CLAUDE.md records that it was found by luck.
   which for a weak model means editing a file it has no reason to touch. The
   nudge ends by saying not to edit anything just because it asked.
 
+## The agent could read the code and run the tests; it never watched the program
+
+`run_command` returns stdout — what the program chose to say. A failing test
+returns a traceback, which is a list of line numbers with no values in it. So
+the model does what a person does with no debugger: adds a print, runs again,
+reads, adds another. Three or four round trips on a tier metered at twenty
+requests a day, to recover information the interpreter had all along.
+
+`glmcode/probe.py`'s `trace_run` attaches a tracer and hands back the call
+tree with arguments and return values, plus the locals at every frame of the
+exception that ended it. "`parse()` returned None because it got `'oops'`"
+replaces the whole loop with one call.
+
+**How it attaches is the interesting part.** A `sitecustomize.py` is written
+to a temp directory placed on `PYTHONPATH`. CPython imports `sitecustomize` at
+interpreter startup, before the program's own code, for every python process —
+so it works for `pytest`, for `python -m thing`, for a script, and for
+subprocesses the command spawns, with nothing patched in the project and
+nothing left behind.
+
+That mechanism had a defect its own test caught, and it is the exact failure
+the module is supposed to avoid: **Python imports the FIRST `sitecustomize` on
+`sys.path` and stops.** Prepending our directory is therefore not "ours runs
+too", it is "ours runs INSTEAD" — a project with its own `sitecustomize` had
+its startup silently replaced by a debugging tool. It now chains explicitly:
+finds the next `sitecustomize.py` further along `sys.path` and execs it
+*before* installing the tracer, so their code runs, and runs untraced.
+
+Four more things keep it from being a liability:
+
+- **Scoped to the project's own files.** Returning `None` rather than the
+  tracer for a frame outside the root does not just filter the output, it stops
+  the interpreter descending into that call at all — which is most of the
+  speed. Tracing the standard library buries the twenty lines that matter.
+- **Bounded twice**: by events collected in the child, and again by characters
+  when rendered, inside `MAX_TOOL_OUTPUT` rather than on top of it. An uncapped
+  tool result once ballooned a chat to ~1.5M tokens here; a tracer is the
+  easiest way to do that again. The cap names the way out of itself (`focus`).
+- **Repr is defensive.** `repr()` raises on a half-built object, hits the
+  database on a lazy ORM row, and can be megabytes on an array. A tracer that
+  crashes or slows the program it is watching is worse than no tracer — so
+  containers report their length, unknown objects report their type, and an
+  exception reports its MESSAGE, because "TypeError" is what the traceback
+  already said.
+- **Values are redacted with `scan_secrets`' own patterns.** A trace through
+  an auth path otherwise puts live credentials into a chat that then syncs to
+  GitHub. Reusing those patterns rather than writing a second set: two ideas
+  of what a secret looks like is one of them being wrong.
+
+**It is in `SHELL_TOOL_NAMES`, and leaving it out would have been a permission
+BYPASS rather than a missing prompt.** It takes a command and execs it through
+the same shell `run_command` uses, and everything that gates a shell command —
+the ask-mode prompt, session allowlists, command aliases, plan mode's
+provably-read-only rule — is keyed on membership of that set. A shell tool
+outside it runs anything with no prompt at all.
+
+Python only, and it says so. The attach mechanism is a CPython feature, so a
+non-Python command gets its output and an explicit "no trace collected —
+`trace_run` only sees Python". Naming the limit is the difference between a
+tool that does not apply and one that looks broken.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by

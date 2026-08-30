@@ -2870,6 +2870,22 @@ TOOL_SCHEMAS = [
         [],
     ),
     _schema(
+        "trace_run",
+        "Run a command and watch what the program ACTUALLY did: the calls it made, "
+        "the arguments they got, what they returned, and the values in scope wherever "
+        "it blew up. Reach for it when a test or script fails for a reason the source "
+        "does not explain -- it answers 'why was that None' in one call instead of "
+        "several rounds of adding print statements. Python only (it attaches through "
+        "sitecustomize) and it says so when nothing Python ran. A traced program is "
+        "several times slower, so use `focus` to narrow it to one file or function.",
+        {
+            "command": {"type": "string", "description": "The command to run, e.g. 'python -m pytest tests/test_x.py -x'"},
+            "focus": {"type": "string", "description": "Only record frames whose file path or function name contains this. Strongly recommended."},
+            "timeout_seconds": {"type": "integer", "description": "Give up after this long (default 180, max 600)"},
+        },
+        ["command"],
+    ),
+    _schema(
         "check_ci",
         "Did CI pass? Reports every check GitHub ran on this branch, on the RUNNER -- which "
         "is a different question from running the tests here, and it is the one that gates a "
@@ -3396,7 +3412,13 @@ RUN_COMMAND_TOOL = "run_command"
 # Both names, in one place, because several callers have to recognise a shell
 # command by tool name -- the permission engine, the Stop button, the verify
 # nudge -- and a saved session can still hand them the old one.
-SHELL_TOOL_NAMES = frozenset({RUN_COMMAND_TOOL, "run_powershell"})
+# trace_run belongs here and its absence would have been a permission BYPASS,
+# not a missing prompt: it takes a command and execs it through the same shell
+# run_command uses. Everything that gates a shell command -- the ask-mode
+# prompt, session allowlists, command aliases, and plan mode's provably
+# read-only rule -- is keyed on membership of this set, so a shell tool that is
+# not in it is a way to run anything with no prompt at all.
+SHELL_TOOL_NAMES = frozenset({RUN_COMMAND_TOOL, "run_powershell", "trace_run"})
 
 
 # The coding agent's half of the worker set. It had NONE of these, because
@@ -3437,6 +3459,18 @@ def risk(path: str = "", limit: int = 5) -> str:
     return riskmap.describe(target, get_workdir())
 
 
+def trace_run(command: str = "", focus: str = "",
+              timeout_seconds: int = 180) -> str:
+    """Run a command with a tracer attached and report what the program
+    actually did. See glmcode/probe.py."""
+    from .probe import trace_run as _trace
+    # A read that can hang, so it goes through the same machinery web_search
+    # does -- a traced program is several times slower and a Stop has to reach
+    # it. Deliberately NOT the run_command treatment: this is for a command
+    # that is being observed, and the process tree is killed by the timeout.
+    return interruptible(_trace, command, focus, timeout_seconds)
+
+
 TOOL_FUNCTIONS = {
     "read_file": read_file,
     "write_file": write_file,
@@ -3470,6 +3504,7 @@ TOOL_FUNCTIONS = {
     "git_diff": git_diff,
     "why": why,
     "risk": risk,
+    "trace_run": trace_run,
     "check_ci": check_ci,
     "my_tabs": my_tabs,
     "git_log": git_log,

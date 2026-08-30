@@ -638,6 +638,9 @@ glmcode/
   prompts.py      the system prompt, vision-analysis prompt, compaction prompt
   sessions.py     ~/.makenomistakes/sessions/*.json — chat history per project folder
   backup.py       ~/.makenomistakes/backups/ — per-chat shadow git repo, snapshot + revert
+  probe.py        trace_run: run a command with a tracer attached and see the
+                  calls, arguments, return values and the locals wherever it
+                  blew up (Python only; attaches via sitecustomize)
   riskmap.py      where this codebase is dangerous, from git log alone: fix
                   density, real reverts, and which files change together (the
                   `risk` tool, and the forgotten-sibling check after an edit)
