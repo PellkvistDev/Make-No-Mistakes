@@ -378,6 +378,10 @@ class Config:
     # (glmcode/riskmap.py). The note to the user is free; the nudge to the model
     # costs one request and only fires for a strong pairing.
     sibling_check: bool = True
+    # Warm local caches (the retrieval index, the git-log parse) between turns,
+    # when nobody is waiting. Makes no model request -- that is the basis on
+    # which it runs unasked (glmcode/prefetch.py).
+    prefetch_between_turns: bool = True
     parallel_attempts: int = 1       # "race": 1 = off; 2 or 3 = run that many isolated attempts from a common baseline and keep the best
     show_reasoning: bool = True      # print the model's reasoning (dimmed)
     # auto = ask the provider (see Agent._images_go_direct). It used to

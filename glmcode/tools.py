@@ -3114,6 +3114,26 @@ TOOL_SCHEMAS = [
         ["text"],
     ),
     _schema(
+        "set_contract",
+        "Agree what this task is for, BEFORE starting it. Reach for it at the top of "
+        "any task big enough to drift -- anything spanning several files, or where the "
+        "user named something that must keep working. Three things: what must become "
+        "true (their words, not a restatement), which files this task has no business "
+        "touching, and how you will know it worked. It then stays in front of you for "
+        "the whole task and survives compaction, your final report is judged against "
+        "it, and you are told if you change a file you said you would not. Skip it for "
+        "a one-file edit or a question -- a contract for a trivial task is ceremony.",
+        {
+            "goal": {"type": "string", "description": "What must become true, in the user's own words"},
+            "must_not_change": {
+                "type": "array", "items": {"type": "string"},
+                "description": "Paths, directories or globs this task must not touch (e.g. 'tests/', 'src/api/schema.py')",
+            },
+            "check": {"type": "string", "description": "The command that proves it, or how it will be verified if there is none"},
+        },
+        [],
+    ),
+    _schema(
         "review_changes",
         "Show everything that changed in the project since this turn started -- your "
         "own edits plus any side effects of commands you ran -- as a git diff against "
@@ -3404,6 +3424,7 @@ COMPACT_CONTEXT_TOOL = "compact_context"
 SPEAK_TOOL = "speak"
 REMEMBER_TOOL = "remember"
 REVIEW_CHANGES_TOOL = "review_changes"
+SET_CONTRACT_TOOL = "set_contract"
 SHOW_HTTP_CAT_TOOL = "show_http_cat"
 PREVIEW_PAGE_TOOL = "preview_page"
 CHECK_PAGE_TOOL = "check_page"
@@ -3533,6 +3554,7 @@ READONLY_TOOLS = {"read_file", "list_dir", "glob", "grep", "find_references",
                  "scan_secrets", "todo_write", "remember", "show_image",
                  "compact_context", "read_output", "stop_process",
                  "list_processes", "review_changes", "why", "risk", "my_tabs",
+                 "set_contract",
                  # Reads a public-ish status from GitHub with a token that is
                  # already stored and already used for push/pull. It changes
                  # nothing anywhere, so a permission prompt would be friction

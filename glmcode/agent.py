@@ -38,6 +38,7 @@ from .tools import (BROWSER_ACTION_TOOLS, BROWSER_AGENT_SCHEMAS,
                     CHECK_PAGE_TOOL, DISPATCH_WORKER_TOOL, GENERATE_IMAGE_TOOL,
                     PREVIEW_PAGE_TOOL,
                     REMEMBER_TOOL, REVERT_WORKER_TOOL, REVIEW_CHANGES_TOOL,
+                    SET_CONTRACT_TOOL,
                     SHOW_HTTP_CAT_TOOL, SHOW_IMAGE_TOOL, SPEAK_TOOL,
                     STEER_WORKER_TOOL, STOP_WORKER_TOOL, SUBAGENT_TOOL,
                     TOOL_SCHEMAS, VIEW_IMAGE_TOOL, WORKER_CHANGES_TOOL, ToolError,
@@ -345,6 +346,17 @@ class Agent:
         # set True there). The human can freeze the loop at a safe checkpoint,
         # drive the (headed, now-idle) browser themselves, then resume the SAME
         # agent -- which re-perceives the page and carries on with full memory.
+        # The agreement for the current task, if one was set. Held on the
+        # agent and rendered into the SYSTEM prompt rather than appended to
+        # the history: compaction shrinks the history, and a contract that is
+        # compacted away has evaporated on exactly the long turns it exists
+        # for. See glmcode/contract.py.
+        self.contract = None
+        self._contract_reported = False
+        # Free, local cache warming done between turns (glmcode/prefetch.py).
+        # Only the main chat agent: a sub-agent or worker finishing is not a
+        # moment when nobody is waiting -- the coordinator is.
+        self._prefetch = None
         self.pausable = False
         self._pause_flag = threading.Event()
         self._resume_flag = threading.Event()
@@ -377,6 +389,16 @@ class Agent:
                 # one provider's lessons to another. See glmcode/ledger.py.
                 endpoint=self._chat_base_url(),
                 learn=getattr(self.cfg, "learn_from_mistakes", True))
+        # getattr on self, for the same reason _chat_base_url does it a few
+        # lines down: rebuild_system_prompt runs during __init__ and against
+        # Agents built with __new__ in the tests, so an attribute set later in
+        # the constructor is not guaranteed to exist yet. Reading it plainly
+        # raised AttributeError out of the prompt build -- the same shape as
+        # the ledger's config guard, one file over.
+        _contract = getattr(self, "contract", None)
+        if _contract is not None:
+            from .contract import prompt_block
+            self._base_system_prompt += prompt_block(_contract)
         if self.transcript:
             # Tell the model its transcript files exist and where, so it can
             # grep them for anything compacted out of context or said in a
@@ -1084,6 +1106,11 @@ class Agent:
             if leftover:
                 self.events.steer_returned(leftover)
             self.events.turn_done(self.session_usage, self.context_estimate())
+            # After turn_done, so nothing the user is waiting on queues behind
+            # it, and in the `finally` so a cancelled or failed turn warms the
+            # caches too -- the files it changed before dying are exactly the
+            # ones the next attempt will read.
+            self._start_prefetch()
 
     def steer(self, text: str) -> bool:
         """Queue a message from the user while this agent is mid-turn. It
@@ -1239,6 +1266,9 @@ class Agent:
         self.transcript.assistant(msg.get("content") or "", calls)
 
     def _run_turn(self, user_message: dict) -> None:
+        # Whatever was being warmed was for a state the user has now moved on
+        # from, and it is competing with the turn they are waiting for.
+        self._cancel_prefetch()
         self.maybe_autocompact()
         self.messages.append(user_message)
         if self.transcript:
@@ -1253,6 +1283,7 @@ class Agent:
         # file somebody else touched is a warning nobody can act on.
         self._turn_wrote_paths = set()
         self._sibling_checked = False
+        self._contract_reported = False
         # The user's request this turn, kept for the fresh-eyes reviewer (which
         # judges the diff against the task in a clean, reasoning-free context).
         self._turn_task = _msg_text(user_message)
@@ -1320,6 +1351,9 @@ class Agent:
                                      "asking the agent to verify its changes")
                     self.messages.append({"role": "user",
                                           "content": verify_nudge(self.workdir)})
+                    continue
+                # Did this turn touch something it agreed not to?
+                if self._contract_breach_note():
                     continue
                 # Did this turn change one half of a pair? See riskmap.py.
                 if self._sibling_nudge():
@@ -1559,6 +1593,80 @@ class Agent:
         return "\n".join(lines)
 
     # -- fresh-eyes review (High/Max) ------------------------------------- #
+
+    def _cancel_prefetch(self) -> None:
+        """Never waits. The whole point is that the user's next turn does not
+        queue behind work nobody asked for."""
+        pref = getattr(self, "_prefetch", None)
+        if pref is not None:
+            pref.cancel()
+
+    def _start_prefetch(self) -> None:
+        """Warm the caches the next turn will want, now that nobody is waiting.
+
+        Main chat agent only, and it makes no model request -- that is the
+        entire basis on which it is allowed to run unasked, so there is nothing
+        to configure about how much it may spend.
+        """
+        if self.conversational or not self.allow_subagents:
+            return
+        if not getattr(self.cfg, "prefetch_between_turns", True):
+            return
+        try:
+            from .prefetch import Prefetch
+            if self._prefetch is None:
+                self._prefetch = Prefetch()
+            self._prefetch.start(self.workdir, sorted(self._turn_wrote_paths))
+        except Exception:
+            pass       # nothing here is load-bearing; see prefetch.py
+
+    def _set_contract_tool(self, goal: str, must_not_change=None,
+                           check: str = "") -> str:
+        """Agree what this task is for, before doing it.
+
+        A tool call rather than something derived silently: a contract the
+        agent invented and then graded itself against is writing its own
+        rubric and marking its own homework. As a call it appears in the chat
+        as an ordinary visible step, and the user can say "no, not that"
+        before any work happens -- which is the whole of the confirmation.
+        """
+        from .contract import make, summary
+        contract = make(goal, must_not_change, check)
+        if contract.is_empty():
+            raise ToolError("set_contract needs at least a goal, a file that must "
+                            "not change, or a check command.")
+        self.contract = contract
+        self._contract_reported = False
+        self.rebuild_system_prompt()   # it lives in messages[0], so install it now
+        return (f"Agreed: {summary(contract)}.\nThis is now in front of you for "
+                f"the rest of the task, and your final report is judged against "
+                f"it. Changing it is a conversation with the user, not a tool call.")
+
+    def _contract_breach_note(self) -> bool:
+        """Did this turn touch something the contract says it must not?
+
+        Reported, never reverted: undoing a file on the agent's own judgement
+        is the revert_worker mistake, which threw away work nobody asked it to
+        touch. Once per turn, because the point is to surface it, not to nag.
+        """
+        if self._contract_reported or self.contract is None:
+            return False
+        if not self._turn_wrote_paths:
+            return False
+        self._contract_reported = True
+        try:
+            from .contract import violation_note, violations
+            hits = violations(self.contract, sorted(self._turn_wrote_paths),
+                              self.workdir)
+        except Exception:
+            return False
+        if not hits:
+            return False
+        for hit in hits[:4]:
+            self.events.warn(f"{hit['path']} was agreed not to change "
+                             f"(matches \"{hit['pattern']}\")")
+        self.messages.append({"role": "user", "content": violation_note(hits)})
+        return True
 
     def _sibling_nudge(self) -> bool:
         """Did this turn edit one half of a pair the history says move together?
@@ -1968,6 +2076,10 @@ class Agent:
             # not just in future sessions (which pick it up naturally
             # since it's read from disk on every fresh Agent init).
             self.rebuild_system_prompt()
+        elif name == SET_CONTRACT_TOOL:
+            output = self._set_contract_tool(
+                args.get("goal", ""), args.get("must_not_change", []),
+                args.get("check", ""))
         elif name == REVIEW_CHANGES_TOOL:
             output = self._review_changes_tool()
         elif name == "todo_write":

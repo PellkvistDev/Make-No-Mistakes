@@ -2571,6 +2571,78 @@ non-Python command gets its output and an explicit "no trace collected —
 `trace_run` only sees Python". Naming the limit is the difference between a
 tool that does not apply and one that looks broken.
 
+## Nothing durable sat between the prompt and the diff
+
+Over a long turn a weak model does something ADJACENT to what was asked,
+verifies that, and reports DONE — honestly, by its own lights.
+`HONEST_REPORT_RULE` fixed the reporting of that: it catches the model that
+knows it fell short. It cannot catch the model that does not.
+
+`glmcode/contract.py` is three things agreed at the top of a task: what must
+become true (the user's words), what must not change, and how we will know.
+Only the second is mechanically checkable, and that is deliberately where the
+weight sits — "did it achieve the goal" is a judgement this does not pretend
+to make, while "did it change something it promised not to" is a set
+difference.
+
+- **A violation is REPORTED, never reverted.** Undoing a file on the agent's
+  own judgement is the `revert_worker` mistake, which threw away work nobody
+  asked it to touch. The user is told; they decide; the per-turn snapshots are
+  what a human reverts with.
+- **The model proposes and the conversation is the confirmation.** A contract
+  invented silently and then graded against is the agent writing its own
+  rubric and marking its own homework. `set_contract` is a tool call, so it
+  appears in the chat as an ordinary visible step before any work happens.
+- **It lives in the system prompt, not the history.** A contract that gets
+  compacted away has evaporated on exactly the long turns it exists for.
+- **A directory pattern covers what is inside it.** `fnmatch` does not do
+  this, and somebody writing `tests` and getting no protection from it is the
+  worst way for this to be wrong — it reads as covered. `tests` must also not
+  match `tests-old`, which is the string-prefix bug already written up under
+  *An undo you cannot undo*.
+- **An empty `must_not_change` means nothing was declared off-limits**, which
+  is a different statement from "nothing may change" and must never be read
+  as the latter.
+
+Found by its own test run, and it is the third time this exact shape has
+appeared: `rebuild_system_prompt` read `self.contract` plainly, and it runs
+during `__init__` and against Agents built with `__new__` in the tests, so it
+raised `AttributeError` out of the prompt build. `_chat_base_url`, eight lines
+below, already carried the comment explaining why it uses `getattr` on `self`.
+
+## The free work was never done
+
+Between turns — while the diff is being read, while the next message is being
+typed — the machine is idle and the day's request allowance is unspent. The
+next turn then opens by paying for things that could have been ready.
+
+`glmcode/prefetch.py` warms the two caches the next turn will certainly want:
+`codebase_memory`'s index over the files that just changed, and `riskmap`'s
+parse of the git log.
+
+**It makes no model request, ever.** That is the whole basis on which it runs
+unasked, and it is why there is nothing to configure about how much it may
+spend. `tests/test_prefetch.py` asserts the module's source contains no client
+or completion call at all, because the moment it needed one it would need a
+budget, and it has neither.
+
+- **It never touches the agent** — not `messages`, not the turn lock, not any
+  session state. It populates module-level caches keyed on file content and on
+  the HEAD sha. A background thread writing into agent state is how you get a
+  `tool_call` with no matching reply, which this repository has scar tissue
+  about in three separate places.
+- **The next turn cancels it, and the cancel never blocks.** Work for an
+  abandoned task is pure heat, and a prefetch still running when the user asks
+  something is competing with the thing they are waiting for.
+- **A failure is silent and total.** Everything it does will be done again,
+  correctly and synchronously, by whoever actually needs it.
+- **`join()` is not `cancel(wait=)`.** The tests reached for the latter to
+  mean "wait for it to finish" and measured an aborted run instead — a real
+  gap in the API, not just a bad test.
+
+Only the main chat agent prefetches. A sub-agent or worker finishing is not a
+moment when nobody is waiting: the coordinator is.
+
 ## Tests
 
 The mobile keyboard/composer geometry is covered by
