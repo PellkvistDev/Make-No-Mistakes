@@ -497,6 +497,30 @@
       Nothing matches that. Try a word from the setting's name, like "voice",
       "token" or "backup".</p>
 
+    <!-- Its OWN section, not a heading placed on top of Appearance. The
+         settings search names each group by its section's FIRST h3, so a
+         heading added above an existing one RENAMES that group: Appearance
+         disappeared from the filter entirely, which
+         tests/desktop_ui/test_settings_search.py caught and nobody would
+         have caught by reading.
+
+         Every expensive bug this app has had was something quietly off, with
+         nothing anywhere saying so. Each of those has its own panel, and each
+         panel is somewhere you only go once you already suspect that thing.
+         This is the one place that asks all of them at once. -->
+    <section data-tab="general">
+      <h3>Setup</h3>
+      <div class="row">
+        <div class="row-text"><label>Check my setup</label>
+          <span class="row-sub" id="setup-check-sub">Looks for anything that is
+            switched off, half-configured or quietly damaged.</span></div>
+        <div class="row-actions">
+          <button id="setup-check" class="btn btn-ghost">Run the check</button>
+        </div>
+      </div>
+      <ul id="setup-check-results" class="check-list" hidden></ul>
+    </section>
+
     <section data-tab="general">
       <h3>Appearance</h3>
       <div class="row">

@@ -119,7 +119,11 @@ def test_reopening_settings_does_not_keep_the_last_filter(desktop):
     desktop.page.evaluate("() => document.getElementById('settings-btn').click()")
     desktop.page.wait_for_timeout(300)
     assert desktop.page.input_value("#settings-search") == ""
-    assert _search(desktop, "") == ["General/Appearance", "General/Notifications"]
+    # The whole General tab, unfiltered. Enumerated rather than counted so a
+    # group vanishing from it is a failure -- which is why adding one means
+    # updating this line, and "Setup" is a real new group at the top of it.
+    assert _search(desktop, "") == ["General/Setup", "General/Appearance",
+                                    "General/Notifications"]
 
 
 def test_escape_clears_the_filter_before_it_closes_the_sheet(desktop):

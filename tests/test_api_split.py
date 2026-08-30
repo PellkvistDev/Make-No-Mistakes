@@ -12,6 +12,9 @@ subject with its own vocabulary rather than a convenient length:
   - GitHubApi  -- cloning, connecting, the token, push and pull, and reviewing
                   a pull request: everything that speaks `githubsync` about the
                   chat's own repository.
+  - CheckupApi -- "is any of this actually working": one panel that asks every
+                  other subject at once. It reaches into all of them and is
+                  about none of them, which is exactly what a mixin is for.
 
 What these tests protect is the property that makes the split safe to repeat:
 the bridge JavaScript calls must be unchanged. pywebview exposes the Api
@@ -29,6 +32,7 @@ sys.modules.setdefault("webview", types.SimpleNamespace(
     Window=object, FOLDER_DIALOG=object(), OPEN_DIALOG=object(), SAVE_DIALOG=object()))
 
 from glmcode.gui import app as gui_app  # noqa: E402
+from glmcode.gui import checkup_api  # noqa: E402
 from glmcode.gui import devices_api  # noqa: E402
 from glmcode.gui import github_api  # noqa: E402
 from glmcode.gui import voice_api  # noqa: E402
@@ -63,9 +67,11 @@ GITHUB_BRIDGE = [
     "github_open_pulls", "github_review_pr", "github_address_pr",
     "github_setup_phone_access",
 ]
+CHECKUP_BRIDGE = ["self_check"]
 MIXINS = [(devices_api.DeviceApi, DEVICE_BRIDGE), (voice_api.VoiceApi, VOICE_BRIDGE),
-          (github_api.GitHubApi, GITHUB_BRIDGE)]
-BRIDGE = DEVICE_BRIDGE + VOICE_BRIDGE + GITHUB_BRIDGE
+          (github_api.GitHubApi, GITHUB_BRIDGE),
+          (checkup_api.CheckupApi, CHECKUP_BRIDGE)]
+BRIDGE = DEVICE_BRIDGE + VOICE_BRIDGE + GITHUB_BRIDGE + CHECKUP_BRIDGE
 
 
 def test_every_moved_method_is_still_callable_on_api():
@@ -111,6 +117,10 @@ def test_the_private_helpers_moved_with_the_methods_that_use_them():
     for name in ("_clone_root", "_gh_token", "_active_repo_coords",
                  "_format_pr_comments"):
         assert name in vars(github_api.GitHubApi), f"{name} did not move"
+    for name in ("self_check", "_check_git", "_check_backups", "_check_credentials",
+                 "_check_model", "_check_sync", "_check_extension",
+                 "_check_browser_model", "_check_ci"):
+        assert name in vars(checkup_api.CheckupApi), f"{name} did not move"
 
 
 def test_app_py_actually_got_smaller():
@@ -132,7 +142,8 @@ def test_nothing_on_a_mixin_reaches_for_a_global():
     would work today and break the next time a seam is cut -- and a lazy
     `from .app import X` inside a function is the same leak wearing a hat,
     since it only exists to dodge the import cycle the seam is meant to end."""
-    for name in ("devices_api.py", "voice_api.py", "github_api.py"):
+    for name in ("devices_api.py", "voice_api.py", "github_api.py",
+                 "checkup_api.py"):
         src = (GUI / name).read_text(encoding="utf-8")
         for forbidden in ("_chats[", "from .app import", "import app"):
             assert forbidden not in src.replace("self._chats[", ""), f"{name}: {forbidden}"

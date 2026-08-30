@@ -2495,3 +2495,37 @@ body.voice-on::after {
                     inset 0 0 44px rgba(52, 199, 89, 0.16); }
 }
 
+
+/* ---- "Check my setup" -------------------------------------------------
+ * The status is a WORD, with the colour as reinforcement rather than as the
+ * message: "worth fixing" and "broken" are different instructions, and a
+ * coloured dot alone is a puzzle to be solved before the row can be read.
+ * It also has to survive being looked at by someone who cannot tell the two
+ * hues apart.
+ */
+.check-list { list-style: none; margin: 8px 0 4px; padding: 0;
+              display: flex; flex-direction: column; gap: 6px; }
+/* --stroke, not an invented --line: an undefined custom property makes the
+   whole `border` shorthand invalid at computed-value time, so border-style
+   stays `none` and the width computes to 0px. The colours below were all
+   correct and NOTHING was drawn -- which the tests could not see and a
+   screenshot settled in one look. */
+.check-row { border: 1px solid var(--stroke-soft); border-left-width: 3px;
+             border-radius: var(--r-xs); padding: 8px 10px;
+             background: var(--glass); }
+.check-head { display: flex; align-items: baseline; gap: 8px; }
+.check-name { font-size: 13px; }
+.check-tag { font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase;
+             font-weight: 600; flex: none; }
+.check-detail { font-size: 12px; color: var(--text-faint); margin-top: 3px; }
+/* The fix is the point of the row, so it is not fainter than the problem. */
+.check-fix { font-size: 12px; margin-top: 5px; }
+.check-ok { border-left-color: color-mix(in srgb, var(--green) 60%, transparent); }
+.check-ok .check-tag { color: var(--green); }
+.check-warn { border-left-color: color-mix(in srgb, var(--warn) 70%, transparent); }
+.check-warn .check-tag { color: var(--warn); }
+.check-fail { border-left-color: color-mix(in srgb, var(--danger) 70%, transparent); }
+.check-fail .check-tag { color: var(--danger); }
+/* Deliberately not red: "I couldn't test this" is not a verdict on the thing. */
+.check-unknown { border-left-color: var(--stroke); }
+.check-unknown .check-tag { color: var(--text-faint); }

@@ -4765,6 +4765,53 @@ $("sync-code-copy").addEventListener("click", () => {
 });
 $("sync-repair").addEventListener("click", (e) => rebuildSyncIndex(e.currentTarget));
 
+/* ---- "Check my setup" -------------------------------------------------
+ * Rendered as text, not icons alone: "warn" and "fail" are different
+ * instructions, and a coloured dot on its own is a puzzle. Every row that
+ * isn't ok carries what to DO about it -- a diagnostic that only names what
+ * is wrong sends you back to the panel you already didn't think to open.
+ */
+const CHECK_WORDS = { ok: "OK", warn: "Worth fixing", fail: "Broken",
+                      unknown: "Couldn't check" };
+
+async function runSetupCheck(btn) {
+  const list = $("setup-check-results");
+  const res = await ghAction(btn, () => api().self_check());
+  if (!res) return;
+  list.innerHTML = "";
+  for (const c of res.checks || []) {
+    const li = document.createElement("li");
+    li.className = "check-row check-" + (c.status || "unknown");
+    const head = document.createElement("div");
+    head.className = "check-head";
+    const tag = document.createElement("span");
+    tag.className = "check-tag";
+    tag.textContent = CHECK_WORDS[c.status] || c.status;
+    const name = document.createElement("span");
+    name.className = "check-name";
+    name.textContent = c.label || c.id;
+    head.append(tag, name);
+    const detail = document.createElement("div");
+    detail.className = "check-detail";
+    detail.textContent = c.detail || "";
+    li.append(head, detail);
+    if (c.fix) {
+      const fix = document.createElement("div");
+      fix.className = "check-fix";
+      fix.textContent = c.fix;
+      li.append(fix);
+    }
+    list.append(li);
+  }
+  list.hidden = false;
+  const n = res.problems || 0;
+  $("setup-check-sub").textContent = n
+    ? `${n} thing${n === 1 ? "" : "s"} worth looking at.`
+    : "Everything checks out.";
+}
+
+$("setup-check").addEventListener("click", (e) => runSetupCheck(e.currentTarget));
+
 $("sync-pass-forget").addEventListener("click", async () => {
   if (!confirm("Turn off shared chats on this computer? Your chats stay on GitHub (still " +
                "encrypted). You'll need the recovery code to read them here again — show and " +
